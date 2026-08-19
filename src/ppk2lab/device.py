@@ -63,11 +63,12 @@ def _drain_input(transport: Transport, *, max_seconds: float = 3.0, quiet_reads:
 
 
 def _metadata_terminated(buf: bytes | bytearray) -> bool:
-    """True once the metadata reply's ``END`` terminator sits at a line start.
+    """True once the metadata reply carries ``END`` at a line start.
 
-    Anchoring to a line boundary stops stray bytes that happen to spell
-    ``END`` (binary residue from an interrupted stream) from truncating an
-    otherwise complete reply.
+    Requiring the newline makes stray bytes that happen to spell ``END``
+    (binary residue from an interrupted stream) far less likely to truncate
+    an otherwise complete reply. It is a substring search over the buffer,
+    not a guarantee: residue containing ``\nEND`` would still match.
     """
     return buf.startswith(b"END") or b"\nEND" in buf or b"\rEND" in buf
 
@@ -112,6 +113,11 @@ class PPK2:
         #: thread would silently corrupt 4-byte framing.
         self._stream_active = False
         self._lock = threading.RLock()
+        #: The most recent streaming session, kept so a capture can report
+        #: what its parser observed (desyncs, truncated gap tables).
+        self.last_session: StreamSession | None = None
+        #: Bytes discarded after the last stop command.
+        self.stale_bytes_after_stop = 0
 
     # -- guards ------------------------------------------------------------
     def _require_no_active_stream(self, action: str) -> None:
@@ -585,7 +591,10 @@ class PPK2:
     ) -> Iterator[SampleBlock | GapEvent]:
         """Start measuring and yield loss-aware stream events.
 
-        Stops measuring when the iterator is closed or exhausted.
+        Stops measuring when the iterator is closed or exhausted. Claiming the
+        device happens here rather than inside the generator body, so the
+        claim is made when the caller asks for the stream and not deferred to
+        whenever they first iterate it.
         """
         from .types import SAMPLE_RATE_HZ
 
@@ -599,12 +608,27 @@ class PPK2:
                 wall_timeout_s = duration_s * 3 + 10.0
             elif sample_limit is not None:
                 wall_timeout_s = (sample_limit / SAMPLE_RATE_HZ) * 3 + 10.0
-        self._require_no_active_stream("start another stream")
+        with self._lock:
+            # Check-and-claim must be atomic, or two threads both see an idle
+            # device and interleave reads into one 4-byte framing stream.
+            self._require_no_active_stream("start another stream")
+            self._stream_active = True
         session = StreamSession(self.transport)
-        self._stream_active = True
-        self.start_measuring()
-        session.start()
+        self.last_session = session
+        return self._stream_events(session, sample_limit, wall_timeout_s)
+
+    def _stream_events(
+        self,
+        session: StreamSession,
+        sample_limit: int | None,
+        wall_timeout_s: float | None,
+    ) -> Iterator[SampleBlock | GapEvent]:
         try:
+            # start_measuring and session.start are inside the try: if either
+            # raises, the claim must still be released or the handle is stuck
+            # rejecting every later command for a stream that never began.
+            self.start_measuring()
+            session.start()
             yield from session.events(sample_limit=sample_limit, wall_timeout_s=wall_timeout_s)
         finally:
             self._stream_active = False
@@ -613,6 +637,12 @@ class PPK2:
                 self.stop_measuring()
             except Exception:
                 self.state.measuring = False
+            # Bytes already in flight when the stop command lands would
+            # otherwise be parsed as the head of the next session on this
+            # handle, silently shifting its framing.
+            self.stale_bytes_after_stop = _drain_input(
+                self.transport, max_seconds=0.5, quiet_reads=2
+            )
 
     def capture(self, **kwargs: Any):
         """Capture to a :class:`~ppk2lab.capture.model.Capture`; see

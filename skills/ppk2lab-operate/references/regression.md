@@ -29,6 +29,12 @@ Exit codes: 0 all passed; 1 failed or anchor event missing; **6 = an
 evaluation window overlaps missing data — neither pass nor fail; rerun the
 capture rather than ignoring it.**
 
+An `energy` rule needs a defensible supply voltage. Against an ampere-mode
+capture the observed value is `null` and the rule cannot be evaluated; pass
+`--assume-voltage-mv` with the DUT's real supply, and record that assumption
+alongside the threshold so the verdict stays reproducible. `charge` rules
+need no voltage at all and are the safer choice when the supply is unknown.
+
 ## Evidence discipline
 
 - Archive the capture (or at least `capture_sha256`) with the verdict;

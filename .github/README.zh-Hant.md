@@ -67,7 +67,7 @@ ppk2lab doctor --json
 
 ### Codex 外掛與獨立 skills
 
-以 `/plugins` 開啟 Codex 外掛瀏覽器，加入本儲存庫 marketplace 並安裝 `ppk2lab`。確切的非互動式指令將在發布前依當時的 Codex 版本重新驗證。
+`skills/` 內是純 `SKILL.md` 檔案，Codex 可直接載入；目前尚未發布 Codex plugin manifest，請改用下方的獨立 skill 路徑。
 
 儲存庫層級的獨立 skills 放在 `.agents/skills/`；使用者層級的安裝方式：
 

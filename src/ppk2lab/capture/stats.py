@@ -61,10 +61,16 @@ class VoltageContext:
                 f"energy uses the {self.voltage_mv} mV source setpoint; the DUT terminal "
                 "voltage is slightly lower (shunt burden and lead drop are not measured)"
             )
+        if self.mode == "ampere":
+            return (
+                f"ampere mode: the device's {self.voltage_mv} mV field is a source "
+                "setpoint, not the DUT's own supply, so energy is not derived. Pass the "
+                "DUT's real supply voltage to compute it."
+            )
         return (
-            f"ampere mode: the device's {self.voltage_mv} mV field is a source setpoint, "
-            "not the DUT's own supply, so energy is not derived. Pass the DUT's real "
-            "supply voltage to compute it."
+            f"the {self.voltage_mv} mV reading has no recorded provenance, so it cannot "
+            "be trusted as the DUT's supply. Pass the DUT's real supply voltage to "
+            "compute energy."
         )
 
 
@@ -73,17 +79,23 @@ def voltage_context_from_capture(
 ) -> VoltageContext:
     """Build the energy voltage context for a stored capture."""
     config = getattr(capture.meta, "configuration", {}) or {}
+    mode = config.get("mode")
     if assume_voltage_mv is not None:
         return VoltageContext(
             voltage_mv=assume_voltage_mv,
             basis=VoltageBasis.CALLER_OVERRIDE.value,
-            mode=config.get("mode"),
+            mode=mode,
         )
-    return VoltageContext(
-        voltage_mv=capture.source_voltage_mv,
-        basis=config.get("voltage_basis", VoltageBasis.UNKNOWN.value),
-        mode=config.get("mode"),
-    )
+    basis = config.get("voltage_basis")
+    if basis is None:
+        # Artifacts written before voltage provenance was recorded still say
+        # which mode they ran in, and in Source Meter mode the stored voltage
+        # is the setpoint the DUT ran from. Inferring that keeps their energy
+        # figures intact instead of silently voiding them.
+        basis = (
+            VoltageBasis.DEVICE_METADATA.value if mode == "source" else VoltageBasis.UNKNOWN.value
+        )
+    return VoltageContext(voltage_mv=capture.source_voltage_mv, basis=basis, mode=mode)
 
 
 @dataclass
@@ -128,8 +140,19 @@ class WindowStats:
 
     @property
     def charge_is_lower_bound(self) -> bool:
-        """True when missing samples make charge/energy an underestimate."""
-        return self.gap_count > 0
+        """True when charge/energy understate what the DUT actually drew.
+
+        Gaps are the obvious cause, but a sample excluded for any other
+        reason — an invalid range field, missing calibration, a value beyond
+        what the hardware can carry — is charge that happened and was not
+        counted, which makes the integral a lower bound just the same.
+        """
+        return bool(
+            self.gap_count
+            or self.invalid_range_samples
+            or self.nan_samples
+            or self.implausible_samples
+        )
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -177,7 +200,13 @@ class StatsAccumulator:
         self.invalid_range = 0
         self.nans = 0
         self.implausible = 0
+        # Neumaier-compensated sum. A plain running total grows without bound
+        # over an hours-long capture: once it is large enough, a sub-microamp
+        # sleep sample is smaller than the total's own ULP and stops
+        # contributing at all — the samples that matter most for a low-power
+        # measurement are exactly the ones that vanish.
         self.total = 0.0
+        self._compensation = 0.0
         self.min_v: float | None = None
         self.max_v: float | None = None
         self.peak_index: int | None = None
@@ -200,21 +229,35 @@ class StatsAccumulator:
                 self.implausible += 1
                 continue
             self.valid += 1
-            self.total += value
+            running = self.total + value
+            if abs(self.total) >= abs(value):
+                self._compensation += (self.total - running) + value
+            else:
+                self._compensation += (value - running) + self.total
+            self.total = running
             if self.min_v is None or value < self.min_v:
                 self.min_v = value
             if self.max_v is None or value > self.max_v:
                 self.max_v = value
                 self.peak_index = block.start_index + offset
 
+    #: See CaptureBuilder.MAX_GAPS.
+    MAX_GAPS = 10_000
+
     def add_gap(self, gap: GapEvent) -> None:
-        self.gaps.append(gap)
+        if len(self.gaps) < self.MAX_GAPS:
+            self.gaps.append(gap)
         self.gap_count += 1
         if gap.missing is None:
             self.unknown_gaps = True
         else:
             self.missing_known += gap.missing
             self.end_index = max(self.end_index, gap.index + gap.missing)
+
+    @property
+    def compensated_total(self) -> float:
+        """The running sum with its accumulated rounding error folded back in."""
+        return self.total + self._compensation
 
     def finalize(
         self,
@@ -224,7 +267,8 @@ class StatsAccumulator:
     ) -> WindowStats:
         if voltage is None:
             voltage = VoltageContext(voltage_mv=source_voltage_mv)
-        charge = self.total * SAMPLE_PERIOD_S if self.valid else None
+        total = self.compensated_total
+        charge = total * SAMPLE_PERIOD_S if self.valid else None
         energy = None
         if charge is not None and voltage.energy_defensible:
             assert voltage.voltage_mv is not None
@@ -240,7 +284,7 @@ class StatsAccumulator:
             invalid_range_samples=self.invalid_range,
             nan_samples=self.nans,
             implausible_samples=self.implausible,
-            mean_ua=(self.total / self.valid) if self.valid else None,
+            mean_ua=(total / self.valid) if self.valid else None,
             min_ua=self.min_v,
             max_ua=self.max_v,
             peak_index=self.peak_index,
@@ -286,6 +330,8 @@ def compute_stats(
     spike = SpikeFilter() if filtered else None
     for event in capture.iter_events():
         if isinstance(event, GapEvent):
+            if event.index >= hi:
+                break
             if spike:
                 spike.notify_gap()
             if event.missing is None:
@@ -306,7 +352,12 @@ def compute_stats(
                 acc.add_gap(clipped)
             continue
         block = event
-        if block.end_index <= lo or block.start_index >= hi:
+        if block.start_index >= hi:
+            # Events arrive in timeline order, so nothing further can fall
+            # inside the window. Without this, measuring one annotation walks
+            # the whole capture, and measuring N annotations walks it N times.
+            break
+        if block.end_index <= lo:
             continue
         s = max(0, lo - block.start_index)
         e = min(len(block), hi - block.start_index)

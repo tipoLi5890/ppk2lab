@@ -31,7 +31,13 @@ from ppk2lab.diagnostics import (
 from ppk2lab.discovery import _classify, _interface_number
 from ppk2lab.errors import CaptureFileError, UsageError, VoltageRangeError
 from ppk2lab.exports import export_csv
-from ppk2lab.protocol.samples import SampleBlock, SampleStreamParser, pack_sample
+from ppk2lab.protocol.samples import (
+    COUNTER_MASK,
+    DESYNC_CONSECUTIVE_MISMATCHES,
+    SampleBlock,
+    SampleStreamParser,
+    pack_sample,
+)
 from ppk2lab.testing.profiles import StepProfile
 from ppk2lab.transport.mock import MockTransport, SimulatedPPK2
 from ppk2lab.types import GapEvent, Mode, PortInfo, PortRole, VoltageBasis
@@ -273,7 +279,16 @@ def _raw_stream(n: int, adc: int = 100, range_index: int = 1) -> bytes:
 
 
 @pytest.mark.parametrize("lost_bytes", [1, 2, 3])
-def test_partial_byte_loss_is_detected_and_realigned(lost_bytes):
+def test_partial_byte_loss_does_not_fabricate_timeline(lost_bytes):
+    """A lost byte must not become invented elapsed time.
+
+    The counter field of a shifted word reads bits belonging to its
+    neighbours, so treating each mismatch as a device-side skip advances the
+    timeline by a random amount per word. Losing one byte this way inflated a
+    2000-sample stream to next_index 5713 — 3715 phantom samples, 37 ms of
+    time that never happened — which is the very failure the timeline is
+    supposed to make impossible.
+    """
     parser = SampleStreamParser()
     data = _raw_stream(2000)
     corrupted = data[:4000] + data[4000 + lost_bytes :]
@@ -281,10 +296,52 @@ def test_partial_byte_loss_is_detected_and_realigned(lost_bytes):
     for offset in range(0, len(corrupted), 137):  # arbitrary chunking
         events.extend(parser.feed(corrupted[offset : offset + 137]))
     gaps = [e for e in events if isinstance(e, GapEvent)]
+
     assert parser.desync_events == 1
-    assert any(g.reason == "stream_desync" for g in gaps)
-    # Realignment recovers the stream instead of discarding the remainder.
+    assert [g.reason for g in gaps] == ["stream_desync"]  # no counter_skip at all
+    assert sum(g.missing or 0 for g in gaps) == 0  # nothing fabricated
+    assert parser.timeline_degraded  # the loss is still declared
+    assert parser.next_index == 1995  # honest slight under-count, not 5713
+    assert parser.samples_emitted == 1995  # realignment recovered the stream
+
+
+@pytest.mark.parametrize("chunking", [4, 8, 16, 137, 512, 8192])
+def test_desync_timeline_inflation_is_bounded_for_any_chunking(chunking):
+    """State the guarantee rather than relying on a lucky chunk size.
+
+    At most one unconfirmed gap can be flushed per feed() call, and the
+    consecutive-mismatch counter is parser-wide, so the verdict caps the leak
+    regardless of how the bytes arrive.
+    """
+    parser = SampleStreamParser()
+    data = _raw_stream(2000)
+    corrupted = data[:4000] + data[4001:]
+    events = []
+    for offset in range(0, len(corrupted), chunking):
+        events.extend(parser.feed(corrupted[offset : offset + chunking]))
+    skips = [e for e in events if isinstance(e, GapEvent) and e.reason == "counter_skip"]
+    assert len(skips) <= DESYNC_CONSECUTIVE_MISMATCHES - 1
+    assert sum(g.missing for g in skips) <= (DESYNC_CONSECUTIVE_MISMATCHES - 1) * COUNTER_MASK
+    assert parser.desync_events == 1
     assert parser.samples_emitted > 1900
+
+
+def test_unrecoverable_bytes_do_not_cause_a_desync_storm():
+    """Bytes with no recoverable framing must be dropped once, not re-entered.
+
+    Adopting the best-scoring offset unconditionally re-desyncs a few words
+    later and loops; a minimum score turns that into a single event.
+    """
+    import random
+
+    parser = SampleStreamParser()
+    rng = random.Random(7)
+    counters = list(range(100)) + [rng.randrange(64) for _ in range(1900)]
+    data = b"".join(struct.pack("<I", pack_sample(100, 1, c & 0x3F, 0)) for c in counters)
+    parser.feed(data)
+    assert parser.desync_events == 1
+    assert parser.next_index == 100  # only the clean prefix reached the timeline
+    assert parser.flush_stats()["missing_samples_known"] == 0
 
 
 def test_real_gaps_do_not_look_like_a_desync():
@@ -508,3 +565,126 @@ def test_sample_block_helpers_still_agree_with_raw_words():
     assert block.ranges == bytes([2])
     assert block.counters == bytes([5])
     assert block.logic == bytes([0xA5])
+
+
+# ---------------------------------------------------------------------------
+# Regressions found by auditing the integrity work itself
+
+
+def test_older_artifact_keeps_its_energy(tmp_path):
+    """Provenance was added later; a stored source-mode capture predates it.
+
+    Voiding those energy figures would be a silent regression, so the mode
+    recorded in the artifact stands in for the missing basis.
+    """
+    capture = capture_of(StepProfile([(500, 1000.0, 0)]), samples=500)
+    capture.meta.configuration.pop("voltage_basis", None)
+    capture.meta.configuration.pop("voltage_measured", None)
+    assert capture.meta.configuration["mode"] == "source"
+    stats = compute_stats(capture)
+    assert stats.energy_uj is not None
+    assert stats.voltage_basis == VoltageBasis.DEVICE_METADATA.value
+
+
+def test_uncalibrated_capture_is_not_reported_as_starved():
+    """The timeline is a property of the stream, not of the conversion.
+
+    Reading the extent from the statistics accumulator meant a device opened
+    without metadata advanced by zero and every capture looked 100% starved.
+    """
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True, read_metadata=False)
+    try:
+        result = device.capture(duration_s=0.05)
+    finally:
+        device.close()
+    assert result.timeline["timeline_advance"] >= 5000
+    assert result.timeline["rate_check"] != "deficit"
+    assert result.complete
+
+
+def test_triggered_capture_declines_the_rate_check():
+    """Pre-trigger samples are emitted at the fire moment.
+
+    Wall time then covers only the post-trigger window while the timeline
+    covers both, so the ratio compares two different intervals — it could
+    read 200 kS/s, or hide a 50% loss as healthy.
+    """
+    from ppk2lab.triggers.engine import DigitalEdgeTrigger, TriggerEngine
+
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True)
+    try:
+        engine = TriggerEngine(
+            DigitalEdgeTrigger(1, rising=True), pre_samples=1000, post_samples=2000
+        )
+        result = device.capture(trigger_engine=engine, trigger_timeout_s=5)
+    finally:
+        device.close()
+    assert result.timeline["rate_check"] == "not_applicable"
+    assert result.timeline["achieved_sample_rate_hz"] is None
+
+
+def test_failed_stream_start_does_not_brick_the_handle():
+    """Claiming the device before start meant a transient write error left
+    the claim set forever, and every later command blamed a stream that had
+    never begun."""
+    simulator = SimulatedPPK2()
+    device = PPK2.open(transport=MockTransport(simulator), simulate=True)
+    original_write = device.transport.write
+
+    def failing_write(data):
+        if data == b"\x06":  # start measuring
+            raise RuntimeError("simulated USB write failure")
+        return original_write(data)
+
+    device.transport.write = failing_write
+    try:
+        with pytest.raises(RuntimeError):
+            list(device.stream(sample_limit=10))
+        device.transport.write = original_write
+        device.refresh_metadata()  # must not raise "a stream is active"
+        assert device.capture(duration_s=0.01).stats is not None
+    finally:
+        device.transport.write = original_write
+        device.close()
+
+
+def test_in_memory_guard_cannot_be_bypassed_with_an_output_path():
+    """The RAM cost comes from keeping samples, not from the absence of a file."""
+    device = open_simulated()
+    try:
+        with pytest.raises(UsageError):
+            device.capture(duration_s=120, output="unused.ppk2a", keep_in_memory=True)
+    finally:
+        device.close()
+
+
+def test_desync_is_reported_as_a_coded_warning():
+    """A warning code nothing emits is a contract that does not exist."""
+    from ppk2lab.diagnostics import W_STREAM_DESYNC
+
+    device = open_simulated()
+    try:
+        result = device.capture(duration_s=0.05)
+        # No desync in a healthy capture...
+        assert W_STREAM_DESYNC not in _codes(result.warnings)
+        # ...but the parser's count is what drives the warning.
+        assert device.last_session is not None
+        assert hasattr(device.last_session.parser, "desync_events")
+    finally:
+        device.close()
+
+
+def test_consecutive_captures_do_not_inherit_stale_bytes():
+    """Bytes in flight when stop lands would otherwise be parsed as the head
+    of the next capture on the same handle, shifting its framing."""
+    device = open_simulated()
+    try:
+        first = device.capture(duration_s=0.02)
+        second = device.capture(duration_s=0.02)
+        assert first.stats is not None and second.stats is not None
+        assert second.stats.stored_samples >= 1900
+        assert second.timeline["timeline_advance"] >= 1900
+        assert device.last_session is not None
+        assert device.last_session.parser.desync_events == 0
+    finally:
+        device.close()

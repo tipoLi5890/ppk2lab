@@ -18,7 +18,10 @@ Nothing here changes hardware state.
 4. Interrupted previous sessions (device left streaming) are recovered
    automatically at open (stop + drain); doctor reports it as
    `session_recovery`.
-5. Optional stream verification (measurement only, never DUT power):
+5. Learn the vocabulary from the tool, not from memory:
+   `ppk2lab capabilities --json` lists every command, every error code, and
+   every `W_*` warning code with its meaning.
+6. Optional stream verification (measurement only, never DUT power):
    `ppk2lab doctor --stream-check 1s --json` — expect `stream_rate` and
    `stream_gaps` to pass.
 

@@ -30,8 +30,12 @@ for entry in measure_annotations(capture, annotations, kinds=["transaction"]):
     meas = entry["measurement"]
     mosi = [f"0x{v:02x}" for v in ann["fields"]["mosi_words"]]
     miso = [f"0x{v:02x}" for v in ann["fields"]["miso_words"]]
+    # Energy is None whenever no defensible supply voltage is known (ampere
+    # mode); the meter never measures the DUT's voltage.
+    energy = meas["energy_uj"]
+    energy_text = "n/a (no supply voltage known)" if energy is None else f"{energy:.4f} uJ"
     print(
         f"transaction {ann['start_sample']}-{ann['end_sample']}: "
         f"mosi {mosi} miso {miso} "
-        f"charge {meas['charge_uc']:.4f} uC energy {meas['energy_uj']:.4f} uJ"
+        f"charge {meas['charge_uc']:.4f} uC energy {energy_text}"
     )

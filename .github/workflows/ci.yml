@@ -39,6 +39,13 @@ jobs:
           ppk2lab --simulate capture --duration 200ms --output smoke.ppk2a --json > /dev/null
           ppk2lab decode smoke.ppk2a --uart D0 --baud 9600 --output smoke.jsonl --json > /dev/null
           ppk2lab assert smoke.ppk2a --rule "max_current < 1A" --json > /dev/null
+      - name: Examples (simulated device)
+        shell: bash
+        run: |
+          for example in examples/*.py; do
+            echo "--- $example"
+            python "$example" --simulate > /dev/null
+          done
 
   build:
     name: build sdist/wheel + fresh-venv smoke

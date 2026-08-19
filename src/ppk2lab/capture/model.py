@@ -245,7 +245,12 @@ class CaptureBuilder:
         self.gaps: list[GapEvent] = []
         self.warnings: list[Any] = []
         self.timeline_degraded = False
+        self.gaps_truncated = 0
         self._first_index: int | None = None
+
+    #: A desync storm can produce gaps far faster than anyone can read them;
+    #: past this the count is still exact, only the enumeration stops.
+    MAX_GAPS = 10_000
 
     def add(self, event: SampleBlock | GapEvent) -> None:
         if isinstance(event, SampleBlock):
@@ -254,7 +259,10 @@ class CaptureBuilder:
                 self.meta.start_index = event.start_index
             self.words.extend(event.words)
         else:
-            self.gaps.append(event)
+            if len(self.gaps) < self.MAX_GAPS:
+                self.gaps.append(event)
+            else:
+                self.gaps_truncated += 1
             if event.missing is None:
                 self.timeline_degraded = True
 

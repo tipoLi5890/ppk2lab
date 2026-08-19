@@ -25,5 +25,6 @@ stats = result.stats
 print(f"complete: {result.complete}")
 print(f"stored samples: {stats.stored_samples}  missing: {stats.missing_samples_known}")
 print(f"mean current: {stats.mean_ua:.3f} uA  peak: {stats.max_ua:.3f} uA")
-print(f"charge: {stats.charge_uc:.3f} uC  energy: {stats.energy_uj} uJ")
+energy = "n/a (no supply voltage known)" if stats.energy_uj is None else f"{stats.energy_uj:.3f} uJ"
+print(f"charge: {stats.charge_uc:.3f} uC  energy: {energy}  ({stats.voltage_basis})")
 print(f"artifact: {result.path}  sha256: {result.capture_sha256[:16]}...")

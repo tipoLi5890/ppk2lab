@@ -78,6 +78,50 @@ class Diagnostic:
         return self.message
 
 
+#: What each code means, published through ``ppk2lab capabilities --json`` so
+#: an agent can learn the vocabulary from the tool instead of the source.
+WARNING_CATALOG: dict[str, str] = {
+    W_SAMPLE_GAPS: "The capture contains sample gaps; integrals are lower bounds.",
+    W_TIMELINE_COMPRESSION: (
+        "The sample timeline advanced far slower than the wall clock: samples were lost "
+        "beyond what the 6-bit counter can report."
+    ),
+    W_STREAM_DESYNC: "Byte-level framing was lost and re-established; data around it is suspect.",
+    W_IMPLAUSIBLE_SAMPLES: (
+        "Samples converted to a current the hardware cannot carry and were excluded."
+    ),
+    W_NO_SAMPLES: "The capture stored no samples at all.",
+    W_INTERRUPTED: "The stream was interrupted; partial data was preserved.",
+    W_VOLTAGE_ASSUMED: (
+        "Energy could not be derived because no defensible supply voltage is known. Pass "
+        "the DUT's real supply voltage to compute it."
+    ),
+    W_NOT_CALIBRATED: "The device reports it is not calibrated; absolute accuracy is unconfirmed.",
+    W_CALIBRATION_INCOMPLETE: (
+        "Calibration constants are missing for one or more ranges; those samples do not convert."
+    ),
+    W_USER_GAIN: "A non-unity user gain scales every reading in the affected ranges.",
+    W_METADATA: "Device metadata could not be fully parsed.",
+    W_DUT_POWER_UNKNOWN: (
+        "DUT power state is unknown or off; readings may legitimately be near zero."
+    ),
+    W_STATE_UNVERIFIED: "A state change was applied but its result could not be read back.",
+    W_DRY_RUN: "Nothing was applied because the command ran as a dry run.",
+    W_SESSION_RECOVERED: (
+        "A previous session had left the device streaming; stale data was discarded."
+    ),
+    W_DEVICE_NOT_FOUND: "No device matched the discovery filter.",
+    W_DECODER_RATE: "A decoder is running outside its validated rate tier.",
+    W_TRIGGER: "A trigger never fired.",
+    W_GENERIC: "A condition that does not warrant its own code yet.",
+}
+
+
+def warning_catalog() -> list[dict[str, str]]:
+    """Machine-readable catalog of every stable warning code."""
+    return [{"code": code, "meaning": meaning} for code, meaning in sorted(WARNING_CATALOG.items())]
+
+
 def warn(code: str, message: str) -> Diagnostic:
     """Shorthand constructor, kept short because call sites are dense."""
     return Diagnostic(code=code, message=message)

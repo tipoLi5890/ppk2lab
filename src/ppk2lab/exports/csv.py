@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv as _csv
 import math
 import os
+import pathlib
 
 from ..calibration import SpikeFilter
 from ..capture.model import Capture
@@ -79,6 +80,9 @@ def export_csv(
                 writer.writerow(row)
                 rows += 1
     if rows != capture.stored_count:
+        # A partial export is worse than none: delete it rather than leave a
+        # file that looks complete next to an error the caller may not read.
+        pathlib.Path(path).unlink(missing_ok=True)
         raise CaptureFileError(
             f"CSV export wrote {rows} rows for a capture holding "
             f"{capture.stored_count} samples; refusing to report a partial export as success"

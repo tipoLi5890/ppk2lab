@@ -97,28 +97,27 @@ published by `ppk2lab capabilities --json`.
   `discover-result`, `doctor-result`, `envelope`, `error`, `export-result`,
   `gap`, `info-result`, `measure-result`, `state-change`, `window-stats`.
 
-### Added after the initial baseline draft
+## 4b. Also stable at the subpackage level
 
-These are part of the `0.1.0` surface and were added while hardening against
-failure classes observed in other PPK2 tooling:
+Not every stable name is re-exported at the top level. These are part of the
+`0.1.0` surface and follow the same change policy:
 
 | Name | Kind | Description |
 |---|---|---|
-| `ppk2lab.types.VoltageBasis` | class | Enum recording how a voltage was learned (`caller_override`, `configured_source`, `device_metadata`, `unknown`); energy is only derived from a defensible basis. |
-| `ppk2lab.diagnostics` | module | `Diagnostic(code, message)`, `warn()`, `as_json()`, and the frozen `W_*` warning codes an agent branches on. |
+| `ppk2lab.types.VoltageBasis` | class | Enum recording how a voltage was learned (`caller_override`, `configured_source`, `device_metadata`, `unknown`). Energy is only derived from a defensible basis. |
+| `ppk2lab.diagnostics` | module | `Diagnostic(code, message)`, `warn()`, `as_json()`, `warning_catalog()`, and the frozen `W_*` codes. |
 | `ppk2lab.capture.stats.VoltageContext` | class | The voltage used for energy plus whether it is defensible. |
 | `ppk2lab.capture.runner.timeline_report` | function | Wall-clock cross-check of the sample timeline. |
 | `ppk2lab.errors.StreamStalledError` | class | A device that stopped streaming while keeping its port open (`STREAM_STALLED`). |
 | `PPK2.firmware_fingerprint()` | method | Observable firmware identity (HW, IA, metadata key set, port count). |
-| `PPK2.recover_session()` | method | Stop plus drain of a session left streaming. |
 
-New result fields (append-only, per the stability policy): `voltage_basis`,
+Result fields added under the append-only policy: `voltage_basis`,
 `voltage_measured`, `energy_note`, `charge_is_lower_bound`,
 `samples.implausible`, `samples.covered_fraction` in window statistics;
-`timeline` in capture results; `calibration` and the wall-clock fields in the
-capture manifest; `source_voltage_basis` in device state. Envelope
-`warnings` entries changed from strings to `{code, message}` objects before
-the baseline froze.
+`timeline` in capture results; `calibration`, `gaps_truncated`, and the
+wall-clock fields in the capture manifest; `source_voltage_basis` in device
+state; `warning_codes` in the capabilities manifest. Envelope `warnings`
+entries are `{code, message}` objects.
 
 ## 5. Explicitly NOT frozen (may change without notice)
 

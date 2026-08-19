@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import errno
 import sys
+import threading
+from typing import Any
 
 from ..errors import DeviceNotFoundError, PermissionDeniedError, PortBusyError, TransportError
 from .base import Transport
@@ -14,9 +16,16 @@ DEFAULT_BAUDRATE = 115200
 
 
 class SerialTransport(Transport):
-    def __init__(self, port: str, baudrate: int = DEFAULT_BAUDRATE) -> None:
+    def __init__(
+        self,
+        port: str,
+        baudrate: int = DEFAULT_BAUDRATE,
+        *,
+        open_timeout_s: float = 10.0,
+    ) -> None:
         self.port = port
         self.baudrate = baudrate
+        self.open_timeout_s = open_timeout_s
         self._serial = None
         self._timeout: float | None = None
 
@@ -31,17 +40,41 @@ class SerialTransport(Transport):
                 remediation="Install the package with `pip install ppk2lab` (pyserial is a "
                 "required dependency) or `pip install pyserial`.",
             ) from exc
-        try:
-            self._serial = serial.Serial(
-                self.port,
-                baudrate=self.baudrate,
-                timeout=0.1,
-                write_timeout=2.0,
-                exclusive=True,
+        # Opening is the only blocking step with no budget of its own: a
+        # wedged USB stack can leave the constructor hanging indefinitely,
+        # while every later read, write, and drain is bounded.
+        result: list[Any] = []
+
+        def _open() -> None:
+            try:
+                result.append(
+                    serial.Serial(
+                        self.port,
+                        baudrate=self.baudrate,
+                        timeout=0.1,
+                        write_timeout=2.0,
+                        exclusive=True,
+                    )
+                )
+            except Exception as exc:
+                result.append(exc)
+
+        worker = threading.Thread(target=_open, name="ppk2lab-open", daemon=True)
+        worker.start()
+        worker.join(timeout=self.open_timeout_s)
+        if not result:
+            raise TransportError(
+                f"opening {self.port} did not complete within {self.open_timeout_s:g} s",
+                remediation="The serial stack is not responding. Replug the device, then "
+                "run `ppk2lab doctor --json`.",
             )
-            self._timeout = 0.1
-        except serial.SerialException as exc:
-            raise _map_open_error(self.port, exc) from exc
+        outcome = result[0]
+        if isinstance(outcome, serial.SerialException):
+            raise _map_open_error(self.port, outcome) from outcome
+        if isinstance(outcome, Exception):
+            raise TransportError(f"failed to open {self.port}: {outcome}") from outcome
+        self._serial = outcome
+        self._timeout = 0.1
 
     def close(self) -> None:
         if self._serial is not None:

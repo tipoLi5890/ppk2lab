@@ -28,6 +28,22 @@ the gap table and interruption reason; offer a retry with lower system
 load or shorter duration. On session close the library restores the
 starting power state; relay restoration warnings.
 
+Also read the `timeline` block. The device's 6-bit counter can only describe
+losses under 64 samples (a loss of exactly k*64 is invisible to it), so each
+capture is cross-checked against the wall clock:
+
+- `rate_check: "ok"` — the timeline advanced at roughly 100 kS/s;
+- `"deficit"` — it did not, so samples were lost beyond what the counter
+  reports; `achieved_sample_rate_hz` and `rate_deficit_ratio` quantify it.
+  Usual causes: a loaded host, an unpowered USB hub, a busy USB controller;
+- `"too_short"` / `"not_applicable"` — the check could not run (a capture
+  under two seconds, or a triggered capture whose pre-trigger buffer makes
+  the comparison meaningless).
+
+Without `--output` the capture is held in RAM and is refused beyond 60 s;
+pass `--output` (preferred) or `--in-memory` if buffering is genuinely
+intended.
+
 ## Long recordings (minutes to hours)
 
 Prefer several bounded segments over one unbounded capture — each is an

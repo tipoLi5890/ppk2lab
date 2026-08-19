@@ -15,12 +15,15 @@ The CLI is self-describing. Prefer querying it over any static text
 (including these references) whenever they could disagree:
 
 - `ppk2lab capabilities --json` — live commands and options, state-changing
-  classification, decoder rate tiers, error catalog, exit codes, schema list
+  classification, decoder rate tiers, error catalog, **warning catalog**,
+  exit codes, schema list
 - `ppk2lab schema --list` / `ppk2lab schema <name>` — every JSON contract
 - `ppk2lab doctor --json` — environment and device diagnosis; each failing
   check carries its own `remediation` string — act on it, don't guess
 - Every command supports `--json`; errors carry a stable `code` +
-  `remediation`; branch on those, never on message text
+  `remediation`, and warnings are `{code, message}` too — branch on the
+  codes, never on message text. `capabilities --json` lists what each
+  `W_*` code means
 - `--simulate` runs every command against a built-in simulated PPK2 for
   testing workflows — never report simulated output as a measurement
 
@@ -30,14 +33,24 @@ The CLI is self-describing. Prefer querying it over any static text
    device unless the user asked for it in this task. `configure` is a dry
    run without `--apply`; show the dry run before applying.
 2. Never infer a voltage from a DUT's name. Voltage is explicit millivolts
-   (`--voltage-mv`); if the user has not provided it, stop and ask.
+   (`--voltage-mv`); if the user has not provided it, stop and ask. For a
+   fragile DUT, set a hard ceiling with `--max-voltage-mv` (or
+   `PPK2LAB_MAX_VOLTAGE_MV`): anything above it is refused before a byte
+   reaches the device.
 3. `capture` never touches DUT power. Never pass `--overwrite` without the
    user confirming replacement.
 4. Check `complete` and `sample_gaps` in every result. Exit code 6 means
    data is missing — neither pass nor fail; never present it as success.
-5. Keep `capture_id`/`capture_sha256` with every reported number so
+   Also check `timeline.rate_check`: `deficit` means samples were lost
+   beyond what the device's counter can report, so durations and integrals
+   understate reality.
+5. `energy_uj: null` is an answer, not an error. The meter never measures
+   the DUT's voltage; in ampere mode energy is only computable if the user
+   supplies it (`--assume-voltage-mv`). Never present a figure without its
+   `voltage_basis`.
+6. Keep `capture_id`/`capture_sha256` with every reported number so
    conclusions stay traceable to raw evidence.
-6. `observed_after: false` in a state-change result means "requested, not
+7. `observed_after: false` in a state-change result means "requested, not
    confirmed by the device" — say so.
 
 ## Task → reference map

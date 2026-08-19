@@ -110,10 +110,10 @@ copy `skills/*` there).
 
 ## Codex and loose skills
 
-Open the Codex plugin browser with `/plugins`, add the repository
-marketplace, and install `ppk2lab`. Exact non-interactive commands will be
-verified against the current Codex release before the `0.1.0` release notes
-are frozen.
+The skills in `skills/` are plain `SKILL.md` files that Codex can load
+directly. A Codex plugin manifest is not published yet — the loose-skill
+path below is the supported route, and a manifest will be added once its
+format is verified against the current Codex release.
 
 For repository-scoped loose skills, copy `skills/*` into `.agents/skills/`.
 For a user-wide installation:

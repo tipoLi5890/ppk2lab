@@ -47,6 +47,63 @@ project uses semantic versioning once released.
   queried from the self-describing CLI. Plus the Claude Code plugin
   manifest.
 
+### Fixed (integrity audit of the hardening itself, 2026-08-19)
+
+Auditing the change below against the hardware facts it claims to enforce
+found that parts of it did not hold.
+
+- **A lost byte no longer becomes invented time.** Treating the first
+  counter mismatch as proof of a device-side skip meant a byte-level desync
+  advanced the timeline once per shifted word: a single lost byte inflated a
+  2000-sample stream to 5713 — 3715 phantom samples, 37 ms that never
+  happened. A mismatch is now held until the following samples confirm the
+  framing survived, and the desync verdict always arrives first. Measured
+  phantom samples: 0 at realistic chunk sizes, bounded at 189 for any
+  chunking. Shifted words are discarded instead of being reported as
+  measurements, and unrecoverable bytes are dropped once rather than
+  re-entered word by word.
+- **Stored captures keep their energy.** Artifacts written before voltage
+  provenance existed have no `voltage_basis`; reading them as "unknown"
+  silently voided every source-mode energy figure. The recorded mode now
+  stands in for the missing basis.
+- **An uncalibrated device is no longer reported as starved.** Timeline
+  extent was read from the statistics accumulator, which only advances when
+  samples convert, so a device opened without metadata looked 100% starved
+  and every capture was marked incomplete.
+- **Triggered captures decline the rate check.** Pre-trigger samples are
+  emitted at the fire moment, so wall time covered only the post-trigger
+  window while the timeline covered both — a comparison that could read
+  200 kS/s or hide a 50% loss as healthy. It now reports `not_applicable`.
+- **A failed stream start no longer bricks the handle.** The device was
+  claimed before `start_measuring`, so a transient write error left the
+  claim set and every later command blamed a stream that never began. The
+  claim is also atomic now, and made when the stream is requested rather
+  than when it is first iterated.
+- **An unplugged device is reported as an unplug**, not as a stall: the
+  reader's real error wins over the idle budget even when the queue was full
+  enough to drop its sentinel. The idle budget also measures device silence
+  rather than consumer work.
+- **The in-memory guard cannot be bypassed** by passing an output path, and
+  the read path now refuses to load a capture too large for memory instead
+  of failing after allocating it.
+- `W_STREAM_DESYNC` is actually emitted; gap tables are bounded where they
+  really grow; `charge_is_lower_bound` covers every excluded sample, not
+  only gaps; charge uses compensated summation so sub-microamp samples keep
+  contributing to an hours-long total; measuring N annotations no longer
+  walks the whole capture N times; a terminated capture is preserved instead
+  of left as an unreadable temp file; opening a serial port is bounded.
+
+### Changed
+
+- Agent skills, `docs/agent-interface.md`, and `capabilities --json` now
+  carry the contract they describe: the warning catalog is published so an
+  agent can learn what each `W_*` code means from the tool, and the skills
+  cover `--assume-voltage-mv`, `--max-voltage-mv`, `timeline.rate_check`,
+  and `--in-memory`.
+- Codex install instructions describe what exists (loose skills) rather than
+  a plugin manifest that is not published yet.
+- CI runs every example against the simulated device.
+
 ### Added (measurement-integrity hardening, 2026-08-19)
 
 Properties that follow from the PPK2's own design — a 6-bit sample counter,

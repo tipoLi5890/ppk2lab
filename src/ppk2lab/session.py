@@ -124,6 +124,15 @@ class StreamSession:
                     remediation="Check the USB connection and system load, then retry the "
                     "capture. Partial data was preserved with loss markers.",
                 )
+            if self.error is not None and self._queue.empty():
+                # The reader failed and its sentinel may have been dropped
+                # when the queue was full. Surfacing a stall instead would
+                # blame the device for going quiet when it was unplugged.
+                raise TransportError(
+                    f"stream interrupted: {self.error}",
+                    remediation="The device stopped responding (USB unplug or I/O error). "
+                    "Partial data was preserved with an interruption record.",
+                ) from self.error
             if idle_timeout_s is not None and now - last_data > idle_timeout_s:
                 raise StreamStalledError(
                     f"stream stalled: no data from the device for {idle_timeout_s:g} s "
@@ -136,7 +145,8 @@ class StreamSession:
                 kind, payload = self._queue.get(timeout=0.2)
             except queue.Empty:
                 continue
-            last_data = time.monotonic()
+            # Stamp after the consumer returns, further down, so a slow
+            # consumer is never mistaken for a silent device.
             if kind == "data":
                 for event in self.parser.feed(payload):
                     yield event
@@ -146,8 +156,10 @@ class StreamSession:
                         and event.end_index >= sample_limit
                     ):
                         return
+                last_data = time.monotonic()
             elif kind == "dropped":
                 yield self.parser.notify_dropped_bytes(payload)
+                last_data = time.monotonic()
             elif kind == "error":
                 raise TransportError(
                     f"stream interrupted: {payload}",

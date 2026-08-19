@@ -79,10 +79,19 @@ Host requirements:
   first and last received samples. A capture that advanced far slower than
   100 kS/s lost samples however quiet the counter stayed; every capture
   records `achieved_sample_rate_hz` and `rate_deficit_ratio`;
-- detect byte-level framing loss (a lost run that is not a multiple of four
-  shifts every later word, making each look like a fresh counter jump) by
-  the running mismatch rate, and re-align by scoring the four candidate byte
-  offsets against counter continuity;
+- treat a counter mismatch as *unconfirmed* until the following samples
+  prove the framing survived. A byte-level loss whose length is not a
+  multiple of four shifts every later word, so its counter field reads bits
+  belonging to its neighbours and each word looks like a fresh skip;
+  committing those immediately would advance the timeline by fabricated
+  amounts. A mismatch therefore commits only after several correctly
+  incrementing samples, while four consecutive mismatches (or eight within
+  sixteen samples) declare a desync instead — the verdict always arrives
+  first, so no gap derived from a shifted counter is ever committed;
+- on a desync, discard the shifted words rather than passing them off as
+  measurements, and re-align by scoring the four candidate byte offsets
+  against counter continuity, requiring a minimum score so unrecoverable
+  bytes are dropped once instead of re-entered word by word;
 - account for host-side losses (queue overflow) by byte count, including
   4-byte realignment when the dropped size is not a multiple of 4;
 - build timestamps as `capture_start + timeline_index * 10 us`, where gaps

@@ -14,6 +14,9 @@ Never change voltage or DUT power "to test a theory" without asking.
 | Current pinned at range max | Load beyond the 1 A path or a short — stop and inspect physically |
 | Spikes at level changes | Range-switch transients; compare raw vs `--filtered` before blaming the DUT |
 | Frequent sample gaps | Host load / USB path: close apps, avoid unpowered hubs; gaps are honest markers |
+| `rate_check: deficit` | The timeline advanced slower than the wall clock: samples were lost beyond what the counter reports. Same causes as above, but the loss is larger than the gap table suggests |
+| `W_STREAM_DESYNC` / `implausible` samples | Byte-level framing was lost (a partial byte run vanished). Usually a marginal cable, hub, or a saturated USB controller |
+| `energy_uj: null` | Not a fault: ampere mode has no defensible supply voltage. See analysis.md |
 
 ## Workflow
 

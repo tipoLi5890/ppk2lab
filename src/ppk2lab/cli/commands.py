@@ -48,6 +48,7 @@ from ..diagnostics import (
     W_STATE_UNVERIFIED,
     Diagnostic,
     warn,
+    warning_catalog,
 )
 from ..discovery import discover
 from ..errors import (
@@ -243,6 +244,7 @@ def cmd_capabilities(args: Any) -> Outcome:
             "9": "internal error",
         },
         "error_codes": error_catalog(),
+        "warning_codes": warning_catalog(),
         "schemas": list_schemas(),
     }
     human = (
@@ -452,8 +454,15 @@ def cmd_configure(args: Any) -> Outcome:
                 )
             )
         for change in changes:
-            code = W_GENERIC if change.observed_after else W_STATE_UNVERIFIED
-            warnings.extend(warn(code, text) for text in change.warnings)
+            for text in change.warnings:
+                # Only a genuine readback failure earns the code an agent
+                # branches on; explanatory notes are not state uncertainty.
+                unverified = (
+                    change.applied
+                    and not change.observed_after
+                    and ("read back" in text or "readback" in text)
+                )
+                warnings.append(warn(W_STATE_UNVERIFIED if unverified else W_GENERIC, text))
         result = {
             "dry_run": dry_run,
             "changes": [c.to_json() for c in changes],

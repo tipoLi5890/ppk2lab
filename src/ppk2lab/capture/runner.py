@@ -8,6 +8,8 @@ record and ``complete=False``.
 
 from __future__ import annotations
 
+import contextlib
+import signal
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -22,6 +24,7 @@ from ..diagnostics import (
     W_NO_SAMPLES,
     W_NOT_CALIBRATED,
     W_SAMPLE_GAPS,
+    W_STREAM_DESYNC,
     W_TIMELINE_COMPRESSION,
     W_TRIGGER,
     W_USER_GAIN,
@@ -87,6 +90,7 @@ def timeline_report(
     timeline_advance: int,
     started_utc: str,
     ended_utc: str,
+    applicable: bool = True,
 ) -> dict[str, Any]:
     """Compare the sample timeline against the host's wall clock.
 
@@ -108,7 +112,7 @@ def timeline_report(
         "rate_deficit_ratio": None,
         "rate_check": "not_applicable",
     }
-    if first_sample_at is None or last_sample_at is None:
+    if not applicable or first_sample_at is None or last_sample_at is None:
         return report
     elapsed = last_sample_at - first_sample_at
     report["wall_elapsed_s"] = elapsed
@@ -152,7 +156,7 @@ def run_capture(
         limit = round(duration_s * SAMPLE_RATE_HZ)
         sample_limit = min(sample_limit, limit) if sample_limit else limit
 
-    if keep_in_memory and output is None and in_memory_limit_samples is not None:
+    if keep_in_memory and in_memory_limit_samples is not None:
         projected = sample_limit
         if trigger_engine is not None:
             projected = trigger_engine.pre_samples + trigger_engine.post_samples
@@ -220,11 +224,12 @@ def run_capture(
     interruption: dict[str, Any] | None = None
     reached_target = False
     first_index: int | None = None
+    last_index: int | None = None
     first_sample_at: float | None = None
     last_sample_at: float | None = None
 
     def sink(event: SampleBlock | GapEvent) -> None:
-        nonlocal first_index, first_sample_at, last_sample_at
+        nonlocal first_index, last_index, first_sample_at, last_sample_at
         if isinstance(event, SampleBlock):
             now = time.monotonic()
             if first_index is None:
@@ -233,9 +238,15 @@ def run_capture(
                 acc.end_index = event.start_index
                 first_sample_at = now
             last_sample_at = now
+            # Timeline extent is a property of the stream, not of whether the
+            # samples could be converted: an uncalibrated device must not look
+            # like a stalled one.
+            last_index = event.end_index
             if calibration is not None:
                 acc.add_block(event, calibration.convert_block(event, vdd))
         else:
+            if event.missing is not None and last_index is not None:
+                last_index = max(last_index, event.index + event.missing)
             acc.add_gap(event)
         if builder is not None:
             builder.add(event)
@@ -247,6 +258,18 @@ def run_capture(
 
     started_utc = datetime.now(UTC).isoformat(timespec="milliseconds")
     started = time.monotonic()
+
+    # SIGTERM does not raise, so without this a terminated capture leaves a
+    # half-written temp file with no manifest — the whole recording lost
+    # rather than preserved as incomplete.
+    def _on_terminate(signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    previous_handler: Any = None
+    try:
+        previous_handler = signal.signal(signal.SIGTERM, _on_terminate)
+    except (ValueError, OSError):
+        previous_handler = None  # not on the main thread; the caller decides
     try:
         if trigger_engine is None:
             for event in device.stream(sample_limit=sample_limit, duration_s=None):
@@ -290,7 +313,7 @@ def run_capture(
                     break
     except KeyboardInterrupt:
         interruption = {"reason": "keyboard_interrupt"}
-        warnings.append(warn(W_INTERRUPTED, "capture interrupted by user; partial data preserved"))
+        warnings.append(warn(W_INTERRUPTED, "capture interrupted; partial data preserved"))
     except StreamStalledError as exc:
         interruption = {"reason": "stream_stalled", "detail": exc.message}
         warnings.append(
@@ -305,6 +328,10 @@ def run_capture(
         if writer is not None:
             writer.abort()
         raise
+    finally:
+        if previous_handler is not None:
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(signal.SIGTERM, previous_handler)
 
     if trigger_engine is not None and not trigger_engine.fired and interruption is None:
         warnings.append(warn(W_TRIGGER, "stream ended before the trigger fired"))
@@ -314,9 +341,16 @@ def run_capture(
     timeline = timeline_report(
         first_sample_at=first_sample_at,
         last_sample_at=last_sample_at,
-        timeline_advance=(acc.end_index - acc.start_index),
+        timeline_advance=(
+            (last_index - first_index) if first_index is not None and last_index else 0
+        ),
         started_utc=started_utc,
         ended_utc=ended_utc,
+        # A triggered capture emits its whole pre-trigger ring buffer at the
+        # moment the trigger fires, so wall time covers only the post-trigger
+        # part while the timeline covers both. Comparing them would be
+        # arithmetic on two different intervals.
+        applicable=trigger_engine is None,
     )
     if timeline["rate_check"] == "deficit":
         deficit = timeline["rate_deficit_ratio"]
@@ -341,6 +375,18 @@ def run_capture(
             warn(
                 W_SAMPLE_GAPS,
                 f"capture contains {acc.gap_count} sample gap(s); see the gap table",
+            )
+        )
+    session = getattr(device, "last_session", None)
+    parser = getattr(session, "parser", None)
+    desync_events = getattr(parser, "desync_events", 0) if parser is not None else 0
+    if desync_events:
+        warnings.append(
+            warn(
+                W_STREAM_DESYNC,
+                f"{desync_events} byte-level framing desync(s) were detected and "
+                "re-aligned; samples around them were discarded rather than reported, "
+                "and the timeline is degraded across each one",
             )
         )
     if acc.implausible:

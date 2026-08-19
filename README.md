@@ -65,7 +65,7 @@ During plugin development, load the checkout directly with `claude --plugin-dir 
 
 ### Codex plugin and loose skills
 
-Open the Codex plugin browser with `/plugins`, add the repository marketplace, and install `ppk2lab`. Exact non-interactive commands will be verified against the current Codex release before publishing.
+The skills in `skills/` are plain `SKILL.md` files that Codex can load directly; a Codex plugin manifest is not published yet, so use the loose-skill path below.
 
 For repository-scoped loose skills, place them in `.agents/skills/`. For a user-wide installation:
 

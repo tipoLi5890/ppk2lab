@@ -67,7 +67,7 @@ ppk2lab doctor --json
 
 ### Codex プラグインとスタンドアロン skills
 
-`/plugins` で Codex プラグインブラウザを開き、本リポジトリの marketplace を追加して `ppk2lab` をインストールします。正確な非対話コマンドは、公開前に最新の Codex リリースで再検証します。
+`skills/` にあるのは素の `SKILL.md` ファイルで、Codex から直接読み込めます。Codex プラグイン manifest はまだ公開していないため、下記のスタンドアロン skill の手順をご利用ください。
 
 リポジトリ単位のスタンドアロン skills は `.agents/skills/` に配置します。ユーザー単位でインストールする場合：
 

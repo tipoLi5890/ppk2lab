@@ -57,6 +57,7 @@ class ArtifactWriter:
         self._stored_count = 0
         self._invalid_count = 0
         self._gaps: list[GapEvent] = []
+        self._gaps_truncated = 0
         self._sha256 = hashlib.sha256()
         self._start_index: int | None = None
         self._finalized = False
@@ -73,8 +74,15 @@ class ArtifactWriter:
         while len(self._buffer) >= CHUNK_SAMPLES * 4:
             self._flush_chunk(CHUNK_SAMPLES * 4)
 
+    #: See CaptureBuilder.MAX_GAPS: the manifest records the count, not an
+    #: unbounded enumeration.
+    MAX_GAPS = 10_000
+
     def add_gap(self, gap: GapEvent) -> None:
-        self._gaps.append(gap)
+        if len(self._gaps) < self.MAX_GAPS:
+            self._gaps.append(gap)
+        else:
+            self._gaps_truncated += 1
 
     def _flush_chunk(self, n_bytes: int) -> None:
         data = bytes(self._buffer[:n_bytes])
@@ -132,6 +140,7 @@ class ArtifactWriter:
                 "chunks": self._chunks,
             },
             "gaps": [g.to_json() for g in gaps],
+            "gaps_truncated": self._gaps_truncated,
             "complete": bool(complete and not gaps),
             "interruption": interruption,
             "stats": stats,
@@ -276,8 +285,25 @@ def write_capture(
     return str(writer.path)
 
 
-def read_capture(path: str | os.PathLike[str]) -> Capture:
+#: Loading an artifact materializes every sample plus a copy for hashing, so
+#: the read path needs the same honesty as the write path: roughly 8 bytes of
+#: peak RAM per stored sample.
+MAX_LOAD_SAMPLES = 200 * 1_000_000 // 8  # ~200 MB peak
+
+
+def read_capture(
+    path: str | os.PathLike[str], *, max_samples: int | None = MAX_LOAD_SAMPLES
+) -> Capture:
     with ArtifactReader(path) as reader:
+        stored = reader.manifest["samples"]["stored_count"]
+        if max_samples is not None and stored > max_samples:
+            hours = stored / 100_000 / 3600
+            raise CaptureFileError(
+                f"capture holds {stored:,} samples ({hours:.1f} h); loading it whole would "
+                f"need roughly {stored * 8 / 1e9:.1f} GB of RAM",
+                remediation="Measure or export a window instead of the whole file, or pass "
+                "max_samples=None if the machine really has the memory.",
+            )
         meta = reader.read_meta()
         words = array("I")
         for _, chunk_words in reader.iter_raw_words():

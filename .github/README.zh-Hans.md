@@ -67,7 +67,7 @@ ppk2lab doctor --json
 
 ### Codex 插件与独立 skills
 
-用 `/plugins` 打开 Codex 插件浏览器，添加本仓库 marketplace 并安装 `ppk2lab`。确切的非交互式命令将在发布前按当时的 Codex 版本重新验证。
+`skills/` 内是纯 `SKILL.md` 文件，Codex 可直接加载；目前尚未发布 Codex plugin manifest，请改用下方的独立 skill 路径。
 
 仓库级的独立 skills 放在 `.agents/skills/`；用户级的安装方式：
 

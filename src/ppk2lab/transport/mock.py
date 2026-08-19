@@ -85,6 +85,8 @@ class SimulatedPPK2:
         self.rate_limit_hz = rate_limit_hz
         #: Split metadata replies into chunks of this size, reproducing the
         #: multi-read delivery seen on real serial stacks.
+        if metadata_chunk_bytes is not None and metadata_chunk_bytes < 1:
+            raise ValueError("metadata_chunk_bytes must be at least 1")
         self.metadata_chunk_bytes = metadata_chunk_bytes
         self._stream_started_at: float | None = None
         self._samples_emitted = 0

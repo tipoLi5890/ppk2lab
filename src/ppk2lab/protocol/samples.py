@@ -145,22 +145,32 @@ class SampleBlock:
             yield unpack_sample(word)
 
 
-#: Smoothing factor for the running mismatch rate. A sustained desync pushes
-#: the estimate past the threshold within a few dozen samples, while isolated
-#: real gaps barely move it.
-DESYNC_EMA_ALPHA = 1.0 / 128.0
-#: Above this share of mismatching counters, the byte framing — not the
-#: device — is the problem: losing a run of bytes that is not a multiple of
-#: four shifts every later word, so the counter field reads bits belonging to
-#: its neighbours and each word looks like a fresh counter jump. The ADC and
-#: range fields are shifted too, which is why such a stream decodes to
-#: currents the hardware cannot physically carry.
-DESYNC_MISMATCH_RATIO = 0.25
-#: Minimum samples observed before the rate is trusted, so a noisy handful at
-#: stream start cannot be mistaken for a desync.
-DESYNC_MIN_SAMPLES = 64
+#: Consecutive mismatching counters that prove the byte framing is lost.
+#: A device-side skip mismatches exactly once and then counts correctly again;
+#: a shifted stream reads its counter out of neighbouring fields, which are
+#: either constant (logic byte, ADC high bits) or noise — both mismatch on
+#: essentially every word. Four is the smallest value three unrelated device
+#: skips landing on adjacent samples cannot reach.
+DESYNC_CONSECUTIVE_MISMATCHES = 4
+#: Sliding-window backstop for a desync that happens not to mismatch on every
+#: word: this many mismatches within the last :data:`DESYNC_WINDOW_BITS`.
+DESYNC_WINDOW_BITS = 16
+DESYNC_WINDOW_MISMATCHES = 8
+_RECENT_MASK = (1 << DESYNC_WINDOW_BITS) - 1
+#: Correctly-incrementing samples that must follow a mismatch before its gap
+#: is committed and the timeline advanced. Strictly below
+#: :data:`DESYNC_CONSECUTIVE_MISMATCHES`, so a desync verdict always wins the
+#: race and no gap derived from a shifted counter is ever committed.
+SKIP_CONFIRM_WORDS = 3
+#: Never hold a pending gap longer than this; past it the loss is reported
+#: from the aggregate counter distance rather than withheld indefinitely.
+PENDING_MAX_WORDS = 8
 #: Bytes gathered before scoring the four possible framing offsets.
 RESYNC_SCORE_BYTES = 1024
+#: Minimum counter-continuity score (out of 127) for a candidate byte offset
+#: to be adopted. Below it, no framing is recoverable from that window and
+#: adopting the "best" one only produces another desync a few words later.
+RESYNC_MIN_SCORE = 64
 #: Upper bound on the stored gap table; a desync storm must not grow memory
 #: without limit. Losses beyond it are still counted, just not enumerated.
 MAX_GAP_EVENTS = 10_000
@@ -205,10 +215,14 @@ class SampleStreamParser:
     drops with :meth:`notify_dropped_bytes`; report an unquantified stall
     with :meth:`notify_unknown_gap`.
 
-    When byte-level framing is lost (a partial byte run vanished, so every
-    later word is shifted), the parser stops emitting one gap per sample,
-    records a single ``stream_desync`` event, and re-aligns by scoring the
-    four candidate byte offsets against counter continuity.
+    A counter mismatch alone is not proof of device-side loss: byte-level
+    framing loss (a partial byte run vanished, so every later word is
+    shifted) produces the same symptom on nearly every word. A mismatch is
+    therefore held until the following samples confirm the framing survived;
+    only then does its gap commit and advance the timeline. If instead the
+    mismatches keep coming, the parser records one ``stream_desync`` event,
+    discards the shifted words rather than passing them off as measurements,
+    and re-aligns by scoring the four candidate byte offsets.
     """
 
     def __init__(self, start_index: int = 0) -> None:
@@ -225,8 +239,10 @@ class SampleStreamParser:
         self.gaps_truncated = 0
         #: Number of framing desyncs detected and re-aligned.
         self.desync_events = 0
-        self._window_samples = 0
-        self._mismatch_rate = 0.0
+        #: Bytes discarded because no byte offset made the counter continuous.
+        self.resync_bytes_discarded = 0
+        self._consec_mismatch = 0
+        self._recent = 0
         self._resync_buf: bytearray | None = None
 
     @property
@@ -246,41 +262,66 @@ class SampleStreamParser:
         return gap
 
     def _note_counter_result(self, mismatch: bool) -> bool:
-        """Track the running mismatch rate; True once the framing looks lost.
+        """Track framing health; True once the byte framing looks lost.
 
-        A single skipped run of samples produces one mismatch and barely
-        moves the estimate. A byte-level desync makes nearly every word
-        mismatch, which crosses the threshold within a few dozen samples.
+        Two O(1) integer signals, deliberately not an averaged rate: a device
+        skip mismatches once and then counts correctly, so neither signal
+        moves, while a byte-level shift mismatches on almost every word and
+        trips the consecutive counter within four samples — fast enough that
+        no gap derived from a shifted counter is ever committed.
         """
-        self._window_samples += 1
-        observation = 1.0 if mismatch else 0.0
-        self._mismatch_rate += DESYNC_EMA_ALPHA * (observation - self._mismatch_rate)
+        self._recent = ((self._recent << 1) | int(mismatch)) & _RECENT_MASK
+        if mismatch:
+            self._consec_mismatch += 1
+        else:
+            self._consec_mismatch = 0
         return (
-            self._window_samples >= DESYNC_MIN_SAMPLES
-            and self._mismatch_rate > DESYNC_MISMATCH_RATIO
+            self._consec_mismatch >= DESYNC_CONSECUTIVE_MISMATCHES
+            or self._recent.bit_count() >= DESYNC_WINDOW_MISMATCHES
         )
 
-    def _enter_resync(self) -> GapEvent:
+    def _emit_block(
+        self, events: list[SampleBlock | GapEvent], words: array, start: int, stop: int
+    ) -> None:
+        if stop <= start:
+            return
+        block = SampleBlock(self._next_index, words[start:stop])
+        self._next_index += len(block)
+        self.samples_emitted += len(block)
+        events.append(block)
+
+    def _enter_resync(self, carry: bytes = b"") -> GapEvent:
         self.desync_events += 1
-        self._buf.clear()
         self._skip_bytes = 0
         self._expected_counter = None
-        self._window_samples = 0
-        self._mismatch_rate = 0.0
-        self._resync_buf = bytearray()
+        self._consec_mismatch = 0
+        self._recent = 0
+        # The unparsed remainder belongs *after* the carried tail; splicing
+        # two non-adjacent byte runs would defeat the offset scoring.
+        buf = bytearray(carry)
+        buf.extend(self._buf)
+        self._buf.clear()
+        self._resync_buf = buf
         return self._record_gap(None, "stream_desync", ambiguous=True)
 
     def _try_resync(self, data: bytes) -> bool:
         """Accumulate bytes and adopt the best framing offset. True when done."""
         assert self._resync_buf is not None
         self._resync_buf.extend(data)
-        if len(self._resync_buf) < RESYNC_SCORE_BYTES:
-            return False
-        candidate = bytes(self._resync_buf)
-        best_offset = max(range(4), key=lambda off: _alignment_score(candidate, off))
-        self._resync_buf = None
-        self._buf.extend(candidate[best_offset:])
-        return True
+        while len(self._resync_buf) >= RESYNC_SCORE_BYTES:
+            candidate = bytes(self._resync_buf)
+            scores = [_alignment_score(candidate, off) for off in range(4)]
+            best = max(range(4), key=scores.__getitem__)
+            if scores[best] >= RESYNC_MIN_SCORE:
+                self._resync_buf = None
+                self._buf.extend(candidate[best:])
+                return True
+            # No offset makes the counter continuous: these bytes carry no
+            # recoverable framing. Drop them (the stream_desync already marked
+            # the timeline degraded) instead of re-desyncing word by word.
+            self.resync_bytes_discarded += len(candidate) - 3
+            del self._resync_buf[: len(candidate) - 3]
+        return False
 
     def feed(self, data: bytes) -> list[SampleBlock | GapEvent]:
         """Parse a chunk; returns blocks and gap events in timeline order."""
@@ -306,38 +347,64 @@ class SampleStreamParser:
             words.byteswap()
 
         run_start = 0
+        pending = -1  # word index of an unconfirmed mismatch, -1 = none
+        pending_expected = 0  # the counter that word should have carried
+        confirm = 0  # consecutive correctly-incrementing words since `pending`
+
         for i, word in enumerate(words):
             counter = (word >> COUNTER_SHIFT) & COUNTER_MASK
             expected = self._expected_counter
-            desynced = self._note_counter_result(expected is not None and counter != expected)
-            if desynced:
-                if i > run_start:
-                    block = SampleBlock(self._next_index, words[run_start:i])
-                    self._next_index += len(block)
-                    self.samples_emitted += len(block)
-                    events.append(block)
-                events.append(self._enter_resync())
-                # Re-frame from the remaining bytes of this chunk.
+            mismatch = expected is not None and counter != expected
+            self._expected_counter = (counter + 1) & COUNTER_MASK
+
+            if mismatch:
+                confirm = 0
+                if pending < 0:
+                    # `mismatch` implies `expected is not None`.
+                    pending, pending_expected = i, expected or 0
+            elif pending >= 0:
+                confirm += 1
+
+            # A healthy stream never touches the detector.
+            if (mismatch or self._recent) and self._note_counter_result(mismatch):
+                # The framing is lost, so the pending mismatch was never a
+                # device-side skip. Drop it, and cut the emitted block at the
+                # FIRST mismatch so no shifted word reaches a consumer as if
+                # it were a measurement. The timeline does not advance.
+                cut = pending if pending >= 0 else i
+                self._emit_block(events, words, run_start, cut)
                 tail = words[i + 1 :]
-                remainder = tail.tobytes() if sys.byteorder == "little" else _swapped(tail)
-                if self._try_resync(remainder):
+                carry = tail.tobytes() if sys.byteorder == "little" else _swapped(tail)
+                events.append(self._enter_resync(carry))
+                if self._try_resync(b""):
                     events.extend(self.feed(b""))
                 return events
-            if expected is not None and counter != expected:
-                missing = (counter - expected) & COUNTER_MASK
-                if i > run_start:
-                    block = SampleBlock(self._next_index, words[run_start:i])
-                    self._next_index += len(block)
-                    self.samples_emitted += len(block)
-                    events.append(block)
+
+            if pending >= 0 and (
+                confirm >= SKIP_CONFIRM_WORDS or i - pending + 1 >= PENDING_MAX_WORDS
+            ):
+                # The framing survived the mismatch, so the skip was the
+                # device's. Report the loss over the whole held span.
+                missing = (counter - pending_expected - (i - pending)) & COUNTER_MASK
+                self._emit_block(events, words, run_start, pending)
                 events.append(self._record_gap(missing, "counter_skip", ambiguous=True))
-                run_start = i
-            self._expected_counter = (counter + 1) & COUNTER_MASK
-        if len(words) > run_start:
-            block = SampleBlock(self._next_index, words[run_start:])
-            self._next_index += len(block)
-            self.samples_emitted += len(block)
-            events.append(block)
+                run_start, pending, confirm = pending, -1, 0
+
+        if pending >= 0 and self._expected_counter is not None:
+            # The chunk ended before confirmation could arrive. Report it now:
+            # a withheld gap the caller can never learn about would hide data
+            # loss, and with no desync verdict the counter is still the best
+            # evidence available. This is the only path that can advance the
+            # timeline on an unconfirmed mismatch, and the consecutive-mismatch
+            # verdict bounds how often it can happen.
+            last = len(words) - 1
+            counter = (self._expected_counter - 1) & COUNTER_MASK
+            missing = (counter - pending_expected - (last - pending)) & COUNTER_MASK
+            self._emit_block(events, words, run_start, pending)
+            events.append(self._record_gap(missing, "counter_skip", ambiguous=True))
+            run_start = pending
+
+        self._emit_block(events, words, run_start, len(words))
         return events
 
     def notify_dropped_bytes(self, dropped: int, reason: str = "host_overflow") -> GapEvent:
@@ -365,6 +432,8 @@ class SampleStreamParser:
             self._skip_bytes = 4 - tail
         if self._expected_counter is not None:
             self._expected_counter = (self._expected_counter + missing) & COUNTER_MASK
+        # A host-side drop breaks sample adjacency but not byte framing.
+        self._consec_mismatch = 0
         return self._record_gap(missing, reason, ambiguous=True)
 
     def notify_unknown_gap(self, reason: str = "usb_stall") -> GapEvent:
@@ -376,6 +445,8 @@ class SampleStreamParser:
         self._buf.clear()
         self._skip_bytes = 0
         self._expected_counter = None
+        self._consec_mismatch = 0
+        self._recent = 0
         return self._record_gap(None, reason, ambiguous=True)
 
     def flush_stats(self) -> dict[str, object]:
@@ -385,6 +456,7 @@ class SampleStreamParser:
             "gaps": len(self.gaps),
             "gaps_truncated": self.gaps_truncated,
             "desync_events": self.desync_events,
+            "resync_bytes_discarded": self.resync_bytes_discarded,
             "missing_samples_known": known_missing,
             "has_unknown_gaps": any(g.missing is None for g in self.gaps),
             "timeline_degraded": self.timeline_degraded,

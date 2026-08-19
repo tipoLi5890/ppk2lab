@@ -155,3 +155,31 @@ def test_stats_summary():
     assert stats["gaps"] == 1
     assert stats["missing_samples_known"] == 5
     assert stats["has_unknown_gaps"] is False
+
+
+# ---------------------------------------------------------------------------
+# A counter mismatch alone does not prove device-side loss: byte-level framing
+# loss produces the same symptom. These pin the confirmation behavior.
+
+
+def test_single_device_skip_survives_confirmation():
+    """A genuine skip followed by data is still exactly one gap of 5."""
+    data = stream(10) + b"".join(word_bytes(counter=(15 + k) & 0x3F) for k in range(20))
+    parser = SampleStreamParser()
+    blocks, gaps = collect(parser.feed(data))
+    assert [(g.index, g.missing, g.reason) for g in gaps] == [(10, 5, "counter_skip")]
+    assert blocks[-1].start_index == 15
+    assert parser.next_index == 35  # 10 stored + 5 missing + 20 stored
+    assert parser.desync_events == 0
+
+
+@pytest.mark.parametrize("chunking", [1, 3, 4, 7, 137])
+def test_single_device_skip_survives_any_chunk_boundary(chunking):
+    """The mismatch may be the last word of a feed(); the gap must still land."""
+    data = stream(10) + b"".join(word_bytes(counter=(15 + k) & 0x3F) for k in range(20))
+    parser = SampleStreamParser()
+    gaps = []
+    for i in range(0, len(data), chunking):
+        gaps += collect(parser.feed(data[i : i + chunking]))[1]
+    assert [(g.index, g.missing) for g in gaps] == [(10, 5)]
+    assert parser.next_index == 35

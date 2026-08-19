@@ -12,10 +12,15 @@ worked example lives in `examples/agent_workflow.md`.
 - Errors carry a stable `code`, a `remediation` string to act on, and a
   documented `exit_code`. Agents branch on `code`/`exit_code`, never on
   message text.
+- Warnings are the same shape: every entry in `warnings` is
+  `{code, message}` with a frozen `W_*` code (`W_SAMPLE_GAPS`,
+  `W_TIMELINE_COMPRESSION`, `W_VOLTAGE_ASSUMED`, `W_NOT_CALIBRATED`, …).
+  `capabilities --json` publishes the catalog with each code's meaning, so
+  the vocabulary is discoverable rather than something to memorize.
 - `ppk2lab capabilities --json` is generated from the live parser and
   registries: commands with their options and state-changing classification,
-  decoder rate tiers, exit codes, error catalog, schema list. Prefer it over
-  cached documentation.
+  decoder rate tiers, exit codes, error and warning catalogs, schema list.
+  Prefer it over cached documentation.
 - `ppk2lab schema <name>` serves every published JSON schema.
 
 ## Read-only vs state-changing
@@ -36,7 +41,15 @@ Safety rules an agent must follow:
 4. Check `complete` and `sample_gaps` in every capture/measure/assert
    result. Never present an incomplete result as a success; exit code 6
    means "neither pass nor fail — data is missing".
-5. Persist `capture_id` and `capture_sha256` with every conclusion so it can
+5. Check `timeline.rate_check` on captures. The device's 6-bit counter
+   cannot describe a loss of 64 samples or more, so each capture is
+   cross-checked against the wall clock; `deficit` means samples went
+   missing however quiet the gap table is.
+6. Energy carries its provenance: `voltage_basis` and
+   `voltage_measured: false`, because the instrument measures current only.
+   `energy_uj: null` in ampere mode is the correct answer, not a failure —
+   supply the DUT's real voltage with `--assume-voltage-mv` to compute it.
+7. Persist `capture_id` and `capture_sha256` with every conclusion so it can
    be audited against raw evidence.
 
 ## Context budgets

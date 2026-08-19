@@ -5,6 +5,7 @@
 **See exactly where your device's power goes.** `ppk2lab` turns the Nordic Power Profiler Kit II into a scriptable measurement lab: record current and eight digital signals on one timeline, decode low-speed UART and SPI, and attribute energy to individual protocol events. Everything is reachable from Python, the command line, or an AI agent, so a power regression can fail a CI build the same way a failing test does.
 
 [![CI](https://github.com/tipoLi5890/ppk2lab/actions/workflows/ci.yml/badge.svg)](https://github.com/tipoLi5890/ppk2lab/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/ppk2lab)](https://pypi.org/project/ppk2lab/)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-experimental-orange)

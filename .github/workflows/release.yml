@@ -2,15 +2,13 @@ name: Release
 
 # Publishing uses PyPI Trusted Publishing (OIDC): no API tokens are stored
 # in the repository. PyPI trusts this exact workflow file, in this exact
-# repository, running in the named GitHub environment.
-#
-# - Manual run (workflow_dispatch)  -> publishes to TestPyPI (rehearsal)
-# - Publishing a GitHub Release     -> publishes to PyPI (the real thing)
+# repository, running in the "pypi" GitHub environment. Publishing a GitHub
+# Release triggers the upload; the environment's required-reviewer rule
+# adds a manual approval step before anything reaches PyPI.
 
 on:
   release:
     types: [published]
-  workflow_dispatch: # rehearsal: builds and uploads to TestPyPI only
 
 jobs:
   build:
@@ -20,8 +18,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Verify tag matches the package version (release only)
-        if: github.event_name == 'release'
+      - name: Verify tag matches the package version
         run: |
           PKG_VERSION=$(python -c "import pathlib,re; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/ppk2lab/_version.py').read_text()).group(1))")
           TAG="${{ github.event.release.tag_name }}"
@@ -38,28 +35,8 @@ jobs:
           name: release-dist
           path: dist/
 
-  publish-testpypi:
-    name: Publish to TestPyPI (rehearsal)
-    if: github.event_name == 'workflow_dispatch'
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/ppk2lab
-    permissions:
-      id-token: write # OIDC token for trusted publishing
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-
   publish-pypi:
     name: Publish to PyPI
-    if: github.event_name == 'release'
     needs: build
     runs-on: ubuntu-latest
     environment:

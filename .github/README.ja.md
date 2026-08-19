@@ -7,6 +7,7 @@
 **デバイスの電力がどこで使われているかを正確に把握できます。** `ppk2lab` は、Nordic Power Profiler Kit II をスクリプトで操作できる測定ラボに変えます。電流と 8 本のデジタル信号を単一のタイムライン上で記録し、低速 UART と SPI をデコードし、個々のプロトコルイベントにエネルギーを対応付けます。すべての機能は Python・コマンドライン・AI エージェントから利用できるため、電力回帰を、テストの失敗と同じように CI ビルドの失敗として扱えます。
 
 [![CI](https://github.com/tipoLi5890/ppk2lab/actions/workflows/ci.yml/badge.svg)](https://github.com/tipoLi5890/ppk2lab/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/ppk2lab)](https://pypi.org/project/ppk2lab/)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-experimental-orange)

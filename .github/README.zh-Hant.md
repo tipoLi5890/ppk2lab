@@ -7,6 +7,7 @@
 **清楚看見裝置電力的去向。** `ppk2lab` 將 Nordic Power Profiler Kit II 變成可程式化的量測實驗室：在同一條時間軸上記錄電流與八路數位訊號、解碼低速 UART 與 SPI，並將能耗歸因到個別的協定事件。所有功能皆可透過 Python、命令列或 AI Agent 存取，讓功耗回歸能像測試失敗一樣使 CI build 失敗。
 
 [![CI](https://github.com/tipoLi5890/ppk2lab/actions/workflows/ci.yml/badge.svg)](https://github.com/tipoLi5890/ppk2lab/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/ppk2lab)](https://pypi.org/project/ppk2lab/)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-experimental-orange)

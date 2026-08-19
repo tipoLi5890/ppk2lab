@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/tipoLi5890/ppk2lab/blob/main/README.md
+    about: README, INSTALL.md, and docs/ answer most installation, safety, and usage questions.
+  - name: Nordic official PPK2 resources
+    url: https://www.nordicsemi.com/Products/Development-hardware/Power-Profiler-Kit-2/GetStarted
+    about: Firmware updates and official app questions belong with Nordic's official tools; ppk2lab is an unofficial project.

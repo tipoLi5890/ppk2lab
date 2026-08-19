@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ppk2lab"
+description = "Control, capture, decode, and test Nordic Semiconductor Power Profiler Kit II hardware from Python, CLI automation, CI, and AI agents."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "ppk2lab contributors" }]
+keywords = ["ppk2", "power-profiler", "nordic", "logic-analyzer", "uart", "spi", "energy"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Embedded Systems",
+  "Topic :: System :: Hardware",
+]
+dynamic = ["version"]
+dependencies = ["pyserial>=3.5"]
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.26"]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+  "mypy>=1.10",
+  "jsonschema>=4.21",
+]
+
+[project.scripts]
+ppk2lab = "ppk2lab.cli.main:entrypoint"
+
+[project.urls]
+Homepage = "https://github.com/tipoLi5890/ppk2lab"
+Issues = "https://github.com/tipoLi5890/ppk2lab/issues"
+
+[tool.setuptools.dynamic]
+version = { attr = "ppk2lab._version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"ppk2lab.schemas" = ["*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:ppk2lab.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+  "SIM108", # ternary rewrites are not always clearer
+  "SIM117", # nested with statements are sometimes clearer
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+mypy_path = "src"
+packages = ["ppk2lab"]
+
+[[tool.mypy.overrides]]
+module = "serial.*"
+ignore_missing_imports = true

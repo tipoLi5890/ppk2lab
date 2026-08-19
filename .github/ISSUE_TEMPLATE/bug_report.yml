@@ -1,0 +1,93 @@
+name: Bug report
+description: Report wrong output, a crash, data-loss handling problems, or any other defect in ppk2lab.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! `ppk2lab` controls, captures,
+        decodes, and tests Nordic PPK2 hardware from Python, the CLI, CI, and AI agents.
+
+        The **exact command with `--json` output** and a **`ppk2lab doctor --json` dump**
+        make bugs an order of magnitude faster to fix. If the bug involves a capture,
+        a **minimal `.ppk2a` artifact** (or a `--simulate` reproducer) is ideal.
+
+        Do **not** attach captures of confidential or unreleased products — their power
+        signatures can be sensitive. Reduce to a minimal or simulated reproducer instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: ppk2lab version
+      description: Output of `ppk2lab --version`.
+      placeholder: ppk2lab 0.1.0.dev0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - pipx
+        - pip (virtual environment)
+        - source checkout (pip install -e)
+        - other
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: OS and Python version
+      description: Operating system plus output of `python --version`.
+      placeholder: macOS 15.4 / Python 3.12.4
+    validations:
+      required: true
+
+  - type: input
+    id: hardware
+    attributes:
+      label: PPK2 hardware / firmware
+      description: PPK2 firmware version if known, or "simulated" / "no hardware".
+      placeholder: firmware 1.2.4 / simulated
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command and full output
+      description: Paste the exact command you ran (prefer `--json`) and the complete output, including the error code and remediation if any.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: ppk2lab doctor --json output
+      description: Paste the full doctor output (use `--simulate` if no hardware is involved).
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and this has not already been reported.
+          required: true
+        - label: I can share a minimal capture artifact (.ppk2a) or a --simulate reproducer.
+          required: false
+        - label: I understand I must NOT attach captures of confidential or unreleased products.
+          required: true

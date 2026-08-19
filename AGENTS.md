@@ -1,0 +1,39 @@
+# Agent working rules for this repository
+
+These rules apply to Codex, Claude Code, and any other tool-using agent
+working *on* this repository. (For using the `ppk2lab` CLI as an agent, see
+`docs/agent-interface.md` and `examples/agent_workflow.md`.)
+
+## Before changing anything
+
+1. Read `README.md`, `CLAUDE.md`, and the relevant sections of
+   `docs/ppk2-package-research.md` and `docs/SPEC.md`.
+2. Inspect the working tree and preserve existing user changes.
+3. State the narrow task being implemented and how it will be verified.
+4. Do not expand scope because a related roadmap item exists.
+
+## Hard constraints
+
+- Never create a GitHub repository, add a remote, push, or publish a package
+  without explicit user authorization. The project is local-only until the
+  user says otherwise.
+- Never copy, translate, or incorporate source code from other projects.
+  PPK2 behavior comes from Nordic official materials (`docs/sources.md`).
+- Never add code that enables DUT power, changes voltage, or resets
+  hardware implicitly — including in tests, hooks, or skills.
+- Do not describe the project as a port, fork, translation, or rewrite of
+  another application.
+- Do not add `provenance.md` or `clean-room.md`.
+
+## Verification loop
+
+```bash
+pytest                       # 100% pass, no hardware required
+ruff check src tests && ruff format --check src tests
+mypy
+ppk2lab --simulate doctor    # CLI smoke test
+```
+
+A change is complete only when code, tests, schemas, docs, error behavior,
+and hardware-safety implications agree (see "Definition of done" in
+`CLAUDE.md`).

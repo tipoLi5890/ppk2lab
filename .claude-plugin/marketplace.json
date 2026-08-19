@@ -1,0 +1,14 @@
+{
+  "name": "ppk2lab",
+  "owner": {
+    "name": "ppk2lab contributors",
+    "url": "https://github.com/tipoLi5890/ppk2lab"
+  },
+  "plugins": [
+    {
+      "name": "ppk2lab",
+      "source": "./",
+      "description": "Skills for the ppk2lab PPK2 measurement, logic-analysis, decoding, and power-regression CLI."
+    }
+  ]
+}

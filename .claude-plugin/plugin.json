@@ -1,0 +1,13 @@
+{
+  "name": "ppk2lab",
+  "version": "0.1.0.dev0",
+  "description": "Skills for controlling, capturing, decoding, and testing Nordic PPK2 hardware safely through the ppk2lab CLI. Installing this plugin never enables DUT power, changes voltage, or starts a capture.",
+  "author": {
+    "name": "ppk2lab contributors",
+    "url": "https://github.com/tipoLi5890/ppk2lab"
+  },
+  "homepage": "https://github.com/tipoLi5890/ppk2lab",
+  "repository": "https://github.com/tipoLi5890/ppk2lab",
+  "license": "MIT",
+  "keywords": ["ppk2", "power-profiler", "nordic", "energy", "logic-analyzer"]
+}

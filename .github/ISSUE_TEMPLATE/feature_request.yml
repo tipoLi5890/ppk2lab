@@ -1,0 +1,60 @@
+name: Feature request
+description: Propose a new capability or an improvement to ppk2lab.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please skim [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md)
+        (planned milestones and decoder support tiers) and the hardware limits in the README:
+        PPK2 samples at a fixed 100 kS/s, so MHz-class protocol decoding is out of scope,
+        and nothing may enable DUT power automatically.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: What are you trying to accomplish, and what is missing or awkward today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should ppk2lab do? Include example CLI invocations or API sketches if you can.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you tried, other tools, or reasons they fall short.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Primary usage surface
+      options:
+        - CLI (human)
+        - CLI (CI / automation)
+        - Python API
+        - AI agent / skills
+        - capture file format / exports
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I checked ROADMAP.md and this is not already planned (or I am proposing to reprioritize it).
+          required: true
+        - label: The request respects the 100 kS/s hardware limit and the decoder support tiers.
+          required: true
+        - label: The request does not require enabling DUT power, changing voltage, or resetting hardware implicitly.
+          required: true

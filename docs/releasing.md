@@ -74,15 +74,28 @@ without the maintainer's explicit, in-the-moment authorization, and only
 after CI **and** the hardware release workflow are green on the exact tag
 commit (`ROADMAP.md` gate 8). Not executed here — listed for the maintainer:
 
-1. `git tag -a v0.1.0 -m "ppk2lab 0.1.0"` on the Section 3 commit.
-2. `git push origin main && git push origin v0.1.0`.
+Publishing runs through PyPI **Trusted Publishing** (OIDC) via
+`.github/workflows/release.yml` — no API tokens are stored anywhere.
+One-time setup: register the trusted publisher on PyPI (project `ppk2lab`,
+owner `tipoLi5890`, repository `ppk2lab`, workflow `release.yml`,
+environment `pypi`; likewise on TestPyPI with environment `testpypi`) and
+create the matching GitHub environments under Settings → Environments,
+ideally with a required reviewer on `pypi`.
+
+1. Rehearse the upload: run the Release workflow manually
+   (`gh workflow run release.yml`) — it builds and publishes to **TestPyPI**
+   only; verify with
+   `pip install -i https://test.pypi.org/simple/ ppk2lab`.
+2. `git tag -a v0.1.0 -m "ppk2lab 0.1.0"` on the Section 3 commit, then
+   `git push origin main && git push origin v0.1.0`.
 3. Wait for CI and the hardware workflow to both go green on the tag
    commit; never release on red or pending.
-4. `python -m build && twine check dist/*`.
-5. Create the GitHub release from the tag (`gh release create v0.1.0
-   dist/* --notes-from-tag`), attaching the sdist/wheel.
-6. `twine upload dist/*` (or the configured trusted-publisher flow).
-7. Verify: `pipx install ppk2lab` on a machine with no prior `-e`
+4. Create the GitHub release from the tag
+   (`gh release create v0.1.0 --notes-from-tag`). Publishing the release
+   triggers `release.yml`, which verifies the tag matches
+   `src/ppk2lab/_version.py`, builds, `twine check`s, and uploads to PyPI
+   through the `pypi` environment.
+5. Verify: `pipx install ppk2lab` on a machine with no prior `-e`
    checkout, then `ppk2lab --version`.
 
 ## 5. Post-release

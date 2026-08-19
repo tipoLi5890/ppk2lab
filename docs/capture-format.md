@@ -30,10 +30,19 @@ capture-manifest`). Key sections:
 - `configuration`: mode, `source_voltage_mv`, `dut_power`, `sample_rate_hz`
   (100000), digital channels, the requested duration/limit, and the trigger
   description for triggered captures;
-- `timeline`: `sample_period_ns` (10000), `start_index` (nonzero for
-  triggered captures whose window begins mid-stream), `degraded` (true once
-  an unknown-size gap occurred — indexes after that point no longer map to
-  wall-clock time);
+- `timeline`: `sample_rate_hz` (required — every timestamp derives from it,
+  so a reader refuses a manifest without it rather than assuming the usual
+  value), `sample_period_ns` (10000), `start_index` (nonzero for triggered
+  captures whose window begins mid-stream), `degraded` (true once an
+  unknown-size gap occurred), plus the wall-clock cross-check:
+  `started_utc`, `ended_utc`, `wall_elapsed_s`, `timeline_advance`,
+  `achieved_sample_rate_hz`, `rate_deficit_ratio`, and `rate_check`
+  (`ok` / `deficit` / `too_short` / `not_applicable`). The cross-check is
+  the only evidence of sample loss the 6-bit counter cannot describe;
+- `calibration`: provenance for the numbers — `calibrated_flag`,
+  `metadata_terminated`, `metadata_warnings`, `missing_ranges`,
+  `user_gains`. A capture must carry the reason its readings might be
+  suspect, not just the readings;
 - `samples`: encoding `u32le-v1`, `stored_count`, `invalid_range_count`,
   SHA-256 over the concatenated raw sample bytes, and a chunk table with
   per-chunk `first_stored_index`, `count`, and CRC32;
@@ -45,7 +54,9 @@ capture-manifest`). Key sections:
   `transport_error`, `trigger_timeout`, `trigger_never_fired`);
 - `stats`: precomputed summary (window-stats schema) for quick inspection —
   always recomputable from the raw samples;
-- `warnings`: human-readable notes mirrored from the capture run.
+- `warnings`: coded notes from the capture run, each `{code, message}` (see
+  `ppk2lab.diagnostics`), so a stored capture stays as branchable as a live
+  result.
 
 ## Timeline and gaps
 

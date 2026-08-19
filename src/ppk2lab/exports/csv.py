@@ -15,7 +15,7 @@ import os
 
 from ..calibration import SpikeFilter
 from ..capture.model import Capture
-from ..errors import OutputExistsError
+from ..errors import CaptureFileError, OutputExistsError
 from ..protocol.samples import GapEvent
 
 
@@ -78,4 +78,9 @@ def export_csv(
                 pending_gap = ""
                 writer.writerow(row)
                 rows += 1
+    if rows != capture.stored_count:
+        raise CaptureFileError(
+            f"CSV export wrote {rows} rows for a capture holding "
+            f"{capture.stored_count} samples; refusing to report a partial export as success"
+        )
     return rows

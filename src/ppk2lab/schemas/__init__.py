@@ -30,6 +30,14 @@ _NULLABLE_STR = {"type": ["string", "null"]}
 _NULLABLE_BOOL = {"type": ["boolean", "null"]}
 _STR_ARRAY = {"type": "array", "items": {"type": "string"}}
 
+#: A warning with a stable code an agent can branch on (see
+#: ``ppk2lab.diagnostics``), alongside the sentence a human should read.
+_DIAGNOSTIC = _obj(
+    {"code": {"type": "string"}, "message": {"type": "string"}},
+    ["code", "message"],
+)
+_DIAGNOSTIC_ARRAY = {"type": "array", "items": _DIAGNOSTIC}
+
 _GAP = _obj(
     {
         "index": {"type": "integer", "minimum": 0},
@@ -56,6 +64,14 @@ _STATE = _obj(
         "source_voltage_mv": _NULLABLE_INT,
         "dut_power": _NULLABLE_BOOL,
         "measuring": {"type": "boolean"},
+        "source_voltage_basis": {
+            "enum": [
+                "caller_override",
+                "configured_source",
+                "device_metadata",
+                "unknown",
+            ]
+        },
     }
 )
 
@@ -109,6 +125,8 @@ _WINDOW_STATS = _obj(
                 "valid": {"type": "integer"},
                 "invalid_range": {"type": "integer"},
                 "not_convertible": {"type": "integer"},
+                "implausible": {"type": "integer"},
+                "covered_fraction": _NULLABLE_NUMBER,
             }
         ),
         "current_ua": _obj(
@@ -120,12 +138,45 @@ _WINDOW_STATS = _obj(
             }
         ),
         "charge_uc": _NULLABLE_NUMBER,
+        "charge_is_lower_bound": {"type": "boolean"},
         "energy_uj": _NULLABLE_NUMBER,
         "source_voltage_mv": _NULLABLE_INT,
+        # The PPK2 never measures the DUT terminal voltage: energy is always
+        # charge x an assumed voltage, and this records which assumption.
+        "voltage_basis": {
+            "enum": ["caller_override", "configured_source", "device_metadata", "unknown"]
+        },
+        "voltage_measured": {"const": False},
+        "energy_note": _NULLABLE_STR,
         "complete": {"type": "boolean"},
         "sample_gaps": {"type": "array", "items": _GAP},
     },
-    ["window", "duration_s", "samples", "current_ua", "complete", "sample_gaps"],
+    [
+        "window",
+        "duration_s",
+        "samples",
+        "current_ua",
+        "complete",
+        "sample_gaps",
+        "voltage_basis",
+        "voltage_measured",
+    ],
+)
+
+#: Wall-clock cross-check of the sample timeline. The 6-bit sample counter
+#: cannot describe losses of 64 or more samples (and a loss of exactly k*64 is
+#: invisible to it), so elapsed wall time is the only independent witness.
+_TIMELINE_CHECK = _obj(
+    {
+        "started_utc": {"type": "string"},
+        "ended_utc": {"type": "string"},
+        "wall_elapsed_s": _NULLABLE_NUMBER,
+        "timeline_advance": {"type": "integer"},
+        "achieved_sample_rate_hz": _NULLABLE_NUMBER,
+        "rate_deficit_ratio": _NULLABLE_NUMBER,
+        "rate_check": {"enum": ["ok", "deficit", "too_short", "not_applicable"]},
+    },
+    ["rate_check", "timeline_advance"],
 )
 
 _ANNOTATION = _obj(
@@ -148,7 +199,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "command": {"type": "string"},
             "ok": {"type": "boolean"},
             "result": {"type": ["object", "null"]},
-            "warnings": _STR_ARRAY,
+            "warnings": _DIAGNOSTIC_ARRAY,
             "error": {"anyOf": [{"type": "null"}, _ERROR]},
         },
         ["schema_version", "command", "ok", "result", "warnings", "error"],
@@ -159,6 +210,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         },
     ),
     "error": dict(_ERROR, **{"$schema": _DRAFT, "$id": "ppk2lab:error"}),
+    "diagnostic": dict(_DIAGNOSTIC, **{"$schema": _DRAFT, "$id": "ppk2lab:diagnostic"}),
     "device": dict(_DEVICE, **{"$schema": _DRAFT, "$id": "ppk2lab:device"}),
     "state-change": dict(_STATE_CHANGE, **{"$schema": _DRAFT, "$id": "ppk2lab:state-change"}),
     "gap": dict(_GAP, **{"$schema": _DRAFT, "$id": "ppk2lab:gap"}),
@@ -246,6 +298,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ["dry_run", "changes", "state"],
         **{"$schema": _DRAFT, "$id": "ppk2lab:configure-result"},
     ),
+    "timeline-check": dict(_TIMELINE_CHECK, **{"$schema": _DRAFT, "$id": "ppk2lab:timeline-check"}),
     "capture-result": _obj(
         {
             "capture_id": {"type": "string"},
@@ -254,10 +307,11 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "complete": {"type": "boolean"},
             "interruption": {"type": ["object", "null"]},
             "trigger": {"type": ["object", "null"]},
+            "timeline": _TIMELINE_CHECK,
             "stats": {"anyOf": [{"type": "null"}, _WINDOW_STATS]},
-            "warnings": _STR_ARRAY,
+            "warnings": _DIAGNOSTIC_ARRAY,
         },
-        ["capture_id", "complete", "stats", "warnings"],
+        ["capture_id", "complete", "stats", "warnings", "timeline"],
         **{"$schema": _DRAFT, "$id": "ppk2lab:capture-result"},
     ),
     "decode-result": _obj(
@@ -328,12 +382,34 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "configuration": {"type": "object"},
             "timeline": _obj(
                 {
-                    "sample_rate_hz": {"type": "integer"},
+                    "sample_rate_hz": {"type": "integer", "minimum": 1},
                     "sample_period_ns": {"type": "integer"},
                     "start_index": {"type": "integer"},
                     "degraded": {"type": "boolean"},
-                }
+                    "started_utc": {"type": "string"},
+                    "ended_utc": {"type": "string"},
+                    "wall_elapsed_s": _NULLABLE_NUMBER,
+                    "timeline_advance": {"type": "integer"},
+                    "achieved_sample_rate_hz": _NULLABLE_NUMBER,
+                    "rate_deficit_ratio": _NULLABLE_NUMBER,
+                    "rate_check": {"type": "string"},
+                },
+                ["sample_rate_hz", "sample_period_ns", "start_index"],
             ),
+            "calibration": {
+                "anyOf": [
+                    {"type": "null"},
+                    _obj(
+                        {
+                            "calibrated_flag": _NULLABLE_BOOL,
+                            "metadata_terminated": _NULLABLE_BOOL,
+                            "metadata_warnings": _STR_ARRAY,
+                            "missing_ranges": {"type": ["array", "null"]},
+                            "user_gains": {"type": ["array", "null"]},
+                        }
+                    ),
+                ]
+            },
             "samples": _obj(
                 {
                     "encoding": {"const": "u32le-v1"},
@@ -347,7 +423,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "complete": {"type": "boolean"},
             "interruption": {"type": ["object", "null"]},
             "stats": {"type": ["object", "null"]},
-            "warnings": _STR_ARRAY,
+            "warnings": {"type": "array"},
         },
         [
             "format",

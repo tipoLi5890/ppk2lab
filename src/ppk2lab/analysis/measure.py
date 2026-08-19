@@ -24,13 +24,20 @@ def measure_window(
     start_index: int | None = None,
     end_index: int | None = None,
     filtered: bool = False,
+    assume_voltage_mv: int | None = None,
 ) -> WindowStats:
     """Statistics over a time or sample-index window of a capture."""
     if start_s is not None:
         start_index = capture.time_to_index(start_s)
     if end_s is not None:
         end_index = capture.time_to_index(end_s)
-    return compute_stats(capture, start_index=start_index, end_index=end_index, filtered=filtered)
+    return compute_stats(
+        capture,
+        start_index=start_index,
+        end_index=end_index,
+        filtered=filtered,
+        assume_voltage_mv=assume_voltage_mv,
+    )
 
 
 def measure_annotations(
@@ -40,6 +47,7 @@ def measure_annotations(
     kinds: list[str] | None = None,
     group_by: str = "annotation",
     filtered: bool = False,
+    assume_voltage_mv: int | None = None,
 ) -> list[dict[str, Any]]:
     """Per-annotation or per-kind energy measurements.
 
@@ -55,6 +63,7 @@ def measure_annotations(
             start_index=ann.start_sample,
             end_index=ann.end_sample,
             filtered=filtered,
+            assume_voltage_mv=assume_voltage_mv,
         )
         per_annotation.append(
             {

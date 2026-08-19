@@ -87,7 +87,7 @@ def test_configure_dry_run_default(capsys):
     jsonschema.validate(payload["result"], get_schema("configure-result"))
     assert payload["result"]["dry_run"] is True
     assert payload["result"]["changes"][0]["applied"] is False
-    assert any("dry run" in w for w in payload["warnings"])
+    assert any(w["code"] == "W_DRY_RUN" for w in payload["warnings"])
 
 
 def test_configure_voltage_refused(capsys):

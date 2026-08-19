@@ -4,7 +4,7 @@ import pytest
 
 from ppk2lab.errors import TransportError, UsageError, VoltageRangeError
 from ppk2lab.protocol.samples import SampleBlock
-from ppk2lab.types import GapEvent, Mode
+from ppk2lab.types import GapEvent, Mode, VoltageBasis
 
 from .conftest import open_simulated
 
@@ -12,18 +12,23 @@ from .conftest import open_simulated
 def test_open_reads_metadata_and_state(sim_device):
     assert sim_device.metadata is not None
     assert sim_device.metadata.terminated
-    assert sim_device.state.mode is Mode.AMPERE
+    assert sim_device.state.mode is Mode.SOURCE
     assert sim_device.state.source_voltage_mv == 3000
+    # A voltage learned from metadata is the regulator setpoint, not a
+    # value this session chose.
+    assert sim_device.state.source_voltage_basis is VoltageBasis.DEVICE_METADATA
     assert sim_device.calibration is not None
     assert sim_device.calibration.missing_ranges() == []
 
 
 def test_set_mode_with_readback(sim_device):
-    change = sim_device.set_mode(Mode.SOURCE)
+    change = sim_device.set_mode(Mode.AMPERE)
     assert change.applied and change.observed_after
-    assert change.before["mode"] == "ampere"
-    assert change.after["mode"] == "source"
-    assert sim_device.transport.simulator.mode is Mode.SOURCE
+    assert change.before["mode"] == "source"
+    assert change.after["mode"] == "ampere"
+    assert sim_device.transport.simulator.mode is Mode.AMPERE
+    # Ampere mode has a precondition users get wrong; say it out loud.
+    assert any("powered from its own supply" in w for w in change.warnings)
 
 
 def test_set_voltage_with_readback(sim_device):
@@ -31,6 +36,9 @@ def test_set_voltage_with_readback(sim_device):
     assert change.applied and change.observed_after
     assert change.after["source_voltage_mv"] == 3300
     assert sim_device.transport.simulator.vdd_mv == 3300
+    # Configuring the voltage is a stronger basis than reading it back, and
+    # the readback inside set_source_voltage_mv must not downgrade it.
+    assert sim_device.state.source_voltage_basis is VoltageBasis.CONFIGURED_SOURCE
 
 
 def test_voltage_validated_before_any_write(sim_device):
@@ -43,10 +51,10 @@ def test_voltage_validated_before_any_write(sim_device):
 def test_dry_run_changes_nothing(sim_device):
     simulator = sim_device.transport.simulator
     log_before = list(simulator.command_log)
-    change = sim_device.set_mode(Mode.SOURCE, dry_run=True)
+    change = sim_device.set_mode(Mode.AMPERE, dry_run=True)
     assert not change.applied
     assert simulator.command_log == log_before
-    assert simulator.mode is Mode.AMPERE
+    assert simulator.mode is Mode.SOURCE
     change = sim_device.set_dut_power(True, dry_run=True)
     assert not change.applied
     assert simulator.dut_power is False

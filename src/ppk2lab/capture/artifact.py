@@ -26,6 +26,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from ..diagnostics import as_json as _warnings_as_json
 from ..errors import CaptureFileError, OutputExistsError
 from ..protocol.metadata import parse_metadata
 from ..protocol.samples import GapEvent, SampleBlock
@@ -95,8 +96,10 @@ class ArtifactWriter:
         complete: bool = True,
         interruption: dict[str, Any] | None = None,
         stats: dict[str, Any] | None = None,
-        warnings: list[str] | None = None,
+        warnings: list[Any] | None = None,
         timeline_degraded: bool = False,
+        calibration: dict[str, Any] | None = None,
+        timing: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if self._finalized:
             raise RuntimeError("artifact already finalized")
@@ -116,7 +119,11 @@ class ArtifactWriter:
                 "sample_period_ns": SAMPLE_PERIOD_NS,
                 "start_index": self.meta.start_index,
                 "degraded": degraded,
+                # Wall-clock cross-check: the only witness to sample loss the
+                # 6-bit counter cannot describe (see capture/runner.py).
+                **(timing or {}),
             },
+            "calibration": calibration,
             "samples": {
                 "encoding": SAMPLE_ENCODING,
                 "stored_count": self._stored_count,
@@ -128,7 +135,9 @@ class ArtifactWriter:
             "complete": bool(complete and not gaps),
             "interruption": interruption,
             "stats": stats,
-            "warnings": list(warnings or []),
+            # Warnings are stored in their machine-readable form so a stored
+            # capture stays as branchable as a live result.
+            "warnings": _warnings_as_json(list(warnings or [])),
         }
         if self.meta.metadata_text is not None:
             self._zip.writestr("metadata.txt", self.meta.metadata_text)
@@ -173,6 +182,15 @@ class ArtifactReader:
         encoding = self.manifest.get("samples", {}).get("encoding")
         if encoding != SAMPLE_ENCODING:
             raise CaptureFileError(f"unsupported sample encoding {encoding!r} in {self.path}")
+        # Every time value derives from the sample rate, so a missing rate is
+        # an error rather than an invitation to assume the usual one.
+        rate = self.manifest.get("timeline", {}).get("sample_rate_hz")
+        if not isinstance(rate, int) or rate <= 0:
+            raise CaptureFileError(
+                f"capture manifest has no usable timeline.sample_rate_hz ({rate!r}) in "
+                f"{self.path}; every timestamp depends on it"
+            )
+        self.sample_rate_hz: int = rate
 
     def close(self) -> None:
         self._zip.close()
@@ -199,11 +217,15 @@ class ArtifactReader:
         metadata_text: str | None = None
         if "metadata.txt" in self._zip.namelist():
             metadata_text = self._zip.read("metadata.txt").decode("ascii", errors="replace")
+        configuration = dict(self.manifest.get("configuration", {}))
+        # The timeline block is authoritative for the rate the file was
+        # recorded at; never fall back to a compiled-in default.
+        configuration["sample_rate_hz"] = self.sample_rate_hz
         return CaptureMeta(
             capture_id=self.manifest.get("capture_id", ""),
             created_utc=self.manifest.get("created_utc", ""),
             device=self.manifest.get("device", {}),
-            configuration=self.manifest.get("configuration", {}),
+            configuration=configuration,
             metadata_text=metadata_text,
             start_index=self.manifest.get("timeline", {}).get("start_index", 0),
         )

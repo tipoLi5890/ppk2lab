@@ -190,6 +190,15 @@ class TransportError(Ppk2labError):
     )
 
 
+class StreamStalledError(TransportError):
+    code = "STREAM_STALLED"
+    default_remediation = (
+        "The device stopped streaming while keeping its serial port open. Reconnect it "
+        "and run `ppk2lab doctor --json`; partial data is preserved with an interruption "
+        "record."
+    )
+
+
 #: Registry of all stable error codes, used by `ppk2lab capabilities` so the
 #: surface is generated from live definitions instead of a hand-written table.
 ERROR_CLASSES: tuple[type[Ppk2labError], ...] = (
@@ -210,6 +219,7 @@ ERROR_CLASSES: tuple[type[Ppk2labError], ...] = (
     VoltageRangeError,
     DecoderRateError,
     TransportError,
+    StreamStalledError,
 )
 
 

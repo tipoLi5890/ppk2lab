@@ -10,14 +10,46 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
-from ..errors import TransportError
+from ..diagnostics import (
+    W_CALIBRATION_INCOMPLETE,
+    W_DUT_POWER_UNKNOWN,
+    W_IMPLAUSIBLE_SAMPLES,
+    W_INTERRUPTED,
+    W_METADATA,
+    W_NO_SAMPLES,
+    W_NOT_CALIBRATED,
+    W_SAMPLE_GAPS,
+    W_TIMELINE_COMPRESSION,
+    W_TRIGGER,
+    W_USER_GAIN,
+    W_VOLTAGE_ASSUMED,
+    Diagnostic,
+    warn,
+)
+from ..errors import StreamStalledError, TransportError, UsageError
 from ..protocol.samples import GapEvent, SampleBlock
 from ..triggers.engine import TriggerEngine
-from ..types import SAMPLE_RATE_HZ
+from ..types import SAMPLE_RATE_HZ, VoltageBasis
 from .model import Capture, CaptureBuilder, CaptureMeta
-from .stats import StatsAccumulator, WindowStats
+from .stats import StatsAccumulator, VoltageContext, WindowStats
+
+#: A capture whose timeline advanced measurably slower than the wall clock
+#: lost samples the 6-bit counter could not report. The threshold is
+#: deliberately loose: USB delivery is bursty, and a straggling final block
+#: must never be reported as data loss. A host starved badly enough to alias
+#: the counter drops a large fraction of the stream, so a 10% deficit still
+#: detects it with a wide margin. The exact ratio is always reported, so
+#: tighter analysis stays possible downstream.
+RATE_DEFICIT_TOLERANCE = 0.10
+#: Below this observation window, delivery jitter dominates and the check
+#: reports ``too_short`` instead of guessing.
+MIN_RATE_CHECK_SECONDS = 2.0
+#: Refuse to buffer more than this in RAM without an explicit opt-in
+#: (4 bytes/sample: 60 s is ~24 MB, an 8 h capture would be ~11.5 GB).
+DEFAULT_IN_MEMORY_LIMIT_SAMPLES = 60 * SAMPLE_RATE_HZ
 
 
 @dataclass
@@ -30,7 +62,9 @@ class CaptureResult:
     trigger: dict[str, Any] | None
     capture_id: str
     capture_sha256: str | None
-    warnings: list[str] = field(default_factory=list)
+    warnings: list[Diagnostic] = field(default_factory=list)
+    #: Wall-clock cross-check of the sample timeline; see ``timeline_report``.
+    timeline: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -40,9 +74,56 @@ class CaptureResult:
             "complete": self.complete,
             "interruption": self.interruption,
             "trigger": self.trigger,
+            "timeline": dict(self.timeline),
             "stats": self.stats.to_json() if self.stats else None,
-            "warnings": list(self.warnings),
+            "warnings": [w.to_json() for w in self.warnings],
         }
+
+
+def timeline_report(
+    *,
+    first_sample_at: float | None,
+    last_sample_at: float | None,
+    timeline_advance: int,
+    started_utc: str,
+    ended_utc: str,
+) -> dict[str, Any]:
+    """Compare the sample timeline against the host's wall clock.
+
+    The 6-bit sample counter can only describe losses smaller than 64 samples;
+    a larger burst aliases, and a loss of exactly k*64 samples is invisible to
+    it entirely. Wall-clock elapsed time is the only independent witness: if
+    N samples arrived over T seconds and N/T is far below 100 kS/s, samples
+    went missing however quiet the counter stayed.
+
+    Timing is measured between the first and last received samples, so the
+    device's start-up latency is not mistaken for loss.
+    """
+    report: dict[str, Any] = {
+        "started_utc": started_utc,
+        "ended_utc": ended_utc,
+        "wall_elapsed_s": None,
+        "timeline_advance": timeline_advance,
+        "achieved_sample_rate_hz": None,
+        "rate_deficit_ratio": None,
+        "rate_check": "not_applicable",
+    }
+    if first_sample_at is None or last_sample_at is None:
+        return report
+    elapsed = last_sample_at - first_sample_at
+    report["wall_elapsed_s"] = elapsed
+    if elapsed <= 0:
+        return report
+    achieved = timeline_advance / elapsed
+    report["achieved_sample_rate_hz"] = achieved
+    report["rate_deficit_ratio"] = max(0.0, 1.0 - achieved / SAMPLE_RATE_HZ)
+    if elapsed < MIN_RATE_CHECK_SECONDS:
+        report["rate_check"] = "too_short"
+    elif report["rate_deficit_ratio"] > RATE_DEFICIT_TOLERANCE:
+        report["rate_check"] = "deficit"
+    else:
+        report["rate_check"] = "ok"
+    return report
 
 
 def run_capture(
@@ -55,6 +136,8 @@ def run_capture(
     keep_in_memory: bool | None = None,
     trigger_engine: TriggerEngine | None = None,
     trigger_timeout_s: float | None = None,
+    assume_voltage_mv: int | None = None,
+    in_memory_limit_samples: int | None = DEFAULT_IN_MEMORY_LIMIT_SAMPLES,
 ) -> CaptureResult:
     """Capture from an open device. Never enables DUT power or changes any
     hardware state other than starting/stopping the measurement stream."""
@@ -65,12 +148,47 @@ def run_capture(
     if keep_in_memory is None:
         keep_in_memory = output is None
 
+    if duration_s is not None:
+        limit = round(duration_s * SAMPLE_RATE_HZ)
+        sample_limit = min(sample_limit, limit) if sample_limit else limit
+
+    if keep_in_memory and output is None and in_memory_limit_samples is not None:
+        projected = sample_limit
+        if trigger_engine is not None:
+            projected = trigger_engine.pre_samples + trigger_engine.post_samples
+        if projected is None or projected > in_memory_limit_samples:
+            budget_s = in_memory_limit_samples / SAMPLE_RATE_HZ
+            requested = "unbounded" if projected is None else f"{projected / SAMPLE_RATE_HZ:g} s"
+            raise UsageError(
+                f"refusing to buffer a {requested} capture in memory "
+                f"(limit {budget_s:g} s, about {in_memory_limit_samples * 4 / 1e6:.0f} MB)",
+                remediation="Pass an output path so samples stream to disk "
+                "(`--output run.ppk2a`), or raise in_memory_limit_samples deliberately.",
+            )
+
     state = device.state
+    voltage = VoltageContext(
+        voltage_mv=assume_voltage_mv if assume_voltage_mv is not None else state.source_voltage_mv,
+        basis=(
+            VoltageBasis.CALLER_OVERRIDE.value
+            if assume_voltage_mv is not None
+            else state.source_voltage_basis.value
+        ),
+        mode=state.mode.name.lower() if state.mode else None,
+    )
+    device_block = device.info.to_json()
+    if hasattr(device, "firmware_fingerprint"):
+        # Captures must be traceable to the firmware that produced them, and
+        # the measurement port never reports a version string.
+        device_block["firmware_fingerprint"] = device.firmware_fingerprint()
     meta = CaptureMeta(
-        device=device.info.to_json(),
+        device=device_block,
         configuration={
-            "mode": state.mode.name.lower() if state.mode else None,
+            "mode": voltage.mode,
             "source_voltage_mv": state.source_voltage_mv,
+            "voltage_basis": voltage.basis,
+            "voltage_measured": False,
+            "assumed_voltage_mv": assume_voltage_mv,
             "dut_power": state.dut_power,
             "sample_rate_hz": SAMPLE_RATE_HZ,
             "digital_channels": [f"D{i}" for i in range(8)],
@@ -81,26 +199,40 @@ def run_capture(
     )
 
     calibration = device.calibration
+    # The calibration correction term uses the device's own VDD field in every
+    # mode; only the energy figure depends on which voltage is defensible.
     vdd = state.source_voltage_mv
     builder = CaptureBuilder(meta) if keep_in_memory else None
     writer = ArtifactWriter(output, meta, overwrite=overwrite) if output else None
     acc = StatsAccumulator(0)
-    warnings: list[str] = []
+    warnings: list[Diagnostic] = list(_calibration_warnings(device))
+    if state.dut_power is not True:
+        warnings.append(
+            warn(
+                W_DUT_POWER_UNKNOWN,
+                "DUT power state is unknown or off (the device cannot report it); if the "
+                "DUT is not powered through the meter, the capture will read near zero",
+            )
+        )
+    note = voltage.note()
+    if note and not voltage.energy_defensible:
+        warnings.append(warn(W_VOLTAGE_ASSUMED, note))
     interruption: dict[str, Any] | None = None
     reached_target = False
     first_index: int | None = None
-
-    if duration_s is not None:
-        limit = round(duration_s * SAMPLE_RATE_HZ)
-        sample_limit = min(sample_limit, limit) if sample_limit else limit
+    first_sample_at: float | None = None
+    last_sample_at: float | None = None
 
     def sink(event: SampleBlock | GapEvent) -> None:
-        nonlocal first_index
+        nonlocal first_index, first_sample_at, last_sample_at
         if isinstance(event, SampleBlock):
+            now = time.monotonic()
             if first_index is None:
                 first_index = event.start_index
                 acc.start_index = event.start_index
                 acc.end_index = event.start_index
+                first_sample_at = now
+            last_sample_at = now
             if calibration is not None:
                 acc.add_block(event, calibration.convert_block(event, vdd))
         else:
@@ -113,6 +245,7 @@ def run_capture(
             else:
                 writer.add_gap(event)
 
+    started_utc = datetime.now(UTC).isoformat(timespec="milliseconds")
     started = time.monotonic()
     try:
         if trigger_engine is None:
@@ -143,7 +276,10 @@ def run_capture(
                     and time.monotonic() - started > trigger_timeout_s
                 ):
                     warnings.append(
-                        f"trigger did not fire within {trigger_timeout_s} s; capture aborted"
+                        warn(
+                            W_TRIGGER,
+                            f"trigger did not fire within {trigger_timeout_s} s; capture aborted",
+                        )
                     )
                     interruption = {"reason": "trigger_timeout"}
                     break
@@ -154,23 +290,74 @@ def run_capture(
                     break
     except KeyboardInterrupt:
         interruption = {"reason": "keyboard_interrupt"}
-        warnings.append("capture interrupted by user; partial data preserved")
+        warnings.append(warn(W_INTERRUPTED, "capture interrupted by user; partial data preserved"))
+    except StreamStalledError as exc:
+        interruption = {"reason": "stream_stalled", "detail": exc.message}
+        warnings.append(
+            warn(W_INTERRUPTED, f"capture interrupted: {exc.message}; partial data preserved")
+        )
     except TransportError as exc:
         interruption = {"reason": "transport_error", "detail": exc.message}
-        warnings.append(f"capture interrupted: {exc.message}; partial data preserved")
+        warnings.append(
+            warn(W_INTERRUPTED, f"capture interrupted: {exc.message}; partial data preserved")
+        )
     except BaseException:
         if writer is not None:
             writer.abort()
         raise
 
     if trigger_engine is not None and not trigger_engine.fired and interruption is None:
-        warnings.append("stream ended before the trigger fired")
+        warnings.append(warn(W_TRIGGER, "stream ended before the trigger fired"))
         interruption = {"reason": "trigger_never_fired"}
 
-    complete = reached_target and interruption is None and acc.gap_count == 0
+    ended_utc = datetime.now(UTC).isoformat(timespec="milliseconds")
+    timeline = timeline_report(
+        first_sample_at=first_sample_at,
+        last_sample_at=last_sample_at,
+        timeline_advance=(acc.end_index - acc.start_index),
+        started_utc=started_utc,
+        ended_utc=ended_utc,
+    )
+    if timeline["rate_check"] == "deficit":
+        deficit = timeline["rate_deficit_ratio"]
+        achieved = timeline["achieved_sample_rate_hz"]
+        warnings.append(
+            warn(
+                W_TIMELINE_COMPRESSION,
+                f"timeline compression: {achieved:,.0f} samples/s reached against a nominal "
+                f"{SAMPLE_RATE_HZ:,} S/s ({deficit:.1%} short). Samples were lost beyond "
+                "what the 6-bit counter can report, so durations and integrals understate "
+                "reality",
+            )
+        )
+        if interruption is None:
+            interruption = {
+                "reason": "timeline_compression",
+                "detail": f"achieved {achieved:.0f} S/s, deficit {deficit:.3f}",
+            }
+
     if acc.gap_count:
-        warnings.append(f"capture contains {acc.gap_count} sample gap(s); see the gap table")
-    stats = acc.finalize(source_voltage_mv=vdd) if calibration is not None else None
+        warnings.append(
+            warn(
+                W_SAMPLE_GAPS,
+                f"capture contains {acc.gap_count} sample gap(s); see the gap table",
+            )
+        )
+    if acc.implausible:
+        warnings.append(
+            warn(
+                W_IMPLAUSIBLE_SAMPLES,
+                f"{acc.implausible} sample(s) converted to a physically impossible current "
+                "and were excluded from statistics; this indicates a stream framing desync",
+            )
+        )
+    if acc.stored == 0 and interruption is None:
+        warnings.append(
+            warn(W_NO_SAMPLES, "capture stored no samples; the device produced no data")
+        )
+
+    complete = reached_target and interruption is None and acc.gap_count == 0
+    stats = acc.finalize(voltage=voltage) if calibration is not None else None
 
     capture: Capture | None = None
     if builder is not None:
@@ -186,7 +373,9 @@ def run_capture(
             complete=reached_target and interruption is None,
             interruption=interruption,
             stats=stats.to_json() if stats else None,
-            warnings=warnings,
+            warnings=[w.to_json() for w in warnings],
+            calibration=_calibration_block(device),
+            timing=timeline,
         )
         path = str(writer.path)
         sha256 = manifest["samples"]["sha256"]
@@ -203,4 +392,78 @@ def run_capture(
         capture_id=meta.capture_id,
         capture_sha256=sha256,
         warnings=warnings,
+        timeline=timeline,
     )
+
+
+def _calibration_block(device: Any) -> dict[str, Any]:
+    """Calibration provenance recorded with every capture."""
+    metadata = getattr(device, "metadata", None)
+    calibration = getattr(device, "calibration", None)
+    return {
+        "calibrated_flag": getattr(metadata, "calibrated", None),
+        "metadata_terminated": getattr(metadata, "terminated", None),
+        "metadata_warnings": list(getattr(metadata, "warnings", []) or []),
+        "missing_ranges": calibration.missing_ranges() if calibration else None,
+        "user_gains": (
+            [None if g is None else g.ug for g in calibration.ranges] if calibration else None
+        ),
+    }
+
+
+def _calibration_warnings(device: Any) -> list[Diagnostic]:
+    """Surface every reason the calibration chain may be untrustworthy.
+
+    A missing constant is never replaced by a default — the affected range
+    converts to NaN instead, because a zero offset alone would bias every
+    sample in that range by the full offset. But refusing to invent data is
+    only half the job: the capture must also carry the reason its numbers are
+    suspect, or the problem is merely postponed to whoever reads it later.
+    """
+    warnings: list[Diagnostic] = []
+    metadata = getattr(device, "metadata", None)
+    calibration = getattr(device, "calibration", None)
+    if metadata is not None:
+        warnings.extend(warn(W_METADATA, text) for text in metadata.warnings)
+        if metadata.calibrated is False:
+            warnings.append(
+                warn(
+                    W_NOT_CALIBRATED,
+                    "device metadata reports Calibrated: 0; the meaning of this flag is not "
+                    "hardware-verified, so treat absolute accuracy as unconfirmed",
+                )
+            )
+        if not metadata.terminated:
+            warnings.append(
+                warn(
+                    W_METADATA,
+                    "device metadata was not terminated by END; calibration constants may "
+                    "be incomplete and affected ranges will not convert",
+                )
+            )
+    if calibration is not None:
+        missing = calibration.missing_ranges()
+        if missing:
+            warnings.append(
+                warn(
+                    W_CALIBRATION_INCOMPLETE,
+                    f"calibration constants missing for measurement range(s) {missing}; "
+                    "samples in those ranges cannot be converted and are excluded from "
+                    "statistics",
+                )
+            )
+        gains = [
+            (index, rc.ug)
+            for index, rc in enumerate(calibration.ranges)
+            if rc is not None and rc.ug != 1.0
+        ]
+        if gains:
+            detail = ", ".join(f"range {i}: {g:g}" for i, g in gains)
+            warnings.append(
+                warn(
+                    W_USER_GAIN,
+                    f"non-unity user gain in effect ({detail}); every reading in those "
+                    "ranges is scaled by it",
+                )
+            )
+    return warnings

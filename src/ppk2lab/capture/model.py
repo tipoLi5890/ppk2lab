@@ -61,7 +61,7 @@ class Capture:
         *,
         complete: bool = True,
         interruption: dict[str, Any] | None = None,
-        warnings: list[str] | None = None,
+        warnings: list[Any] | None = None,
         timeline_degraded: bool = False,
     ) -> None:
         self.meta = meta
@@ -243,7 +243,7 @@ class CaptureBuilder:
         self.meta = meta
         self.words = array("I")
         self.gaps: list[GapEvent] = []
-        self.warnings: list[str] = []
+        self.warnings: list[Any] = []
         self.timeline_degraded = False
         self._first_index: int | None = None
 

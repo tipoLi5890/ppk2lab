@@ -10,6 +10,7 @@ import argparse
 import json
 import platform
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,11 +29,26 @@ from ..analysis.measure import (
     save_annotations_jsonl,
 )
 from ..capture.model import Capture
+from ..capture.runner import DEFAULT_IN_MEMORY_LIMIT_SAMPLES
 from ..decoders.base import decode_capture
 from ..decoders.registry import decoder_capabilities
 from ..decoders.spi import SPIDecoder
 from ..decoders.uart import UARTDecoder
 from ..device import PPK2
+from ..diagnostics import (
+    W_CALIBRATION_INCOMPLETE,
+    W_DECODER_RATE,
+    W_DEVICE_NOT_FOUND,
+    W_DRY_RUN,
+    W_GENERIC,
+    W_METADATA,
+    W_NOT_CALIBRATED,
+    W_SAMPLE_GAPS,
+    W_SESSION_RECOVERED,
+    W_STATE_UNVERIFIED,
+    Diagnostic,
+    warn,
+)
 from ..discovery import discover
 from ..errors import (
     EXIT_ASSERTION_FAILED,
@@ -59,7 +75,7 @@ from .main import COMMAND_CATEGORIES, STATE_CHANGING_COMMANDS, build_parser
 @dataclass
 class Outcome:
     result: dict[str, Any] | None
-    warnings: list[str] = field(default_factory=list)
+    warnings: Sequence[Diagnostic | str] = field(default_factory=list)
     human: str = ""
     exit_code: int = 0
     error: dict[str, Any] | None = None
@@ -71,6 +87,7 @@ def _open_device(args: Any) -> PPK2:
         serial_number=getattr(args, "device", None),
         port=getattr(args, "port", None),
         simulate=args.simulate,
+        max_voltage_mv=getattr(args, "max_voltage_mv", None),
     )
 
 
@@ -105,11 +122,14 @@ def _fmt_stats(stats: dict[str, Any]) -> str:
 def cmd_discover(args: Any) -> Outcome:
     devices = discover(simulate=args.simulate)
     result = {"devices": [d.to_json() for d in devices]}
-    warnings = []
+    warnings: list[Diagnostic | str] = []
     if not devices:
         warnings.append(
-            "no PPK2 devices found; check the USB connection and permissions, then run "
-            "`ppk2lab doctor --json`"
+            warn(
+                W_DEVICE_NOT_FOUND,
+                "no PPK2 devices found; check the USB connection and permissions, then run "
+                "`ppk2lab doctor --json`",
+            )
         )
     lines = []
     for dev in devices:
@@ -133,16 +153,30 @@ def cmd_info(args: Any) -> Outcome:
             "metadata": metadata.to_json(),
             "calibration_missing_ranges": missing,
         }
-        warnings = list(metadata.warnings)
+        warnings: list[Diagnostic | str] = [warn(W_METADATA, m) for m in metadata.warnings]
         if device.recovered_stale_bytes:
             warnings.append(
-                f"recovered an interrupted session: discarded "
-                f"{device.recovered_stale_bytes} stale stream bytes at open"
+                warn(
+                    W_SESSION_RECOVERED,
+                    f"recovered an interrupted session: discarded "
+                    f"{device.recovered_stale_bytes} stale stream bytes at open",
+                )
             )
         if missing:
             warnings.append(
-                f"calibration constants missing for range(s) {missing}; samples in those "
-                "ranges cannot be converted to current"
+                warn(
+                    W_CALIBRATION_INCOMPLETE,
+                    f"calibration constants missing for range(s) {missing}; samples in "
+                    "those ranges cannot be converted to current",
+                )
+            )
+        if metadata.calibrated is False:
+            warnings.append(
+                warn(
+                    W_NOT_CALIBRATED,
+                    "device metadata reports Calibrated: 0; absolute accuracy is "
+                    "unconfirmed (the flag's meaning is not hardware-verified)",
+                )
             )
         human = "\n".join(
             [
@@ -304,6 +338,32 @@ def cmd_doctor(args: Any) -> Outcome:
                     None if metadata.terminated else "retry; report if it persists",
                 )
                 cal = device.calibration
+                gains = (
+                    [
+                        (i, rc.ug)
+                        for i, rc in enumerate(cal.ranges)
+                        if rc is not None and rc.ug != 1.0
+                    ]
+                    if cal
+                    else []
+                )
+                check(
+                    "calibrated_flag",
+                    "pass" if metadata.calibrated else "warn",
+                    f"device reports Calibrated: {int(bool(metadata.calibrated))}",
+                    None
+                    if metadata.calibrated
+                    else "absolute accuracy is unconfirmed; the flag's meaning is not "
+                    "hardware-verified",
+                )
+                check(
+                    "user_gain",
+                    "pass" if not gains else "warn",
+                    "all user gains are unity"
+                    if not gains
+                    else "non-unity user gain: " + ", ".join(f"range {i}: {g:g}" for i, g in gains),
+                    None if not gains else "every reading in those ranges is scaled by it",
+                )
                 missing = cal.missing_ranges() if cal else list(range(5))
                 check(
                     "calibration",
@@ -383,11 +443,17 @@ def cmd_configure(args: Any) -> Outcome:
             changes.append(device.set_source_voltage_mv(args.voltage_mv, dry_run=dry_run))
         if args.dut_power is not None:
             changes.append(device.set_dut_power(args.dut_power == "on", dry_run=dry_run))
-        warnings: list[str] = []
+        warnings: list[Diagnostic | str] = []
         if dry_run:
-            warnings.append("dry run: no hardware state was changed; re-run with --apply to apply")
+            warnings.append(
+                warn(
+                    W_DRY_RUN,
+                    "dry run: no hardware state was changed; re-run with --apply to apply",
+                )
+            )
         for change in changes:
-            warnings.extend(change.warnings)
+            code = W_GENERIC if change.observed_after else W_STATE_UNVERIFIED
+            warnings.extend(warn(code, text) for text in change.warnings)
         result = {
             "dry_run": dry_run,
             "changes": [c.to_json() for c in changes],
@@ -461,6 +527,8 @@ def cmd_capture(args: Any) -> Outcome:
             overwrite=args.overwrite,
             trigger_engine=trigger_engine,
             trigger_timeout_s=trigger_timeout_s,
+            assume_voltage_mv=args.assume_voltage_mv,
+            in_memory_limit_samples=None if args.in_memory else DEFAULT_IN_MEMORY_LIMIT_SAMPLES,
         )
     finally:
         device.close()
@@ -510,11 +578,17 @@ def _build_decoder(args: Any):
 def cmd_decode(args: Any) -> Outcome:
     capture = _load_capture(args.capture)
     decoder = _build_decoder(args)
-    warnings = list(decoder.feasibility.warnings) if getattr(decoder, "feasibility", None) else []
+    feasibility = getattr(decoder, "feasibility", None)
+    warnings: list[Diagnostic | str] = (
+        [warn(W_DECODER_RATE, text) for text in feasibility.warnings] if feasibility else []
+    )
     if not capture.complete:
         warnings.append(
-            "capture is incomplete; events touching missing data carry gap errors and "
-            "zero confidence"
+            warn(
+                W_SAMPLE_GAPS,
+                "capture is incomplete; events touching missing data carry gap errors and "
+                "zero confidence",
+            )
         )
     annotations = decode_capture(capture, decoder)
     kinds: dict[str, int] = {}
@@ -557,9 +631,11 @@ def cmd_measure(args: Any) -> Outcome:
         "annotations": None,
         "groups": None,
     }
-    warnings: list[str] = []
+    warnings: list[Diagnostic | str] = []
     if not capture.complete:
-        warnings.append("capture is incomplete; windows overlapping gaps are marked")
+        warnings.append(
+            warn(W_SAMPLE_GAPS, "capture is incomplete; windows overlapping gaps are marked")
+        )
     human_parts: list[str] = []
     if args.annotations:
         annotations = load_annotations_jsonl(args.annotations)
@@ -569,7 +645,12 @@ def cmd_measure(args: Any) -> Outcome:
             kinds = [group_by]
             group_by = "annotation"
         entries = measure_annotations(
-            capture, annotations, kinds=kinds, group_by=group_by, filtered=args.filtered
+            capture,
+            annotations,
+            kinds=kinds,
+            group_by=group_by,
+            filtered=args.filtered,
+            assume_voltage_mv=args.assume_voltage_mv,
         )
         if group_by == "kind":
             result["groups"] = entries
@@ -591,11 +672,19 @@ def cmd_measure(args: Any) -> Outcome:
             raise UsageError(
                 f"invalid --window {args.window!r}; expected START:END seconds"
             ) from exc
-        stats = measure_window(capture, start_s=start_s, end_s=end_s, filtered=args.filtered)
+        stats = measure_window(
+            capture,
+            start_s=start_s,
+            end_s=end_s,
+            filtered=args.filtered,
+            assume_voltage_mv=args.assume_voltage_mv,
+        )
         result["window"] = stats.to_json()
         human_parts.append(_fmt_stats(result["window"]))
     else:
-        stats = measure_window(capture, filtered=args.filtered)
+        stats = measure_window(
+            capture, filtered=args.filtered, assume_voltage_mv=args.assume_voltage_mv
+        )
         result["window"] = stats.to_json()
         human_parts.append(_fmt_stats(result["window"]))
     return Outcome(result, warnings, "\n".join(human_parts))
@@ -638,6 +727,7 @@ def cmd_assert(args: Any) -> Outcome:
             rule,
             decoder_config=decoder_config,
             allow_experimental=args.allow_experimental,
+            assume_voltage_mv=args.assume_voltage_mv,
         )
         for rule in rules
     ]
@@ -678,7 +768,7 @@ def cmd_assert(args: Any) -> Outcome:
 
 def cmd_export(args: Any) -> Outcome:
     capture = _load_capture(args.capture)
-    warnings: list[str] = []
+    warnings: list[Diagnostic | str] = []
     if args.export_format == "csv":
         records = export_csv(
             capture, args.output, include_filtered=args.filtered, overwrite=args.overwrite

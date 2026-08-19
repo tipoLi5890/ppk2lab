@@ -239,6 +239,7 @@ See [ROADMAP.md](ROADMAP.md) for versioned exit criteria and the hardware compat
 | [docs/SPEC.md](docs/SPEC.md) | Public data model, states, API, and schema contracts |
 | [docs/api-baseline.md](docs/api-baseline.md) | Frozen public API surface and stability policy |
 | [docs/cli-reference.md](docs/cli-reference.md) | CLI commands, flags, JSON output, and exit codes |
+| [docs/faq.md](docs/faq.md) | Sample rate, energy, mode semantics, and other recurring questions |
 | [docs/protocol-spec.md](docs/protocol-spec.md) | Documented PPK2 protocol, commands, fields, and device behavior |
 | [docs/capture-format.md](docs/capture-format.md) | Canonical loss-aware capture artifact |
 | [docs/calibration.md](docs/calibration.md) | Raw-sample to current conversion formula and units |

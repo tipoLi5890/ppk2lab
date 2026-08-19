@@ -145,12 +145,70 @@ class SampleBlock:
             yield unpack_sample(word)
 
 
+#: Smoothing factor for the running mismatch rate. A sustained desync pushes
+#: the estimate past the threshold within a few dozen samples, while isolated
+#: real gaps barely move it.
+DESYNC_EMA_ALPHA = 1.0 / 128.0
+#: Above this share of mismatching counters, the byte framing — not the
+#: device — is the problem: losing a run of bytes that is not a multiple of
+#: four shifts every later word, so the counter field reads bits belonging to
+#: its neighbours and each word looks like a fresh counter jump. The ADC and
+#: range fields are shifted too, which is why such a stream decodes to
+#: currents the hardware cannot physically carry.
+DESYNC_MISMATCH_RATIO = 0.25
+#: Minimum samples observed before the rate is trusted, so a noisy handful at
+#: stream start cannot be mistaken for a desync.
+DESYNC_MIN_SAMPLES = 64
+#: Bytes gathered before scoring the four possible framing offsets.
+RESYNC_SCORE_BYTES = 1024
+#: Upper bound on the stored gap table; a desync storm must not grow memory
+#: without limit. Losses beyond it are still counted, just not enumerated.
+MAX_GAP_EVENTS = 10_000
+
+
+def _swapped(words: array) -> bytes:
+    """Serialize words back to little-endian wire order on big-endian hosts."""
+    copy = array("I", words)
+    copy.byteswap()
+    return copy.tobytes()
+
+
+def _alignment_score(data: bytes, offset: int, max_words: int = 128) -> int:
+    """Rate a candidate byte offset by counter continuity.
+
+    The correct framing makes the 6-bit counter increment by one from word to
+    word; a wrong offset scatters it. Scoring all four offsets recovers the
+    stream after a partial byte loss instead of discarding everything after
+    it.
+    """
+    usable = (len(data) - offset) // 4
+    if usable <= 1:
+        return -1
+    words = array("I")
+    words.frombytes(data[offset : offset + min(usable, max_words) * 4])
+    if sys.byteorder == "big":
+        words.byteswap()
+    score = 0
+    prev: int | None = None
+    for word in words:
+        counter = (word >> COUNTER_SHIFT) & COUNTER_MASK
+        if prev is not None and counter == ((prev + 1) & COUNTER_MASK):
+            score += 1
+        prev = counter
+    return score
+
+
 class SampleStreamParser:
     """Streaming parser: bytes in, ``SampleBlock``/``GapEvent`` out.
 
     Feed byte chunks of any size with :meth:`feed`; report host-side chunk
     drops with :meth:`notify_dropped_bytes`; report an unquantified stall
     with :meth:`notify_unknown_gap`.
+
+    When byte-level framing is lost (a partial byte run vanished, so every
+    later word is shifted), the parser stops emitting one gap per sample,
+    records a single ``stream_desync`` event, and re-aligns by scoring the
+    four candidate byte offsets against counter continuity.
     """
 
     def __init__(self, start_index: int = 0) -> None:
@@ -163,6 +221,13 @@ class SampleStreamParser:
         #: True once an unknown-size gap occurred; timeline indexes after that
         #: point can no longer be mapped to wall-clock time.
         self.timeline_degraded = False
+        #: Gaps that occurred after the table hit :data:`MAX_GAP_EVENTS`.
+        self.gaps_truncated = 0
+        #: Number of framing desyncs detected and re-aligned.
+        self.desync_events = 0
+        self._window_samples = 0
+        self._mismatch_rate = 0.0
+        self._resync_buf: bytearray | None = None
 
     @property
     def next_index(self) -> int:
@@ -170,16 +235,60 @@ class SampleStreamParser:
 
     def _record_gap(self, missing: int | None, reason: str, ambiguous: bool) -> GapEvent:
         gap = GapEvent(index=self._next_index, missing=missing, reason=reason, ambiguous=ambiguous)
-        self.gaps.append(gap)
+        if len(self.gaps) < MAX_GAP_EVENTS:
+            self.gaps.append(gap)
+        else:
+            self.gaps_truncated += 1
         if missing is not None:
             self._next_index += missing
         else:
             self.timeline_degraded = True
         return gap
 
+    def _note_counter_result(self, mismatch: bool) -> bool:
+        """Track the running mismatch rate; True once the framing looks lost.
+
+        A single skipped run of samples produces one mismatch and barely
+        moves the estimate. A byte-level desync makes nearly every word
+        mismatch, which crosses the threshold within a few dozen samples.
+        """
+        self._window_samples += 1
+        observation = 1.0 if mismatch else 0.0
+        self._mismatch_rate += DESYNC_EMA_ALPHA * (observation - self._mismatch_rate)
+        return (
+            self._window_samples >= DESYNC_MIN_SAMPLES
+            and self._mismatch_rate > DESYNC_MISMATCH_RATIO
+        )
+
+    def _enter_resync(self) -> GapEvent:
+        self.desync_events += 1
+        self._buf.clear()
+        self._skip_bytes = 0
+        self._expected_counter = None
+        self._window_samples = 0
+        self._mismatch_rate = 0.0
+        self._resync_buf = bytearray()
+        return self._record_gap(None, "stream_desync", ambiguous=True)
+
+    def _try_resync(self, data: bytes) -> bool:
+        """Accumulate bytes and adopt the best framing offset. True when done."""
+        assert self._resync_buf is not None
+        self._resync_buf.extend(data)
+        if len(self._resync_buf) < RESYNC_SCORE_BYTES:
+            return False
+        candidate = bytes(self._resync_buf)
+        best_offset = max(range(4), key=lambda off: _alignment_score(candidate, off))
+        self._resync_buf = None
+        self._buf.extend(candidate[best_offset:])
+        return True
+
     def feed(self, data: bytes) -> list[SampleBlock | GapEvent]:
         """Parse a chunk; returns blocks and gap events in timeline order."""
         events: list[SampleBlock | GapEvent] = []
+        if self._resync_buf is not None:
+            if not self._try_resync(data):
+                return events
+            data = b""
         if self._skip_bytes:
             take = min(self._skip_bytes, len(data))
             data = data[take:]
@@ -200,6 +309,20 @@ class SampleStreamParser:
         for i, word in enumerate(words):
             counter = (word >> COUNTER_SHIFT) & COUNTER_MASK
             expected = self._expected_counter
+            desynced = self._note_counter_result(expected is not None and counter != expected)
+            if desynced:
+                if i > run_start:
+                    block = SampleBlock(self._next_index, words[run_start:i])
+                    self._next_index += len(block)
+                    self.samples_emitted += len(block)
+                    events.append(block)
+                events.append(self._enter_resync())
+                # Re-frame from the remaining bytes of this chunk.
+                tail = words[i + 1 :]
+                remainder = tail.tobytes() if sys.byteorder == "little" else _swapped(tail)
+                if self._try_resync(remainder):
+                    events.extend(self.feed(b""))
+                return events
             if expected is not None and counter != expected:
                 missing = (counter - expected) & COUNTER_MASK
                 if i > run_start:
@@ -260,6 +383,8 @@ class SampleStreamParser:
         return {
             "samples": self.samples_emitted,
             "gaps": len(self.gaps),
+            "gaps_truncated": self.gaps_truncated,
+            "desync_events": self.desync_events,
             "missing_samples_known": known_missing,
             "has_unknown_gaps": any(g.missing is None for g in self.gaps),
             "timeline_degraded": self.timeline_degraded,

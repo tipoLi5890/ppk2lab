@@ -68,9 +68,21 @@ bits 24-31   digital inputs; bit N = D<N>
 Host requirements:
 
 - reassemble 4-byte frames across arbitrary chunk boundaries;
-- detect loss via `missing = (actual - expected) & 0x3f`; a loss that is an
-  exact multiple of 64 samples is invisible to the counter alone, so
-  counter-derived gaps are always flagged ambiguous;
+- detect loss via `missing = (actual - expected) & 0x3f`. Two consequences
+  follow from the counter being 6 bits wide, and both are load-bearing:
+  a loss of 64 samples or more aliases (100 lost samples are reported as
+  36), and a loss of *exactly* k*64 samples leaves the counter continuous,
+  producing no gap event at all. Counter-derived gaps are therefore always
+  flagged ambiguous, and the wall-clock cross-check below is the only
+  witness to the invisible class;
+- cross-check the sample timeline against elapsed wall time between the
+  first and last received samples. A capture that advanced far slower than
+  100 kS/s lost samples however quiet the counter stayed; every capture
+  records `achieved_sample_rate_hz` and `rate_deficit_ratio`;
+- detect byte-level framing loss (a lost run that is not a multiple of four
+  shifts every later word, making each look like a fresh counter jump) by
+  the running mismatch rate, and re-align by scoring the four candidate byte
+  offsets against counter continuity;
 - account for host-side losses (queue overflow) by byte count, including
   4-byte realignment when the dropped size is not a multiple of 4;
 - build timestamps as `capture_start + timeline_index * 10 us`, where gaps

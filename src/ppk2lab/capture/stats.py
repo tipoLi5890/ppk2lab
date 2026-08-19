@@ -1,10 +1,18 @@
 """Current statistics, charge, energy, peaks, and latency over sample windows.
 
 Charge integrates rectangle-rule at the fixed 10 us sample period:
-``charge_uc = sum(current_ua) * 10e-6`` (uA*s == uC). Energy multiplies charge
-by the source voltage; when the supply voltage is unknown (for example an
-Ampere-mode capture without metadata) energy is reported as ``None``, never
-guessed.
+``charge_uc = sum(current_ua) * 10e-6`` (uA*s == uC).
+
+Energy needs the DUT's supply voltage, and the PPK2 never measures it. Every
+energy figure is therefore ``charge x an assumed voltage``, and the assumption
+is recorded as :class:`~ppk2lab.types.VoltageBasis`:
+
+- Source Meter mode: the DUT runs from VOUT, so the configured setpoint is a
+  defensible supply voltage (still a setpoint: the DUT terminal sees slightly
+  less after shunt burden and lead drop).
+- Ampere Meter mode: the DUT runs from its own supply, and the device's VDD
+  field is a leftover setpoint unrelated to it. Energy is reported as ``None``
+  unless the caller supplies the real voltage explicitly.
 """
 
 from __future__ import annotations
@@ -14,7 +22,68 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..protocol.samples import GapEvent, SampleBlock
-from ..types import SAMPLE_PERIOD_S
+from ..types import SAMPLE_PERIOD_S, VoltageBasis
+
+#: Currents above this are not physically reachable through the PPK2 shunts
+#: (the top measurement range ends at 1 A); a larger value means the 4-byte
+#: framing lost sync, not that the DUT drew that much.
+IMPLAUSIBLE_CURRENT_UA = 1_100_000.0
+
+
+@dataclass(frozen=True)
+class VoltageContext:
+    """The voltage used for energy, and how much that number is worth."""
+
+    voltage_mv: int | None = None
+    basis: str = VoltageBasis.UNKNOWN.value
+    mode: str | None = None
+
+    @property
+    def energy_defensible(self) -> bool:
+        """True when multiplying charge by this voltage yields real energy."""
+        if self.voltage_mv is None:
+            return False
+        if self.basis == VoltageBasis.CALLER_OVERRIDE.value:
+            return True
+        return self.mode == "source" and self.basis in (
+            VoltageBasis.CONFIGURED_SOURCE.value,
+            VoltageBasis.DEVICE_METADATA.value,
+        )
+
+    def note(self) -> str | None:
+        """Human-readable caveat attached to the energy figure, if any."""
+        if self.voltage_mv is None:
+            return "no supply voltage is known, so energy cannot be derived"
+        if self.energy_defensible:
+            if self.basis == VoltageBasis.CALLER_OVERRIDE.value:
+                return f"energy uses the caller-supplied {self.voltage_mv} mV (not measured)"
+            return (
+                f"energy uses the {self.voltage_mv} mV source setpoint; the DUT terminal "
+                "voltage is slightly lower (shunt burden and lead drop are not measured)"
+            )
+        return (
+            f"ampere mode: the device's {self.voltage_mv} mV field is a source setpoint, "
+            "not the DUT's own supply, so energy is not derived. Pass the DUT's real "
+            "supply voltage to compute it."
+        )
+
+
+def voltage_context_from_capture(
+    capture: Any, assume_voltage_mv: int | None = None
+) -> VoltageContext:
+    """Build the energy voltage context for a stored capture."""
+    config = getattr(capture.meta, "configuration", {}) or {}
+    if assume_voltage_mv is not None:
+        return VoltageContext(
+            voltage_mv=assume_voltage_mv,
+            basis=VoltageBasis.CALLER_OVERRIDE.value,
+            mode=config.get("mode"),
+        )
+    return VoltageContext(
+        voltage_mv=capture.source_voltage_mv,
+        basis=config.get("voltage_basis", VoltageBasis.UNKNOWN.value),
+        mode=config.get("mode"),
+    )
 
 
 @dataclass
@@ -32,12 +101,35 @@ class WindowStats:
     min_ua: float | None = None
     max_ua: float | None = None
     peak_index: int | None = None
+    implausible_samples: int = 0
     charge_uc: float | None = None
     energy_uj: float | None = None
     source_voltage_mv: int | None = None
+    voltage_basis: str = VoltageBasis.UNKNOWN.value
+    #: The PPK2 never measures the DUT terminal voltage — always False.
+    voltage_measured: bool = False
+    energy_note: str | None = None
     duration_s: float = 0.0
     complete: bool = True
     gaps: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def covered_fraction(self) -> float | None:
+        """Share of the window that actually carries samples (1.0 = gap-free).
+
+        ``None`` when an unknown-size gap makes the true span unknowable.
+        """
+        span = self.end_index - self.start_index
+        if span <= 0:
+            return None
+        if self.has_unknown_gaps:
+            return None
+        return self.stored_samples / span
+
+    @property
+    def charge_is_lower_bound(self) -> bool:
+        """True when missing samples make charge/energy an underestimate."""
+        return self.gap_count > 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -50,6 +142,8 @@ class WindowStats:
                 "valid": self.valid_samples,
                 "invalid_range": self.invalid_range_samples,
                 "not_convertible": self.nan_samples,
+                "implausible": self.implausible_samples,
+                "covered_fraction": self.covered_fraction,
             },
             "current_ua": {
                 "mean": self.mean_ua,
@@ -58,8 +152,12 @@ class WindowStats:
                 "peak_index": self.peak_index,
             },
             "charge_uc": self.charge_uc,
+            "charge_is_lower_bound": self.charge_is_lower_bound,
             "energy_uj": self.energy_uj,
             "source_voltage_mv": self.source_voltage_mv,
+            "voltage_basis": self.voltage_basis,
+            "voltage_measured": self.voltage_measured,
+            "energy_note": self.energy_note,
             "complete": self.complete,
             "sample_gaps": self.gaps,
         }
@@ -78,6 +176,7 @@ class StatsAccumulator:
         self.valid = 0
         self.invalid_range = 0
         self.nans = 0
+        self.implausible = 0
         self.total = 0.0
         self.min_v: float | None = None
         self.max_v: float | None = None
@@ -94,6 +193,11 @@ class StatsAccumulator:
                 continue
             if math.isnan(value):
                 self.nans += 1
+                continue
+            if abs(value) > IMPLAUSIBLE_CURRENT_UA:
+                # Beyond what the hardware can carry: framing desync, not a
+                # measurement. Counted and excluded rather than averaged in.
+                self.implausible += 1
                 continue
             self.valid += 1
             self.total += value
@@ -112,11 +216,19 @@ class StatsAccumulator:
             self.missing_known += gap.missing
             self.end_index = max(self.end_index, gap.index + gap.missing)
 
-    def finalize(self, *, source_voltage_mv: int | None = None) -> WindowStats:
+    def finalize(
+        self,
+        *,
+        source_voltage_mv: int | None = None,
+        voltage: VoltageContext | None = None,
+    ) -> WindowStats:
+        if voltage is None:
+            voltage = VoltageContext(voltage_mv=source_voltage_mv)
         charge = self.total * SAMPLE_PERIOD_S if self.valid else None
         energy = None
-        if charge is not None and source_voltage_mv is not None:
-            energy = charge * (source_voltage_mv / 1000.0)
+        if charge is not None and voltage.energy_defensible:
+            assert voltage.voltage_mv is not None
+            energy = charge * (voltage.voltage_mv / 1000.0)
         return WindowStats(
             start_index=self.start_index,
             end_index=self.end_index,
@@ -127,13 +239,16 @@ class StatsAccumulator:
             valid_samples=self.valid,
             invalid_range_samples=self.invalid_range,
             nan_samples=self.nans,
+            implausible_samples=self.implausible,
             mean_ua=(self.total / self.valid) if self.valid else None,
             min_ua=self.min_v,
             max_ua=self.max_v,
             peak_index=self.peak_index,
             charge_uc=charge,
             energy_uj=energy,
-            source_voltage_mv=source_voltage_mv,
+            source_voltage_mv=voltage.voltage_mv,
+            voltage_basis=voltage.basis,
+            energy_note=voltage.note(),
             duration_s=(self.end_index - self.start_index) * SAMPLE_PERIOD_S,
             complete=(self.gap_count == 0),
             gaps=[g.to_json() for g in self.gaps],
@@ -146,18 +261,24 @@ def compute_stats(
     start_index: int | None = None,
     end_index: int | None = None,
     filtered: bool = False,
+    assume_voltage_mv: int | None = None,
 ) -> WindowStats:
     """Statistics over a capture or a timeline window of it.
 
     ``start_index``/``end_index`` are timeline indexes; samples inside gaps
-    simply do not exist and are counted as missing.
+    simply do not exist and are counted as missing. ``assume_voltage_mv``
+    supplies the DUT supply voltage the hardware cannot measure, which is what
+    makes energy computable for an Ampere-mode capture.
     """
     from ..calibration import SpikeFilter
 
     calibration = capture.calibration
     if calibration is None:
         raise ValueError("capture has no calibration metadata; cannot compute currents")
+    # The calibration correction term always uses the device's own VDD field,
+    # independently of which voltage is defensible for energy.
     vdd = capture.source_voltage_mv
+    voltage = voltage_context_from_capture(capture, assume_voltage_mv)
     lo = capture.start_index if start_index is None else start_index
     hi = capture.end_index if end_index is None else end_index
     acc = StatsAccumulator(lo)
@@ -165,16 +286,20 @@ def compute_stats(
     spike = SpikeFilter() if filtered else None
     for event in capture.iter_events():
         if isinstance(event, GapEvent):
-            missing = event.missing or 0
             if spike:
                 spike.notify_gap()
-            gap_lo, gap_hi = event.index, event.index + missing
+            if event.missing is None:
+                # Unknown-size gap: it occupies a single timeline position but
+                # invalidates everything after it. A zero-width interval must
+                # still count when it sits exactly on the window boundary.
+                if lo <= event.index < hi or (event.index == lo == hi):
+                    acc.add_gap(event)
+                continue
+            gap_lo, gap_hi = event.index, event.index + event.missing
             if gap_hi > lo and gap_lo < hi:
                 clipped = GapEvent(
                     index=max(gap_lo, lo),
-                    missing=(min(gap_hi, hi) - max(gap_lo, lo))
-                    if event.missing is not None
-                    else None,
+                    missing=min(gap_hi, hi) - max(gap_lo, lo),
                     reason=event.reason,
                     ambiguous=event.ambiguous,
                 )
@@ -190,7 +315,7 @@ def compute_stats(
         if spike:
             currents = spike.apply(currents, sub.ranges)
         acc.add_block(sub, currents)
-    stats = acc.finalize(source_voltage_mv=vdd)
+    stats = acc.finalize(voltage=voltage)
     if end_index is not None:
         stats.end_index = hi
         stats.duration_s = (hi - lo) * SAMPLE_PERIOD_S

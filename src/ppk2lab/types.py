@@ -86,6 +86,26 @@ class DeviceInfo:
         }
 
 
+class VoltageBasis(enum.Enum):
+    """Where a voltage value came from.
+
+    The PPK2 never measures the DUT's terminal voltage, so any energy figure
+    is derived from an assumption. This enum records which assumption, so
+    results can say how much the number is worth.
+    """
+
+    #: The caller supplied the voltage explicitly (e.g. --assume-voltage-mv).
+    CALLER_OVERRIDE = "caller_override"
+    #: This session set the source voltage; in Source Meter mode the DUT is
+    #: powered from VOUT, so the setpoint is a defensible supply voltage.
+    CONFIGURED_SOURCE = "configured_source"
+    #: Read from device metadata (the regulator setpoint). In Ampere Meter
+    #: mode this is a leftover setpoint unrelated to the DUT's own supply.
+    DEVICE_METADATA = "device_metadata"
+    #: No voltage is known.
+    UNKNOWN = "unknown"
+
+
 @dataclass
 class DeviceState:
     """Device state as tracked by the host session.
@@ -98,6 +118,8 @@ class DeviceState:
     source_voltage_mv: int | None = None
     dut_power: bool | None = None
     measuring: bool = False
+    #: How ``source_voltage_mv`` was learned; see :class:`VoltageBasis`.
+    source_voltage_basis: VoltageBasis = VoltageBasis.UNKNOWN
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -105,6 +127,7 @@ class DeviceState:
             "source_voltage_mv": self.source_voltage_mv,
             "dut_power": self.dut_power,
             "measuring": self.measuring,
+            "source_voltage_basis": self.source_voltage_basis.value,
         }
 
 

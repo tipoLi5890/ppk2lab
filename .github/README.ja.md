@@ -241,6 +241,7 @@ Nordic Semiconductor、Power Profiler Kit、PPK2 は Nordic Semiconductor ASA �
 | [docs/SPEC.md](../docs/SPEC.md) | 公開データモデル、状態、API、schema コントラクト |
 | [docs/api-baseline.md](../docs/api-baseline.md) | 凍結された公開 API サーフェスと安定性ポリシー |
 | [docs/cli-reference.md](../docs/cli-reference.md) | CLI コマンド、フラグ、JSON 出力、終了コード |
+| [docs/faq.md](../docs/faq.md) | サンプルレート、エネルギー、モード semantics、その他のよくある質問 |
 | [docs/protocol-spec.md](../docs/protocol-spec.md) | 記録済みの PPK2 プロトコル、コマンド、フィールド、デバイス挙動 |
 | [docs/capture-format.md](../docs/capture-format.md) | 欠落を認識する正規キャプチャ artifact |
 | [docs/calibration.md](../docs/calibration.md) | 生サンプルから電流への変換式と単位 |

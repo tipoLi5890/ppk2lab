@@ -277,6 +277,7 @@ def evaluate_assertion(
     *,
     decoder_config: dict[str, Any] | None = None,
     allow_experimental: bool = False,
+    assume_voltage_mv: int | None = None,
 ) -> AssertionOutcome:
     outcome = AssertionOutcome(
         rule=rule,
@@ -302,7 +303,9 @@ def evaluate_assertion(
     any_incomplete = False
     all_passed = True
     for start, end in windows:
-        stats = compute_stats(capture, start_index=start, end_index=end)
+        stats = compute_stats(
+            capture, start_index=start, end_index=end, assume_voltage_mv=assume_voltage_mv
+        )
         observed = getattr(stats, rule.metric)
         observation: dict[str, Any] = {
             "window": {"start_sample": start, "end_sample": end},

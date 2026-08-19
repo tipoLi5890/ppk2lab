@@ -12,6 +12,7 @@ measurements.
 from __future__ import annotations
 
 import sys
+import time
 from array import array
 
 from ..calibration import ADC_REFERENCE_FACTOR, MICROAMP_PER_AMP
@@ -63,8 +64,13 @@ class SimulatedPPK2:
         firmware_version: str = "1.2.4-sim",
         profile: Profile | None = None,
         gaps: dict[int, int] | None = None,
+        rate_limit_hz: float | None = None,
+        metadata_chunk_bytes: int | None = None,
         initial_vdd_mv: int = 3000,
-        initial_mode: Mode = Mode.AMPERE,
+        # Source Meter is what real hardware reported during validation
+        # (metadata `mode: 2`), and it is the mode in which energy is
+        # defensible, so the simulator models it by default.
+        initial_mode: Mode = Mode.SOURCE,
         max_samples_per_read: int = 4096,
     ) -> None:
         self.serial_number = serial_number
@@ -72,6 +78,16 @@ class SimulatedPPK2:
         self.profile = profile if profile is not None else ConstantProfile(100.0)
         #: timeline index -> number of missing samples starting there
         self.gaps = dict(gaps or {})
+        #: Emit at most this many samples per second of wall clock. ``None``
+        #: (the default) runs as fast as the consumer asks, which keeps tests
+        #: quick; a value models a device streaming in real time, and a value
+        #: below 100 kS/s models a starved host losing samples.
+        self.rate_limit_hz = rate_limit_hz
+        #: Split metadata replies into chunks of this size, reproducing the
+        #: multi-read delivery seen on real serial stacks.
+        self.metadata_chunk_bytes = metadata_chunk_bytes
+        self._stream_started_at: float | None = None
+        self._samples_emitted = 0
         self.vdd_mv = initial_vdd_mv
         self.mode = initial_mode
         self.dut_power = False
@@ -135,6 +151,8 @@ class SimulatedPPK2:
         self.command_log.append((opcode, payload))
         if opcode is Opcode.START_MEASURING:
             self.measuring = True
+            self._stream_started_at = None
+            self._samples_emitted = 0
         elif opcode is Opcode.STOP_MEASURING:
             self.measuring = False
         elif opcode is Opcode.SET_DUT_POWER:
@@ -162,14 +180,26 @@ class SimulatedPPK2:
             raise TransportError("simulated device was unplugged")
         if self._out:
             take = min(max_bytes, len(self._out))
+            if self.metadata_chunk_bytes is not None:
+                take = min(take, self.metadata_chunk_bytes)
             chunk = bytes(self._out[:take])
             del self._out[:take]
             return chunk
         if not self.measuring:
             return b""
         n_samples = min(max_bytes // 4, self.max_samples_per_read)
+        if self.rate_limit_hz is not None:
+            now = time.monotonic()
+            if self._stream_started_at is None:
+                self._stream_started_at = now
+            allowance = int((now - self._stream_started_at) * self.rate_limit_hz)
+            n_samples = min(n_samples, max(0, allowance - self._samples_emitted))
+            if n_samples <= 0:
+                time.sleep(min(timeout_s, 0.01))
+                return b""
         if n_samples <= 0:
             return b""
+        self._samples_emitted += n_samples
         return self._generate(n_samples)
 
     def _generate(self, n_samples: int) -> bytes:

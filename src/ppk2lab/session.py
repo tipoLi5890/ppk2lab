@@ -14,11 +14,16 @@ import threading
 import time
 from collections.abc import Iterator
 
-from .errors import TransportError
+from .errors import StreamStalledError, TransportError
 from .protocol.samples import GapEvent, SampleBlock, SampleStreamParser
 from .transport.base import Transport
 
 _SENTINEL = object()
+
+#: Maximum silence tolerated between two byte deliveries while streaming.
+#: The device sends ~400 kB/s continuously, so seconds of silence means it
+#: stopped — a state that produces no serial error on its own.
+DEFAULT_IDLE_TIMEOUT_S = 5.0
 
 
 class StreamSession:
@@ -91,27 +96,47 @@ class StreamSession:
         *,
         sample_limit: int | None = None,
         wall_timeout_s: float | None = None,
+        idle_timeout_s: float | None = DEFAULT_IDLE_TIMEOUT_S,
     ) -> Iterator[SampleBlock | GapEvent]:
         """Yield parsed events until ``sample_limit`` timeline samples passed.
 
         ``sample_limit`` counts timeline positions (stored samples plus known
         missing samples), so a gappy capture still ends near the requested
         duration instead of stretching to fill it.
+
+        Two independent budgets bound the wait, because a PPK2 that stops
+        streaming while keeping its serial port open produces no error at all:
+        ``wall_timeout_s`` caps the whole run, and ``idle_timeout_s`` caps the
+        silence between two consecutive byte deliveries. Whichever trips
+        first raises :class:`~ppk2lab.errors.TransportError`; data already
+        received is preserved by the caller.
         """
-        deadline = time.monotonic() + wall_timeout_s if wall_timeout_s else None
+        started = time.monotonic()
+        deadline = started + wall_timeout_s if wall_timeout_s else None
+        last_data = started
         while True:
             if sample_limit is not None and self.parser.next_index >= sample_limit:
                 return
-            if deadline is not None and time.monotonic() > deadline:
-                raise TransportError(
+            now = time.monotonic()
+            if deadline is not None and now > deadline:
+                raise StreamStalledError(
                     "stream stalled: wall-clock timeout before reaching the requested sample count",
                     remediation="Check the USB connection and system load, then retry the "
                     "capture. Partial data was preserved with loss markers.",
+                )
+            if idle_timeout_s is not None and now - last_data > idle_timeout_s:
+                raise StreamStalledError(
+                    f"stream stalled: no data from the device for {idle_timeout_s:g} s "
+                    "while the port stayed open",
+                    remediation="The device stopped streaming without closing the port. "
+                    "Reconnect it and run `ppk2lab doctor --json`. Partial data was "
+                    "preserved with an interruption record.",
                 )
             try:
                 kind, payload = self._queue.get(timeout=0.2)
             except queue.Empty:
                 continue
+            last_data = time.monotonic()
             if kind == "data":
                 for event in self.parser.feed(payload):
                     yield event

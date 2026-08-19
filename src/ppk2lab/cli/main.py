@@ -16,9 +16,11 @@ import json
 import os
 import sys
 import traceback
+from collections.abc import Sequence
 from typing import Any, NoReturn
 
 from .._version import SCHEMA_VERSION, __version__
+from ..diagnostics import Diagnostic, as_json
 from ..errors import EXIT_OK, Ppk2labError, UsageError
 
 #: Category per command, surfaced in capabilities and docs. "measurement"
@@ -144,6 +146,13 @@ def build_parser() -> CliParser:
     )
     p.add_argument("--dut-power", choices=("on", "off"), help="DUT power output")
     p.add_argument(
+        "--max-voltage-mv",
+        type=int,
+        metavar="MV",
+        help="refuse any source voltage above this ceiling (DUT protection); also "
+        "settable via PPK2LAB_MAX_VOLTAGE_MV",
+    )
+    p.add_argument(
         "--apply", action="store_true", help="actually apply the changes (default is a dry run)"
     )
 
@@ -187,6 +196,18 @@ def build_parser() -> CliParser:
         action="store_true",
         help="allow experimental-tier protocol rates in triggers",
     )
+    p.add_argument(
+        "--assume-voltage-mv",
+        type=int,
+        metavar="MV",
+        help="DUT supply voltage to use for energy when the meter cannot know it "
+        "(ampere mode); recorded as an explicit assumption",
+    )
+    p.add_argument(
+        "--in-memory",
+        action="store_true",
+        help="allow buffering a long capture in RAM instead of requiring --output",
+    )
     _add_spi_options(p)
 
     p = add_command("decode", help="decode UART/SPI from a capture (offline)")
@@ -219,6 +240,12 @@ def build_parser() -> CliParser:
         action="store_true",
         help="also apply range-switch spike filtering (raw stats are default)",
     )
+    p.add_argument(
+        "--assume-voltage-mv",
+        type=int,
+        metavar="MV",
+        help="DUT supply voltage for energy when the capture cannot know it (ampere mode)",
+    )
 
     p = add_command("assert", help="evaluate power/protocol assertions against a capture (offline)")
     p.add_argument("capture", help="capture artifact (.ppk2a)")
@@ -232,6 +259,12 @@ def build_parser() -> CliParser:
     )
     p.add_argument(
         "--rules-file", metavar="FILE.json", help="JSON array of rules (objects or DSL strings)"
+    )
+    p.add_argument(
+        "--assume-voltage-mv",
+        type=int,
+        metavar="MV",
+        help="DUT supply voltage for energy when the capture cannot know it (ampere mode)",
     )
     p.add_argument(
         "--uart-rx", default="D0", metavar="Dn", help="UART channel for uart() events (default D0)"
@@ -271,7 +304,7 @@ def _envelope(
     *,
     ok: bool,
     result: dict[str, Any] | None,
-    warnings: list[str],
+    warnings: Sequence[Diagnostic | str],
     error: dict[str, Any] | None,
 ) -> str:
     return json.dumps(
@@ -280,7 +313,7 @@ def _envelope(
             "command": command,
             "ok": ok,
             "result": result,
-            "warnings": warnings,
+            "warnings": as_json(warnings),
             "error": error,
         },
         indent=2,
@@ -335,8 +368,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if outcome.human:
                 print(outcome.human)
-            for warning in outcome.warnings:
-                print(f"warning: {warning}", file=sys.stderr)
+            for warning in as_json(outcome.warnings):
+                print(f"warning [{warning['code']}]: {warning['message']}", file=sys.stderr)
             if outcome.error is not None:
                 print(
                     f"error [{outcome.error['code']}]: {outcome.error['message']}\n"

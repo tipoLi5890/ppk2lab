@@ -241,6 +241,7 @@ Nordic Semiconductor、Power Profiler Kit 與 PPK2 可能是 Nordic Semiconducto
 | [docs/SPEC.md](../docs/SPEC.md) | 對外資料模型、狀態、API 與 schema 契約 |
 | [docs/api-baseline.md](../docs/api-baseline.md) | 凍結的公開 API 介面與穩定性政策 |
 | [docs/cli-reference.md](../docs/cli-reference.md) | CLI 指令、旗標、JSON 輸出與結束代碼 |
+| [docs/faq.md](../docs/faq.md) | 取樣率、能量、模式語意與其他常見問題 |
 | [docs/protocol-spec.md](../docs/protocol-spec.md) | 已記錄的 PPK2 協定、指令、欄位與裝置行為 |
 | [docs/capture-format.md](../docs/capture-format.md) | 具遺失感知的正式 capture artifact |
 | [docs/calibration.md](../docs/calibration.md) | 原始樣本轉換為電流的公式與單位 |

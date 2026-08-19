@@ -26,6 +26,33 @@ release gate (ROADMAP.md, known-load cross-check); the unit derivation above is
 confirmed by dimensional analysis and open-circuit noise-floor magnitude on
 real hardware.
 
+## Calibration provenance
+
+Calibration constants come from the device and can arrive incomplete: a
+truncated metadata reply, a field the parser does not recognize, a device
+that reports no calibration at all. The danger is not the missing value but
+what fills its place — `O[r] = 0` alone biases every sample in that range by
+the full offset. Two properties prevent that:
+
+1. Unknown constants can never become defaults — the affected range converts
+   to `NaN` (below).
+2. Every capture records *why* its numbers might be suspect. The manifest
+   carries a `calibration` block (`calibrated_flag`, `metadata_terminated`,
+   `metadata_warnings`, `missing_ranges`, `user_gains`), and the same facts
+   surface as coded warnings (`W_NOT_CALIBRATED`,
+   `W_CALIBRATION_INCOMPLETE`, `W_USER_GAIN`, `W_METADATA`) plus `doctor`
+   checks.
+
+The `Calibrated` metadata field is reported but not interpreted: real
+hardware has been observed reporting `Calibrated: 0` while producing
+plausible readings, and the flag's meaning is not hardware-verified. It is
+surfaced as a warning, never as a reason to discard data.
+
+A non-unity `UG` (user gain) scales every reading in its range. Because
+ppk2lab can also write user gains, a value left behind by a previous session
+would otherwise silently rescale a whole capture; it is warned about
+explicitly.
+
 ## Unknown values
 
 - A range whose constants are missing, `NaN`, or whose `R` is zero converts

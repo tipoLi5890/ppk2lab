@@ -27,13 +27,16 @@ Every loss of samples is an explicit event:
   larger by a multiple of 64.
 - Reasons: `counter_skip` (device-side), `host_overflow` (bounded queue
   dropped chunks; exact byte count converted to samples),
-  `discontinuous_feed` (decoder fed non-contiguous data), `usb_stall`.
+  `discontinuous_feed` (decoder fed non-contiguous data), `usb_stall`,
+  `stream_desync` (byte framing lost and re-aligned).
 
 ### Device state
 
 `DeviceState` fields are `None` when unknown; unknown is preserved, never
 defaulted: `mode` (`ampere`/`source`), `source_voltage_mv`, `dut_power`,
-`measuring`.
+`measuring`, plus `source_voltage_basis` recording how the voltage was
+learned (`configured_source` beats `device_metadata`, which is only a
+regulator setpoint).
 
 ### StateChange
 
@@ -99,6 +102,20 @@ Every command with `--json` emits (schema `envelope`):
 `error` (schema `error`) always carries `code`, `message`, `remediation`,
 `exit_code`. Codes are frozen strings (see `ppk2lab capabilities --json`,
 `error_codes`).
+
+`warnings` is an array of `{code, message}` for the same reason: a program
+deciding whether to retry cannot parse prose. Codes live in
+`ppk2lab.diagnostics` (`W_SAMPLE_GAPS`, `W_TIMELINE_COMPRESSION`,
+`W_VOLTAGE_ASSUMED`, `W_NOT_CALIBRATED`, …); new codes may be added, and an
+existing code never changes meaning within a schema version.
+
+### Voltage and energy
+
+Results that carry energy also carry `voltage_measured: false` and a
+`voltage_basis`, because the PPK2 measures current only — every energy
+figure is charge times an assumption. In Ampere Meter mode the assumption is
+not defensible and `energy_uj` is `null` unless the caller supplies the DUT's
+real supply voltage. See docs/energy-analysis.md.
 
 ## Exit codes (frozen)
 

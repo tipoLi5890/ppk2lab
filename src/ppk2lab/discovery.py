@@ -14,7 +14,10 @@ import re
 from .errors import TransportError
 from .types import USB_PID, USB_VID, DeviceInfo, PortInfo, PortRole
 
-_LOCATION_IFACE_RE = re.compile(r":(?:\d+\.)?(\d+)$")
+#: USB locations end in ``<config>.<interface>``; the configuration field is
+#: numeric on Linux/macOS but a letter on Windows (``1-4:x.0``), so it must
+#: not be constrained to digits or Windows ports never classify at all.
+_LOCATION_IFACE_RE = re.compile(r":(?:[^.:]+\.)?(\d+)$")
 
 
 def _interface_number(entry: object) -> int | None:

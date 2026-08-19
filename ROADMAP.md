@@ -11,6 +11,38 @@ tests, lint, and types green. A first hardware validation pass succeeded on
 one PPK2 on macOS, confirming device metadata, automatic port probing, and a
 gap-free 10 s / 1M-sample capture.
 
+## Measurement-integrity guarantees
+
+Some of what this hardware cannot do is only visible once you work from the
+sample format outward. These properties are consequences of the PPK2's own
+design, and the implementation is built around them rather than around the
+happy path. They are covered by `tests/test_measurement_integrity.py`.
+
+- **The device cannot report large losses.** The sample counter is 6 bits
+  (bits 18-23), so it expresses at most 63 missing samples; a larger loss
+  aliases modulo 64, and a loss of exactly k*64 leaves the counter
+  continuous — indistinguishable from no loss at all. Counter-derived gap
+  sizes are therefore always marked ambiguous, and every capture is
+  cross-checked against the host's wall clock, which is the only independent
+  witness to the invisible class.
+- **The instrument never measures the DUT's voltage.** It reports an ADC
+  code and a range. In Source Meter mode the DUT runs from VOUT, so the
+  configured setpoint is a defensible supply voltage; in Ampere Meter mode
+  the DUT runs from its own supply, which never passes through the meter, so
+  energy is `null` unless the caller supplies the real voltage. Results
+  always carry `voltage_basis` and `voltage_measured: false`.
+- **Unknown calibration must stay unknown.** A missing constant is never
+  defaulted — a zero offset alone would bias every sample in that range by
+  the full offset — and the reason travels with the capture in its
+  `calibration` block.
+- **Silence is not an error.** A USB CDC port that stops delivering data
+  raises nothing, so the host imposes its own idle and wall budgets rather
+  than waiting forever.
+- **Frames have no sync word.** Losing a byte run that is not a multiple of
+  four shifts every later 4-byte frame; that is detected from the counter
+  mismatch rate, reported once, and re-aligned by scoring the four candidate
+  offsets.
+
 ## Remaining work before 0.1.0
 
 - OS/firmware compatibility matrix: Windows, macOS (Intel/AS), and Linux,
@@ -70,12 +102,48 @@ alone.
 
 ## Post-0.1.0 direction (not commitments)
 
-- Official `.ppk2` import/export compatibility layer.
-- Additional decoders: low-speed bit-banged I2C, PWM, Manchester/NRZ, GPIO
-  event markers, low-speed 1-Wire.
+### 0.2.x
+
+- **Decimation on export and measure** emitting mean, min, and max per
+  bucket — the ecosystem's most requested capability, answered without
+  pretending the acquisition rate is configurable.
+- **Absolute-time columns** anchored to the capture's `created_utc`.
+- **Uncertainty-aware statistics**: per-range sample occupancy and error
+  bounds derived from Nordic's per-range accuracy, so a CI threshold can be
+  defended ("mean 142 uA ± 2.1 uA" rather than a bare number). No PPK2 tool
+  has ever emitted an error bar.
+- **Streaming offline analysis** so hour-scale artifacts can be measured and
+  exported without loading them whole.
+- **Firmware fingerprint matrix**: key the compatibility matrix on the
+  observable fingerprint already recorded in every capture.
+- **Battery-life estimation** from a measured duty cycle, with its
+  assumptions stated.
+
+### Later
+
+- Official `.ppk2` import/export compatibility layer, explicitly lossy (the
+  vendor format cannot carry raw words, ranges, or counters).
+- Additional low-speed decoders: bit-banged I2C, PWM, Manchester/NRZ, GPIO
+  event markers, 1-Wire.
 - Optional local stdio MCP server once the core API is frozen.
 - Optional Rust acceleration for parsing and edge scans if profiling
   justifies it.
+- Sample-clock tolerance measured against a disciplined reference during the
+  soak gate; until then the nominal 100 kS/s is assumed, not verified.
+
+### Explicitly not adopted
+
+- **A configurable acquisition rate.** The hardware samples at 100 kS/s,
+  full stop. Decimation answers the real need; adopting the vocabulary would
+  imply something false.
+- **Smoothing applied to the reported series by default.** The raw
+  calibrated series is the evidence; filtering is available explicitly
+  (`--filtered`) and never replaces it. Expected differences between tools
+  are documented in `docs/faq.md`.
+- **GUI concerns** (tooltips, axis behavior, themes): no data-path analogue.
+- **Automatic DUT power for convenience**: forbidden by the safety contract.
+- **Higher decoder rate tiers without fixture data**: promotion requires
+  measured error rates, not optimism.
 
 ## Compatibility policy
 

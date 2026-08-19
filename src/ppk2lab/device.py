@@ -7,6 +7,8 @@ read back from the device. Nothing here ever enables DUT power implicitly.
 
 from __future__ import annotations
 
+import os
+import threading
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -17,6 +19,7 @@ from .errors import (
     DeviceNotFoundError,
     MetadataError,
     UsageError,
+    VoltageRangeError,
 )
 from .protocol.commands import (
     cmd_get_metadata,
@@ -34,11 +37,14 @@ from .session import StreamSession
 from .transport.base import Transport
 from .transport.mock import MockTransport, SimulatedPPK2
 from .transport.serial import SerialTransport
-from .types import DeviceInfo, DeviceState, Mode, PortRole, StateChange
+from .types import DeviceInfo, DeviceState, Mode, PortRole, StateChange, VoltageBasis
 
 #: Factory for real serial transports; tests monkeypatch this to exercise
 #: the measurement-port probing path without hardware.
 _transport_factory = SerialTransport
+
+#: Environment variable holding a session-wide source-voltage ceiling in mV.
+MAX_VOLTAGE_ENV = "PPK2LAB_MAX_VOLTAGE_MV"
 
 
 def _drain_input(transport: Transport, *, max_seconds: float = 3.0, quiet_reads: int = 3) -> int:
@@ -56,10 +62,34 @@ def _drain_input(transport: Transport, *, max_seconds: float = 3.0, quiet_reads:
     return drained
 
 
+def _metadata_terminated(buf: bytes | bytearray) -> bool:
+    """True once the metadata reply's ``END`` terminator sits at a line start.
+
+    Anchoring to a line boundary stops stray bytes that happen to spell
+    ``END`` (binary residue from an interrupted stream) from truncating an
+    otherwise complete reply.
+    """
+    return buf.startswith(b"END") or b"\nEND" in buf or b"\rEND" in buf
+
+
+def _env_voltage_ceiling() -> int | None:
+    raw = os.environ.get(MAX_VOLTAGE_ENV)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise UsageError(
+            f"{MAX_VOLTAGE_ENV} must be an integer number of millivolts, got {raw!r}"
+        ) from exc
+
+
 class PPK2:
     """One open PPK2 measurement session."""
 
-    def __init__(self, transport: Transport, info: DeviceInfo) -> None:
+    def __init__(
+        self, transport: Transport, info: DeviceInfo, *, max_voltage_mv: int | None = None
+    ) -> None:
         self.transport = transport
         self.info = info
         self.state = DeviceState()
@@ -69,9 +99,45 @@ class PPK2:
         #: Stale stream bytes discarded at open (leftover from an interrupted
         #: previous session); nonzero values are surfaced as a warning.
         self.recovered_stale_bytes = 0
+        #: Optional session ceiling on the source voltage, below the device
+        #: limit — a guard for DUTs that would be damaged above a known level.
+        self.max_voltage_mv = (
+            max_voltage_mv if max_voltage_mv is not None else _env_voltage_ceiling()
+        )
+        self._voltage_configured = False
         self._initial_dut_power: bool | None = None
         self._power_changed = False
         self._closed = False
+        #: One device owns one serial channel: interleaved reads from another
+        #: thread would silently corrupt 4-byte framing.
+        self._stream_active = False
+        self._lock = threading.RLock()
+
+    # -- guards ------------------------------------------------------------
+    def _require_no_active_stream(self, action: str) -> None:
+        if self._stream_active:
+            raise UsageError(
+                f"cannot {action} while a capture stream is active on this device",
+                remediation="Let the active stream finish (or close its iterator) before "
+                "issuing other commands. One device serves one stream at a time.",
+            )
+
+    def _require_not_measuring(self, action: str) -> None:
+        if self.state.measuring:
+            raise UsageError(
+                f"cannot {action} while the device is measuring",
+                remediation="Call stop_measuring() first; changing acquisition settings "
+                "mid-stream would silently split the capture into incomparable halves.",
+            )
+
+    def _check_voltage_ceiling(self, voltage_mv: int) -> None:
+        ceiling = self.max_voltage_mv
+        if ceiling is not None and isinstance(voltage_mv, int) and voltage_mv > ceiling:
+            raise VoltageRangeError(
+                f"voltage_mv={voltage_mv} exceeds the configured session ceiling of {ceiling} mV",
+                remediation="This ceiling protects the DUT. Raise it deliberately with "
+                f"--max-voltage-mv / {MAX_VOLTAGE_ENV} only if the DUT tolerates more.",
+            )
 
     # -- lifecycle ---------------------------------------------------------
     @classmethod
@@ -84,6 +150,7 @@ class PPK2:
         simulate: bool = False,
         simulator: SimulatedPPK2 | None = None,
         read_metadata: bool = True,
+        max_voltage_mv: int | None = None,
     ) -> PPK2:
         """Open a device by serial number, port path, or injected transport.
 
@@ -110,10 +177,12 @@ class PPK2:
             transport = MockTransport(simulator)
         else:
             info = _select_device(serial_number=serial_number, port=port)
-            return cls._open_real(info, port=port, read_metadata=read_metadata)
+            return cls._open_real(
+                info, port=port, read_metadata=read_metadata, max_voltage_mv=max_voltage_mv
+            )
 
         transport.open()
-        device = cls(transport, info)
+        device = cls(transport, info, max_voltage_mv=max_voltage_mv)
         try:
             device.recover_session()
             if read_metadata:
@@ -124,7 +193,14 @@ class PPK2:
         return device
 
     @classmethod
-    def _open_real(cls, info: DeviceInfo, *, port: str | None, read_metadata: bool) -> PPK2:
+    def _open_real(
+        cls,
+        info: DeviceInfo,
+        *,
+        port: str | None,
+        read_metadata: bool,
+        max_voltage_mv: int | None = None,
+    ) -> PPK2:
         candidates: list[str]
         probing = False
         if port is not None:
@@ -144,7 +220,7 @@ class PPK2:
         failures: list[str] = []
         for path in candidates:
             transport = _transport_factory(path)
-            device = cls(transport, info)
+            device = cls(transport, info, max_voltage_mv=max_voltage_mv)
             try:
                 transport.open()
                 device.recover_session()
@@ -235,7 +311,15 @@ class PPK2:
 
     # -- metadata ----------------------------------------------------------
     def refresh_metadata(self, timeout_s: float = 2.0) -> Metadata:
-        """Read and parse device metadata (read-only, opcode 0x19)."""
+        """Read and parse device metadata (read-only, opcode 0x19).
+
+        The reply arrives as newline-delimited text that may be split across
+        several serial reads; bytes are accumulated until the terminator is
+        seen at a line boundary, so a partial read can never drop calibration
+        constants (and a stray ``END`` inside binary residue cannot end the
+        read early).
+        """
+        self._require_no_active_stream("read metadata")
         if self.state.measuring:
             raise UsageError("metadata cannot be read while measuring; stop first")
         self.transport.write(cmd_get_metadata())
@@ -245,7 +329,7 @@ class PPK2:
             chunk = self.transport.read(4096, 0.1)
             if chunk:
                 buf.extend(chunk)
-                if b"END" in buf:
+                if _metadata_terminated(buf):
                     break
         if not buf:
             raise MetadataError("device sent no metadata reply")
@@ -256,7 +340,50 @@ class PPK2:
             self.state.mode = Mode(metadata.mode)
         if metadata.vdd_mv is not None:
             self.state.source_voltage_mv = metadata.vdd_mv
+            # A readback after this session set the voltage keeps the stronger
+            # basis; otherwise the value is just the regulator's setpoint.
+            if not self._voltage_configured:
+                self.state.source_voltage_basis = VoltageBasis.DEVICE_METADATA
         return metadata
+
+    def firmware_fingerprint(self) -> dict[str, Any]:
+        """Identify the firmware by what is actually observable.
+
+        The PPK2 does not report a firmware version over the measurement
+        port, so compatibility has to be keyed on observable structure: the
+        hardware revision, the instrumentation-amplifier field, which
+        metadata keys exist, and how many serial ports the device exposes.
+        Two units that agree on all four behave the same for our purposes.
+        """
+        metadata = self.metadata
+        keys: list[str] = []
+        if metadata is not None:
+            families = ("R", "GS", "GI", "O", "S", "I", "UG")
+            present = [
+                f"{family}{i}"
+                for family in families
+                for i in range(5)
+                if metadata.cal[family][i] is not None
+            ]
+            scalars = [
+                name
+                for name, value in (
+                    ("Calibrated", metadata.calibrated),
+                    ("VDD", metadata.vdd_mv),
+                    ("HW", metadata.hw),
+                    ("mode", metadata.mode),
+                    ("IA", metadata.ia),
+                )
+                if value is not None
+            ]
+            keys = sorted(present + scalars + list(metadata.extras))
+        return {
+            "hw": getattr(metadata, "hw", None),
+            "ia": getattr(metadata, "ia", None),
+            "metadata_keys": keys,
+            "metadata_key_count": len(keys),
+            "port_count": len(self.info.ports),
+        }
 
     # -- state-changing operations ----------------------------------------
     def _readback(self, warnings: list[str]) -> bool:
@@ -271,12 +398,25 @@ class PPK2:
         request = cmd_set_mode(mode)  # validates before touching hardware
         before = self.state.to_json()
         warnings: list[str] = []
+        if mode is Mode.AMPERE:
+            warnings.append(
+                "ampere mode measures current flowing through the meter; the DUT must be "
+                "powered from its own supply (VOUT does not power it). The source voltage "
+                "still matters: it feeds the calibration correction term."
+            )
         if dry_run:
             projected = dict(before, mode=mode.name.lower())
             change = StateChange(
-                "set_mode", {"mode": mode.name.lower()}, before, projected, applied=False
+                "set_mode",
+                {"mode": mode.name.lower()},
+                before,
+                projected,
+                applied=False,
+                warnings=warnings,
             )
         else:
+            self._require_no_active_stream("change mode")
+            self._require_not_measuring("change mode")
             self.transport.write(request)
             self.state.mode = mode
             observed = self._readback(warnings)
@@ -295,6 +435,7 @@ class PPK2:
         return change
 
     def set_source_voltage_mv(self, voltage_mv: int, *, dry_run: bool = False) -> StateChange:
+        self._check_voltage_ceiling(voltage_mv)
         request = cmd_set_source_voltage(voltage_mv)  # validates range first
         before = self.state.to_json()
         warnings: list[str] = []
@@ -308,8 +449,12 @@ class PPK2:
                 applied=False,
             )
         else:
+            self._require_no_active_stream("change the source voltage")
+            self._require_not_measuring("change the source voltage")
             self.transport.write(request)
             self.state.source_voltage_mv = voltage_mv
+            self.state.source_voltage_basis = VoltageBasis.CONFIGURED_SOURCE
+            self._voltage_configured = True
             observed = self._readback(warnings)
             if observed and self.state.source_voltage_mv != voltage_mv:
                 warnings.append(
@@ -358,13 +503,28 @@ class PPK2:
         return change
 
     def reset(self, *, dry_run: bool = False) -> StateChange:
+        """Reset the device (experimental).
+
+        The observable consequences of opcode 0x20 — whether the USB CDC port
+        re-enumerates, whether DUT power drops momentarily, how long the port
+        stays away — are not yet confirmed across firmware versions
+        (docs/protocol-spec.md, "Unverified items"). Treat a reset as a
+        session boundary: reopen the device afterwards rather than assuming
+        the handle survives.
+        """
         before = self.state.to_json()
+        warnings: list[str] = [
+            "reset is experimental: port re-enumeration and DUT power behavior are not "
+            "hardware-verified across firmware versions; reopen the device afterwards"
+        ]
         if dry_run:
-            change = StateChange("reset", {}, before, before, applied=False)
+            change = StateChange("reset", {}, before, before, applied=False, warnings=warnings)
         else:
+            self._require_no_active_stream("reset the device")
+            self._require_not_measuring("reset the device")
             self.transport.write(cmd_reset())
             self.state = DeviceState()  # all state unknown after reset
-            warnings: list[str] = []
+            self._voltage_configured = False
             observed = self._readback(warnings)
             change = StateChange(
                 "reset",
@@ -390,6 +550,8 @@ class PPK2:
                 applied=False,
             )
         else:
+            self._require_no_active_stream("set a user gain")
+            self._require_not_measuring("set a user gain")
             self.transport.write(request)
             warnings: list[str] = []
             observed = self._readback(warnings)
@@ -430,14 +592,22 @@ class PPK2:
         if duration_s is not None:
             limit = round(duration_s * SAMPLE_RATE_HZ)
             sample_limit = min(sample_limit, limit) if sample_limit else limit
-        if wall_timeout_s is None and duration_s is not None:
-            wall_timeout_s = duration_s * 3 + 10.0
+        if wall_timeout_s is None:
+            # Always arm a wall budget: a device that stops streaming while
+            # keeping the port open would otherwise block forever.
+            if duration_s is not None:
+                wall_timeout_s = duration_s * 3 + 10.0
+            elif sample_limit is not None:
+                wall_timeout_s = (sample_limit / SAMPLE_RATE_HZ) * 3 + 10.0
+        self._require_no_active_stream("start another stream")
         session = StreamSession(self.transport)
+        self._stream_active = True
         self.start_measuring()
         session.start()
         try:
             yield from session.events(sample_limit=sample_limit, wall_timeout_s=wall_timeout_s)
         finally:
+            self._stream_active = False
             session.stop()
             try:
                 self.stop_measuring()

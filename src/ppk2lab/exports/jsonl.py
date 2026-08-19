@@ -11,7 +11,7 @@ import math
 import os
 
 from ..capture.model import Capture
-from ..errors import OutputExistsError
+from ..errors import CaptureFileError, OutputExistsError
 from ..protocol.samples import GapEvent
 
 
@@ -27,6 +27,7 @@ def export_samples_jsonl(
     calibration = capture.calibration
     vdd = capture.source_voltage_mv
     records = 0
+    samples = 0
     with open(path, "w", encoding="utf-8") as fh:
         for event in capture.iter_events():
             if isinstance(event, GapEvent):
@@ -56,4 +57,10 @@ def export_samples_jsonl(
                     + "\n"
                 )
                 records += 1
+                samples += 1
+    if samples != capture.stored_count:
+        raise CaptureFileError(
+            f"JSONL export wrote {samples} sample records for a capture holding "
+            f"{capture.stored_count} samples; refusing to report a partial export as success"
+        )
     return records

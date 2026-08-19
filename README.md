@@ -38,7 +38,7 @@ ppk2lab --version
 ppk2lab doctor --json
 ```
 
-The package is not on PyPI yet. Until the `0.1.0` release, install it from a source checkout as shown below; the current version is `0.1.0.dev0`.
+A development preview is on PyPI: `pip install ppk2lab==0.1.0.dev0` (a plain `pip install ppk2lab` resolves nothing until the stable `0.1.0` release). For development, install from a source checkout as shown below.
 
 Run from a development checkout:
 

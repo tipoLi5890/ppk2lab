@@ -12,7 +12,9 @@ python -m venv .venv && source .venv/bin/activate
 pip install ppk2lab
 ```
 
-> The package is not yet published to PyPI; until the `0.1.0` release, install
+> A development preview (`0.1.0.dev0`) is published on PyPI; install it with an
+> exact pin: `pip install ppk2lab==0.1.0.dev0`. Plain `pip install ppk2lab`
+> resolves nothing until the stable `0.1.0` release. For development, install
 > from a source checkout (below).
 
 From a development checkout:

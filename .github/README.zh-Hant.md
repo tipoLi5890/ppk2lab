@@ -40,7 +40,7 @@ ppk2lab --version
 ppk2lab doctor --json
 ```
 
-此套件尚未發布至 PyPI。在 `0.1.0` 發布前，請依下方說明從原始碼安裝；目前版本為 `0.1.0.dev0`。
+開發預覽版已上架 PyPI：`pip install ppk2lab==0.1.0.dev0`（在穩定版 `0.1.0` 發布前，直接 `pip install ppk2lab` 不會安裝任何版本）。開發用途請依下方說明從原始碼安裝。
 
 從開發用原始碼執行：
 

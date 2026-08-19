@@ -49,6 +49,9 @@ project uses semantic versioning once released.
 
 ### Added (release preparation, 2026-08-19)
 
+- Development preview `0.1.0.dev0` published to PyPI via the trusted-publishing
+  workflow (claims the package name; excluded from default pip resolution).
+
 - `docs/api-baseline.md`: the frozen `0.1.0` public surface (24 Python
   exports, 11 CLI commands, exit codes, schemas, file formats) with the
   change policy.

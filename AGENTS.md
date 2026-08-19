@@ -7,7 +7,7 @@ working *on* this repository. (For using the `ppk2lab` CLI as an agent, see
 ## Before changing anything
 
 1. Read `README.md`, `CLAUDE.md`, and the relevant sections of
-   `docs/ppk2-package-research.md` and `docs/SPEC.md`.
+   `docs/SPEC.md` and `docs/api-baseline.md`.
 2. Inspect the working tree and preserve existing user changes.
 3. State the narrow task being implemented and how it will be verified.
 4. Do not expand scope because a related roadmap item exists.

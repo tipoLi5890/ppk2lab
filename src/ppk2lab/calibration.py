@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from .errors import UsageError
 from .protocol.metadata import Metadata
 from .protocol.samples import ADC_MULTIPLIER, MAX_VALID_RANGE, SampleBlock
 
@@ -57,8 +58,12 @@ class Calibration:
         vdd_mv: int | None = None,
         calibrated: bool | None = None,
     ) -> None:
-        if len(ranges) != 5:
-            raise ValueError("exactly 5 measurement ranges expected")
+        if len(ranges) != MAX_VALID_RANGE + 1:
+            raise UsageError(
+                f"exactly {MAX_VALID_RANGE + 1} measurement ranges expected, got {len(ranges)}",
+                remediation="The PPK2 has five auto-switching shunt ranges; build the table "
+                "from device metadata with Calibration.from_metadata().",
+            )
         self.ranges = ranges
         self.vdd_mv = vdd_mv
         self.calibrated = calibrated
@@ -131,7 +136,10 @@ class SpikeFilter:
 
     def __init__(self, settle_samples: int = 3) -> None:
         if settle_samples < 1:
-            raise ValueError("settle_samples must be >= 1")
+            raise UsageError(
+                f"settle_samples must be >= 1, got {settle_samples}",
+                remediation="Pass a positive settling window, or leave the default (3).",
+            )
         self.settle_samples = settle_samples
         self._last_range: int | None = None
         self._hold_value: float | None = None

@@ -31,7 +31,14 @@ class LogicChunk:
 
 @dataclass
 class Annotation:
-    """One decoded event, tied to an exact sample range."""
+    """One decoded event, tied to an exact sample range.
+
+    Invariant every decoder in this package upholds: a non-empty ``errors``
+    list implies ``confidence == 0.0``. An annotation is kept as raw
+    evidence of what the line did, but an annotation carrying any error is
+    never offered as decoded data — consumers may filter on ``errors``
+    alone and get the same answer as filtering on ``confidence``.
+    """
 
     decoder: str
     kind: str

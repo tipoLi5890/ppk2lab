@@ -6,22 +6,26 @@ Rules exist in two equivalent forms:
 - a JSON form used by agents and stored with results.
 
 Evaluation is evidence-first: every observation records the exact sample
-window; a window touching missing data yields status ``incomplete`` (CLI
-exit 6), never a false pass or fail. Results embed the capture id and
-SHA-256 so a conclusion can always be traced to its raw capture.
+window; a window touching missing data — or extending past the end of the
+capture — yields status ``incomplete`` (CLI exit 6), never a false pass or
+fail. Windows are evaluated as the rule asks for them rather than trimmed to
+the data that happens to exist. Results embed the capture id and SHA-256 so a
+conclusion can always be traced to its raw capture.
 """
 
 from __future__ import annotations
 
+import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..capture.model import Capture
 from ..capture.stats import compute_stats
-from ..decoders.base import decode_capture
+from ..decoders.base import Annotation, decode_capture
 from ..decoders.spi import SPIDecoder
-from ..decoders.uart import UARTDecoder, uart_bytes
+from ..decoders.uart import UARTDecoder, uart_runs
 from ..errors import UsageError
 from ..logic.transitions import edges as logic_edges
 from ..types import SAMPLE_RATE_HZ
@@ -39,6 +43,15 @@ _METRICS = {
     "max_current": ("max_ua", "current"),
     "peak_current": ("max_ua", "current"),
     "min_current": ("min_ua", "current"),
+    # Quantiles describe a fraction of the distribution rather than its
+    # extreme. A CI threshold on `max_current` drifts upward with capture
+    # length because range switches accumulate, so `p99_current` is the more
+    # defensible bound — see docs/energy-analysis.md.
+    "p50_current": ("p50_ua", "current"),
+    "median_current": ("p50_ua", "current"),
+    "p90_current": ("p90_ua", "current"),
+    "p99_current": ("p99_ua", "current"),
+    "p999_current": ("p999_ua", "current"),
     "charge": ("charge_uc", "charge"),
     "energy": ("energy_uj", "energy"),
 }
@@ -48,7 +61,8 @@ _METRIC_UNITS = {"current": "uA", "charge": "uC", "energy": "uJ"}
 _RULE_RE = re.compile(
     r"^\s*(?:after\s+(?P<after>.+?)\s*,)?"
     r"(?:\s*within\s+(?P<within>[0-9.]+\s*(?:s|ms|us|min)?)\s*,)?"
-    r"\s*(?P<metric>[a-z_]+)\s*(?P<op>[<>]=?)\s*(?P<value>\S+)\s*$",
+    # Digits belong in a metric name (`p99_current`), just never at the start.
+    r"\s*(?P<metric>[a-z][a-z0-9_]*)\s*(?P<op>[<>]=?)\s*(?P<value>\S+)\s*$",
     re.IGNORECASE,
 )
 _UART_EVENT_RE = re.compile(
@@ -87,6 +101,17 @@ class AssertionRule:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> AssertionRule:
+        """Build a rule from its JSON form, refusing anything uncomparable.
+
+        A rules file is an input like any other: a threshold that is not a
+        finite number can never compare true or false, so accepting one would
+        block a merge on a comparison that never happened.
+        """
+        if not isinstance(data, dict):
+            raise UsageError(f"a rule must be an object or a DSL string, got {type(data).__name__}")
+        for key in ("metric", "op", "value"):
+            if key not in data:
+                raise UsageError(f"rule is missing required field {key!r}: {data!r}")
         metric_name = data["metric"]
         if metric_name not in _METRICS:
             raise UsageError(
@@ -96,14 +121,37 @@ class AssertionRule:
         op = data["op"]
         if op not in ("<", "<=", ">", ">="):
             raise UsageError(f"unknown comparison operator {op!r}")
+        try:
+            value = float(data["value"])
+        except (TypeError, ValueError) as exc:
+            raise UsageError(f"rule threshold {data['value']!r} is not a number: {exc}") from exc
+        if not math.isfinite(value):
+            raise UsageError(
+                f"rule threshold {data['value']!r} is not a finite number",
+                remediation="Give the threshold a real value; NaN and infinity can never "
+                "compare true or false, so the rule could never be evaluated.",
+            )
+        within_s = data.get("within_s")
+        if within_s is not None:
+            try:
+                within_s = float(within_s)
+            except (TypeError, ValueError) as exc:
+                raise UsageError(f"'within_s' must be a number, got {within_s!r}") from exc
+            if not math.isfinite(within_s) or within_s <= 0:
+                raise UsageError(f"'within_s' must be a positive finite duration, got {within_s!r}")
+        after = data.get("after")
+        if after is not None and not isinstance(after, dict):
+            raise UsageError(f"'after' must be an event object, got {type(after).__name__}")
+        if within_s is not None and after is None:
+            raise UsageError("'within_s' requires an 'after' event")
         return cls(
             metric=field_name,
             metric_name=metric_name,
             op=op,
-            value=float(data["value"]),
+            value=value,
             value_text=data.get("value_text", str(data["value"])),
-            after=data.get("after"),
-            within_s=data.get("within_s"),
+            after=after,
+            within_s=within_s,
             source=data.get("source", "json"),
         )
 
@@ -211,16 +259,56 @@ def _compare(observed: float, op: str, value: float) -> bool:
     return observed >= value
 
 
+def _spi_word_groups(annotations: list[Annotation]) -> list[list[tuple[int, int]]]:
+    """Clean MOSI words grouped by the exchange they belong to.
+
+    A pattern may only be matched inside one group. Two words in two
+    different CS transactions were never one exchange — a JEDEC ID read
+    matched with its opcode in one transaction and its response in another
+    proves nothing about the device. Emission order is always ``word*,
+    transaction``, so the transaction annotation closes the group its words
+    belong to; an errored word ends the group for the same reason.
+    """
+    groups: list[list[tuple[int, int]]] = []
+    current: list[tuple[int, int]] = []
+    for ann in annotations:
+        value = ann.fields.get("mosi") if ann.kind == "word" and not ann.errors else None
+        if value is not None:
+            current.append((value, ann.end_sample))
+            continue
+        if current:
+            groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _matches_in(values: list[int], pattern: list[int]) -> int:
+    return sum(
+        1 for i in range(len(values) - len(pattern) + 1) if values[i : i + len(pattern)] == pattern
+    )
+
+
 def _find_event_windows(
     capture: Capture,
     rule: AssertionRule,
     decoder_config: dict[str, Any],
     *,
     allow_experimental: bool,
-) -> list[tuple[int, int]]:
+) -> tuple[list[tuple[int, int]], list[str]]:
+    """Locate the ``after`` event; returns its windows and any warnings.
+
+    An event is only found where the evidence for it is contiguous. A byte
+    or word sequence assembled across a gap, an unsynchronized frame, or a
+    transaction boundary was never on the wire as one sequence, so it is not
+    an anchor; when such a sequence exists, a warning names it rather than
+    letting the rule fail silently as ``no_event``.
+    """
     assert rule.after is not None
     within = round(rule.within_s * SAMPLE_RATE_HZ) if rule.within_s is not None else None
     windows: list[tuple[int, int]] = []
+    warnings: list[str] = []
     event = rule.after
     if event["type"] == "uart":
         uart_cfg = dict(decoder_config.get("uart", {}))
@@ -232,30 +320,45 @@ def _find_event_windows(
             **uart_cfg,
         )
         annotations = decode_capture(capture, decoder)
-        data, ends = uart_bytes(annotations)
+        runs = uart_runs(annotations)
         pattern = event["match"].encode("ascii")
-        start = 0
-        while True:
-            hit = data.find(pattern, start)
-            if hit < 0:
-                break
-            windows.append((ends[hit + len(pattern) - 1], 0))
-            start = hit + 1
+        for data, ends in runs:
+            start = 0
+            while True:
+                hit = data.find(pattern, start)
+                if hit < 0:
+                    break
+                windows.append((ends[hit + len(pattern) - 1], 0))
+                start = hit + 1
+        joined = b"".join(data for data, _ in runs)
+        spanning = _matches_in(list(joined), list(pattern)) - len(windows)
+        if spanning > 0:
+            warnings.append(
+                f"{spanning} occurrence(s) of {event['match']!r} appear only across a break "
+                "in the decoded byte stream (a sample gap, an unsynchronized frame, or a "
+                "frame error) and are not counted: those bytes were never observed "
+                "back to back"
+            )
     elif event["type"] == "spi":
         spi_cfg = dict(decoder_config.get("spi", {}))
         if "sclk" not in spi_cfg:
             raise UsageError("spi(...) events need SPI channel configuration (--spi-sclk etc.)")
         spi_decoder = SPIDecoder(allow_experimental=allow_experimental, **spi_cfg)
         annotations = decode_capture(capture, spi_decoder)
-        words = [
-            (a.fields.get("mosi"), a.end_sample)
-            for a in annotations
-            if a.kind == "word" and not a.errors
-        ]
+        groups = _spi_word_groups(annotations)
         pattern_words = event["pattern"]
-        for i in range(len(words) - len(pattern_words) + 1):
-            if [w for w, _ in words[i : i + len(pattern_words)]] == pattern_words:
-                windows.append((words[i + len(pattern_words) - 1][1], 0))
+        for group in groups:
+            for i in range(len(group) - len(pattern_words) + 1):
+                if [w for w, _ in group[i : i + len(pattern_words)]] == pattern_words:
+                    windows.append((group[i + len(pattern_words) - 1][1], 0))
+        joined_words = [w for group in groups for w, _ in group]
+        spanning = _matches_in(joined_words, pattern_words) - len(windows)
+        if spanning > 0:
+            warnings.append(
+                f"{spanning} occurrence(s) of the SPI word pattern span a transaction "
+                "boundary or a sample gap and are not counted: those words were never "
+                "exchanged as one transaction"
+            )
     elif event["type"] == "digital":
         channel = parse_channel(event["channel"])
         rising = event["edge"] == "rising"
@@ -264,11 +367,15 @@ def _find_event_windows(
                 windows.append((edge.sample_index, 0))
     else:
         raise UsageError(f"unknown event type {event['type']!r}")
+    # The requested window is reported as asked for, not trimmed to the data
+    # that happens to exist. "within 20ms" over a capture that ends 5 ms after
+    # the event is a fifth of the question, and clamping it to the capture end
+    # would answer a different one — and answer it "passed".
     end_default = capture.end_index
-    return [
-        (start, min(end_default, start + within) if within is not None else end_default)
-        for start, _ in windows
-    ]
+    return (
+        [(start, start + within if within is not None else end_default) for start, _ in windows],
+        warnings,
+    )
 
 
 def evaluate_assertion(
@@ -286,10 +393,11 @@ def evaluate_assertion(
         capture_sha256=capture.sha256(),
     )
     if rule.after is not None:
-        windows = _find_event_windows(
+        windows, event_warnings = _find_event_windows(
             capture, rule, decoder_config or {}, allow_experimental=allow_experimental
         )
         outcome.events_found = len(windows)
+        outcome.warnings.extend(event_warnings)
         if not windows:
             outcome.status = "no_event"
             outcome.warnings.append(
@@ -318,13 +426,31 @@ def evaluate_assertion(
             "threshold": rule.value,
             "op": rule.op,
             "gaps_in_window": stats.gap_count,
+            "covered_fraction": stats.covered_fraction,
+            "capture_end_sample": capture.end_index,
         }
         if stats.gap_count > 0 or stats.has_unknown_gaps:
             observation["status"] = "incomplete"
+            observation["reason_code"] = "sample_gaps"
             observation["reason"] = "sample gaps overlap the evaluation window"
+            any_incomplete = True
+        elif end > capture.end_index:
+            observation["status"] = "incomplete"
+            observation["reason_code"] = "window_past_capture_end"
+            observation["reason"] = (
+                f"the evaluation window ends at sample {end} but the capture ends at "
+                f"{capture.end_index}; the metric would describe a shorter window than "
+                "the rule asks about"
+            )
+            any_incomplete = True
+        elif not stats.complete:
+            observation["status"] = "incomplete"
+            observation["reason_code"] = "window_unpopulated"
+            observation["reason"] = "the evaluation window is not fully populated with samples"
             any_incomplete = True
         elif observed is None:
             observation["status"] = "incomplete"
+            observation["reason_code"] = "metric_not_computable"
             observation["reason"] = (
                 "metric not computable (missing calibration or unknown source voltage)"
             )
@@ -337,8 +463,12 @@ def evaluate_assertion(
 
     if any_incomplete:
         outcome.status = "incomplete"
+        codes = sorted(
+            {str(o["reason_code"]) for o in outcome.observations if o.get("status") == "incomplete"}
+        )
         outcome.warnings.append(
-            "one or more evaluation windows overlap missing data; result is neither pass nor fail"
+            "one or more evaluation windows could not be evaluated as written "
+            f"({', '.join(codes)}); the result is neither pass nor fail"
         )
     elif not all_passed:
         outcome.status = "failed"
@@ -369,7 +499,11 @@ def junit_report(outcomes: list[AssertionOutcome], *, suite_name: str = "ppk2lab
         elif outcome.status in ("no_event", "incomplete"):
             message = "; ".join(outcome.warnings) or outcome.status
             lines.append(f"    <error message={quoteattr(message)} />")
-        lines.append(f"    <system-out>{escape(str(outcome.to_json()))}</system-out>")
+        # JSON, not repr: this blob is the evidence a CI dashboard surfaces,
+        # and str(dict) renders Python literals no JSON parser will accept.
+        # escape() stays — the DSL a rule was written in contains '<'.
+        evidence = json.dumps(outcome.to_json(), sort_keys=True)
+        lines.append(f"    <system-out>{escape(evidence)}</system-out>")
         lines.append("  </testcase>")
     lines.append("</testsuite>")
     return "\n".join(lines) + "\n"

@@ -6,6 +6,12 @@ samples_per_bit`` so non-integer sample-per-bit ratios (9600 baud at
 100 kS/s is 10.417) do not accumulate phase error. Frames that touch a
 sample gap or the end of the stream are reported as errors with zero
 confidence, never as decoded data.
+
+A receiver cannot know where a frame starts until it has seen a high run
+longer than any that can occur inside one. Until that confirmed idle run is
+observed — at stream start, after a gap, and after a break — candidate
+frames are still emitted as raw evidence, but tagged ``unsynced`` with
+confidence 0 so they can never be mistaken for bytes that were on the wire.
 """
 
 from __future__ import annotations
@@ -60,11 +66,19 @@ class UARTDecoder(StreamingDecoder):
         self._bit_offset = [round((k + 0.5) * self._spb) for k in range(self._frame_bits)]
         self._frame_span = round(self._frame_bits * self._spb)
         self._need = self._bit_offset[-1] + 1
-        #: samples of continuous idle required before arming start-edge
-        #: detection at stream start and after a gap. 1.5 bit times rejects
-        #: lone high data bits, so the decoder cannot fabricate bytes by
-        #: locking onto the middle of a frame that a gap cut open.
+        #: samples of continuous idle required before provisionally arming
+        #: start-edge detection. 1.5 bit times rejects lone high data bits;
+        #: it is enough to start looking, never enough to claim alignment.
         self._arm_idle = max(2, round(1.5 * self._spb))
+        #: samples of continuous idle that confirm the line is between
+        #: frames. Every bit of a frame except the start bit can be high at
+        #: once (all-ones data, a high parity bit, the stop bits), so a run
+        #: of ``frame_bits - 1`` bit times can occur with no idle at all;
+        #: one whole frame time exceeds it with a bit time of margin for
+        #: sample-grid quantization and for a run that resumes mid-bit after
+        #: a gap. Only a run this long makes the next falling edge provably
+        #: a start bit rather than a data bit.
+        self._sync_idle = round(self._frame_bits * self._spb)
         self._reset()
 
     # -- state -------------------------------------------------------------
@@ -72,6 +86,8 @@ class UARTDecoder(StreamingDecoder):
         self._bits = bytearray()
         self._base = 0
         self._armed = False
+        self._synced = False
+        self._lead_high = 0
         self._in_break = False
         self._break_start = 0
 
@@ -90,8 +106,28 @@ class UARTDecoder(StreamingDecoder):
         }
 
     # -- helpers -----------------------------------------------------------
+    def _high_run(self, bits: bytearray, before: int) -> int:
+        """Length of the continuous high run ending just before ``before``.
+
+        Counting stops at ``_sync_idle``: the caller only asks whether the
+        run is long enough to be idle, and the cap keeps the walk bounded
+        over an arbitrarily long silent line.
+        """
+        limit = self._sync_idle
+        run = 0
+        i = before - 1
+        while i >= 0 and run < limit and bits[i] == 1:
+            run += 1
+            i -= 1
+        if i < 0 and run < limit:
+            run = min(limit, run + self._lead_high)
+        return run
+
     def _trim(self, keep_from: int) -> None:
         if keep_from > 0:
+            # carry the high run that ends at the new buffer start, so an
+            # idle run split across feeds still counts as one run
+            self._lead_high = self._high_run(self._bits, keep_from)
             del self._bits[:keep_from]
             self._base += keep_from
 
@@ -100,7 +136,9 @@ class UARTDecoder(StreamingDecoder):
         offsets = self._bit_offset
         sampled = [bits[s + off] for off in offsets]
         data = sampled[1 : 1 + self.data_bits]
-        errors: list[str] = []
+        # kept as evidence of what the line did, but never as a decoded byte:
+        # without a confirmed idle run this "frame" may be a slice of another
+        errors: list[str] = [] if self._synced else ["unsynced"]
         value = 0
         if self.msb_first:
             for bit in data:
@@ -127,7 +165,7 @@ class UARTDecoder(StreamingDecoder):
             start_sample=self._base + s,
             end_sample=self._base + s + self._frame_span,
             fields=fields,
-            confidence=self.feasibility.confidence,
+            confidence=0.0 if errors else self.feasibility.confidence,
             errors=errors,
         )
 
@@ -168,7 +206,10 @@ class UARTDecoder(StreamingDecoder):
                     )
                 )
                 self._in_break = False
-                self._armed = False  # require idle again after a break
+                # a break destroys alignment: the line was held low across a
+                # whole frame, so nothing after it is placed until real idle
+                self._armed = False
+                self._synced = False
                 pos = high
                 continue
             if not self._armed:
@@ -221,6 +262,11 @@ class UARTDecoder(StreamingDecoder):
                 else:
                     self._trim(edge - 1)
                 return anns
+            if not self._synced and self._high_run(bits, edge) >= self._sync_idle:
+                # the run before this edge is longer than any run a frame can
+                # contain, so the edge is provably a start bit; from here the
+                # next falling edge after each frame is a start bit too
+                self._synced = True
             if bits[edge + self._bit_offset[0]] != 0:
                 # start bit did not hold to its center: glitch, not a frame
                 pos = edge + 1
@@ -248,8 +294,26 @@ class UARTDecoder(StreamingDecoder):
 
     def _notify_gap(self, gap: GapEvent) -> list[Annotation]:
         anns = self._process(final=True, end_reason="gap")
+        # a gap between two frames leaves no partial frame to report, yet the
+        # bytes either side of it were not sent back to back; mark it so the
+        # loss is visible in the annotation stream and in uart_runs()
+        anns.append(
+            Annotation(
+                self.name,
+                "error",
+                gap.index,
+                gap.index + (gap.missing or 0),
+                {"reason": "sample_gap", "channel": f"D{self.channel}"},
+                confidence=0.0,
+                errors=["gap"],
+            )
+        )
         self._bits.clear()
         self._armed = False
+        # missing samples erase the idle evidence: whatever the line is doing
+        # when it comes back may be the middle of a frame
+        self._synced = False
+        self._lead_high = 0
         self._in_break = False
         if gap.missing is not None:
             self._base = gap.index + gap.missing
@@ -259,21 +323,59 @@ class UARTDecoder(StreamingDecoder):
         anns = self._process(final=True, end_reason="truncated")
         self._bits.clear()
         self._armed = False
+        self._synced = False
+        self._lead_high = 0
         self._in_break = False
         return anns
+
+
+def uart_runs(annotations: list[Annotation]) -> list[tuple[bytes, list[int]]]:
+    """Split frame annotations into runs of back-to-back clean bytes.
+
+    A run is a maximal sequence of consecutive error-free frame annotations.
+    Anything else ends the current run and starts a new one: a gap, a
+    truncated or ``unsynced`` frame, a parity or framing error, a break, or
+    a value too wide to be a byte. Bytes on either side of such an
+    annotation were not observed back to back, so a caller searching for a
+    byte pattern must search each run on its own — a match spanning two runs
+    is a sequence that never appeared on the wire.
+
+    Each run is ``(data, end_samples)`` with ``end_samples[i]`` the timeline
+    end of byte ``i``.
+    """
+    runs: list[tuple[bytes, list[int]]] = []
+    data = bytearray()
+    ends: list[int] = []
+
+    def close() -> None:
+        if data:
+            runs.append((bytes(data), list(ends)))
+            data.clear()
+            ends.clear()
+
+    for ann in annotations:
+        if ann.kind == "frame" and not ann.errors and ann.fields.get("value", 256) < 256:
+            data.append(ann.fields["value"])
+            ends.append(ann.end_sample)
+        else:
+            close()
+    close()
+    return runs
 
 
 def uart_bytes(annotations: list[Annotation]) -> tuple[bytes, list[int]]:
     """Reconstruct the clean byte stream from frame annotations.
 
     Returns ``(data, end_samples)`` where ``end_samples[i]`` is the timeline
-    end of byte ``i``. Frames with errors are excluded — corrupted data never
-    silently joins the stream.
+    end of byte ``i``. Frames with errors are excluded — corrupted or
+    unsynchronized data never silently joins the stream. This is the
+    concatenation of :func:`uart_runs`, and drops the evidence of where one
+    run ended and the next began; anything that must not match across a
+    discontinuity works from ``uart_runs`` instead.
     """
     data = bytearray()
     ends: list[int] = []
-    for ann in annotations:
-        if ann.kind == "frame" and not ann.errors and ann.fields.get("value", 256) < 256:
-            data.append(ann.fields["value"])
-            ends.append(ann.end_sample)
+    for run_data, run_ends in uart_runs(annotations):
+        data.extend(run_data)
+        ends.extend(run_ends)
     return bytes(data), ends

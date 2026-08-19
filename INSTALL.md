@@ -12,10 +12,13 @@ python -m venv .venv && source .venv/bin/activate
 pip install ppk2lab
 ```
 
-> A development preview (`0.1.0.dev0`) is published on PyPI; install it with an
+> `0.1.0.dev0` is the only build published on PyPI today; install it with an
 > exact pin: `pip install ppk2lab==0.1.0.dev0`. Plain `pip install ppk2lab`
-> resolves nothing until the stable `0.1.0` release. For development, install
-> from a source checkout (below).
+> resolves nothing, because pre-releases are excluded by default and no stable
+> release has been cut — the first will be `0.2.0`, after the hardware gates in
+> `ROADMAP.md`. This repository is at `0.2.0.dev0` and carries work the
+> published preview does not, so install from a source checkout (below) to
+> follow it.
 
 From a development checkout:
 
@@ -42,7 +45,10 @@ toolchain test aid, never a substitute for real measurements.
 
 The PPK2 enumerates as a USB CDC ACM device (VID `0x1915`, PID `0xC00A`).
 Firmware 1.2.0 and newer exposes a second (shell) serial port; `ppk2lab
-discover` classifies the measurement port by USB interface number.
+discover` classifies the measurement port by USB interface number where the OS
+reports one. Some platforms do not — macOS is the observed case — and there the
+role stays `unknown` and `PPK2.open()` identifies the measurement port with a
+read-only metadata probe instead of refusing to open. `--port PATH` skips both.
 
 ### Linux
 
@@ -80,10 +86,16 @@ official Power Profiler app (it holds the port exclusively).
 ppk2lab doctor --json
 ```
 
-runs read-only checks (Python, pyserial, enumeration, device metadata,
-calibration) and prints machine-readable remediation for each failure.
-`ppk2lab doctor --stream-check 1s` optionally starts a one-second measurement
-to verify the 100 kS/s stream rate; it never touches DUT power.
+runs read-only checks (Python and pyserial versions, enumeration and device
+selection, port open, interrupted-session recovery, device metadata, firmware
+fingerprint, calibration) and prints machine-readable remediation for each
+failure. `ppk2lab doctor --stream-check 1s` optionally starts a one-second
+measurement to verify the 100 kS/s stream rate; it never touches DUT power.
+
+`doctor` exits with the exit code of the first failing check, so
+`ppk2lab doctor --json || exit 1` is a working pre-flight. Checks that report
+`warn` or `skip` stay non-blocking, and `ppk2lab --simulate doctor` always
+exits 0.
 
 Common failures:
 
@@ -93,6 +105,7 @@ Common failures:
 | `PORT_BUSY` | official app or another process holds the port | close it and retry |
 | `PERMISSION_DENIED` | Linux group membership | see udev/group instructions above |
 | `METADATA_INVALID` | firmware/parse mismatch | retry; file a compatibility report |
+| `CAPTURE_TOO_LARGE` | a long capture will not fit in RAM (the file is intact) | `ppk2lab inspect FILE.ppk2a`, `measure --window START:END`, or raise `--max-samples` |
 
 ## Claude Code plugin
 
@@ -110,10 +123,12 @@ copy `skills/*` there).
 
 ## Codex and loose skills
 
-The skills in `skills/` are plain `SKILL.md` files that Codex can load
-directly. A Codex plugin manifest is not published yet — the loose-skill
-path below is the supported route, and a manifest will be added once its
-format is verified against the current Codex release.
+`skills/` holds two skills — `ppk2lab-operate` (measuring with a PPK2) and
+`ppk2lab-maintain` (working on this repository) — each a plain `SKILL.md` next
+to a `references/` directory it loads from on demand. Codex can load them
+directly. A Codex plugin manifest is not published yet — the loose-skill path
+below is the supported route, and a manifest will be added once its format is
+verified against the current Codex release.
 
 For repository-scoped loose skills, copy `skills/*` into `.agents/skills/`.
 For a user-wide installation:
@@ -133,9 +148,17 @@ Unit tests and offline analysis need no hardware:
 ```bash
 pip install -e ".[dev]"
 pytest
+ppk2lab --simulate doctor --json
 ppk2lab --simulate capture --duration 200ms --output smoke.ppk2a
-ppk2lab assert smoke.ppk2a --rule "max_current < 1A" --format junit
+ppk2lab assert smoke.ppk2a --rule "p99_current < 1A" --format junit
 ```
 
-Hardware-in-the-loop jobs should run on a self-hosted runner with a PPK2 and
-a fixture MCU attached; see ROADMAP.md for the compatibility matrix gates.
+Every one of those exits nonzero on failure, so no `|| exit 1` is needed. For
+a real threshold prefer a percentile to `max_current`: range switches
+accumulate as a capture runs longer, so a maximum drifts upward with capture
+length while `p99_current` does not.
+
+Hardware-in-the-loop jobs need a self-hosted runner with a PPK2 and a fixture
+MCU attached. There is no such workflow in this repository: the release gates
+that need real hardware are run by the maintainer on the bench, and
+`ROADMAP.md` records which configurations have been covered.

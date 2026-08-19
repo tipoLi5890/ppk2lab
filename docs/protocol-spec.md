@@ -96,7 +96,14 @@ Host requirements:
   4-byte realignment when the dropped size is not a multiple of 4;
 - build timestamps as `capture_start + timeline_index * 10 us`, where gaps
   advance the timeline — later samples are never shifted earlier;
-- treat range values above 4 as invalid samples (kept, flagged), not errors.
+- treat range values above 4 as invalid samples (kept, flagged), not errors;
+- treat a sample whose 14-bit ADC field sits on its full-scale code
+  (`0x3FFF`) as pinned rather than measured: the input was at or beyond the
+  top of the selected range, so the calibrated value is a ceiling and no
+  arithmetic on it recovers what the DUT drew. In the top range the pinned
+  value lands at the top of the instrument's 1 A span — inside the >1.1 A
+  implausibility limit — so an over-range load cannot be caught by any test
+  on the converted current. It has to be caught at the ADC code.
 
 ## Hardware observations (2026-08-19, one PPK2 on macOS)
 

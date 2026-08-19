@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-This document is the dependency license audit for the `ppk2lab` `0.1.0`
+This document is the dependency license audit for the `ppk2lab` `0.2.0`
 release gate.
 
 ## Scope and policy
@@ -21,7 +21,7 @@ release gate.
 - **Re-verification**: this scan reflects the environment at audit time. It
   is re-run against the exact locked/installed versions at release-tag time;
   see `docs/releasing.md` for the release checklist. Any "to re-verify at tag
-  time" entry below must be resolved before tagging `0.1.0`.
+  time" entry below must be resolved before tagging `0.2.0`.
 
 ## Runtime dependencies
 
@@ -31,15 +31,6 @@ with the package.
 | Package | Declared constraint | License (as verified) | Project URL | Allowlist verdict |
 |---|---|---|---|---|
 | pyserial | `>=3.5` | BSD (metadata `License: BSD`; classifier `License :: OSI Approved :: BSD License`; no specific clause count stated in metadata) — verified from `pyserial-3.5.dist-info/METADATA` | https://github.com/pyserial/pyserial | Allowed (BSD) |
-
-## Optional dependencies
-
-Installed only when the corresponding extra is requested (`pip install
-"ppk2lab[numpy]"`).
-
-| Package | Declared constraint | License | Project URL | Allowlist verdict |
-|---|---|---|---|---|
-| numpy | `>=1.26` | Not installed in the audited environment (no `numpy*.dist-info` present under `.venv/lib/python3.14/site-packages`); metadata could not be read. Well-known upstream license is BSD-3-Clause — **to re-verify at tag time** | https://github.com/numpy/numpy | Provisionally allowed (BSD, pending metadata verification) |
 
 ## Development dependencies (not shipped)
 
@@ -68,14 +59,21 @@ consumed exclusively as installed dependencies listed above.
 | Package | License | Verdict |
 |---|---|---|
 | pyserial | BSD | Allowed |
-| numpy (optional) | BSD-3-Clause (well-known; not installed — to re-verify at tag time) | Provisionally allowed |
 | pytest (dev) | MIT | Allowed |
 | ruff (dev) | MIT | Allowed |
 | mypy (dev) | MIT | Allowed |
 | jsonschema (dev) | MIT | Allowed |
 
 No blocked or unreviewed licenses were found among the declared
-dependencies. The only open item for the `0.1.0` release gate is
-re-verifying `numpy`'s license metadata directly once it is installed,
-which should happen automatically as part of the re-scan at release-tag
-time (`docs/releasing.md`).
+dependencies, and every license above was read from installed metadata
+rather than assumed. No open items remain for the `0.2.0` license gate;
+the re-scan at release-tag time (`docs/releasing.md`) confirms the exact
+installed versions.
+
+### Change history
+
+- 2026-08-20: the `numpy` extra was removed from `pyproject.toml` — no
+  module in the package ever imported NumPy, so nothing was accelerated by
+  requesting it. Its row was the only entry that had been allowlisted on a
+  well-known license instead of on metadata read from an installed
+  distribution, so removing the extra closed the audit's last open item.

@@ -11,6 +11,12 @@ tiers are enforced by the tool; get current numbers from
 ≤ 20 kHz conditional / ≤ 40 kHz experimental / above refused. Refuse
 politely beyond that — suggest a MHz-class analyzer.
 
+The same entry publishes `sync_policy` and `gap_policy` per decoder: read
+them before explaining a decoded result, because they are the two rules
+that decide what counts as data. `decode` has no `--window` — a decoder
+carries sync state across block boundaries — so a long artifact needs
+`--max-samples` (see capture.md).
+
 ## UART
 
 ```bash
@@ -18,12 +24,31 @@ ppk2lab decode run.ppk2a --uart D0 --baud 9600 --output uart.jsonl --json
 # options: --data-bits 5..9  --parity even|odd  --stop-bits 2  --invert  --msb-first
 ```
 
-- Reconstruct content from clean frames only (empty `errors`); frames with
-  `parity`/`framing`/`gap`/`truncated` errors are corruption evidence, not
-  data.
-- After a gap the decoder re-syncs only after ≥ 1.5 bit times of idle;
-  back-to-back frames right after a gap are deliberately not decoded —
-  report them as unrecoverable due to data loss.
+- Reconstruct content from clean frames only (empty `errors`). A non-empty
+  `errors` list always means `confidence: 0.0`, for both decoders — filter
+  on `errors` and the confidences follow.
+- `unsynced` is the error tag to understand. A receiver cannot know where a
+  frame starts until it has seen a high run longer than any that can occur
+  inside one — at 8N1 that is a whole frame time. Until that idle run is
+  observed (at stream start, after every gap, after every break) candidate
+  frames are still emitted as raw evidence of what the line did, tagged
+  `errors: ["unsynced"]` with confidence 0. They are never bytes: they do
+  not join the byte stream, anchor an assertion, or fire a trigger. There is
+  deliberately no option to lower the threshold. Report them as "the line
+  was active here, but where the frames start is unknown", not as data.
+- `parity`/`framing`/`gap`/`truncated` errors are corruption evidence, not
+  data, on the same footing.
+- **Every gap now leaves its own annotation**, even between frames with none
+  in flight: `kind: "error"`, `errors: ["gap"]`, `fields.reason:
+  "sample_gap"`, spanning the missing samples. Before this a gap that fell
+  between two frames was invisible in decoded output. Expect one extra
+  `error` annotation per gap, and expect `measure --group-by kind` to list
+  them under `error`.
+- Searching for a byte pattern: use `ppk2lab.decoders.uart.uart_runs()`,
+  which splits the clean byte stream at every discontinuity and returns
+  `(data, end_samples)` per run. `uart_bytes()` is its concatenation. A
+  match spanning two runs is a sequence that was never on the wire — search
+  each run on its own.
 - Many errors at a plausible baud → wrong baud/channel, inverted signal, or
   missing Logic VCC (see diagnostics.md).
 
@@ -42,6 +67,11 @@ ppk2lab decode run.ppk2a --spi-sclk D1 --spi-mosi D2 --spi-miso D3 \
   first (0↔1 or 2↔3). All-zero MISO with sensible MOSI usually means MISO
   unwired or a silent DUT, not a decoder fault.
 - `partial_word` / `reasserted` / `gap` / `truncated` mark unreliable data.
+- A word pattern is only ever recognized **inside one transaction**. Words
+  exchanged under two CS assertions were two exchanges, whatever they spell
+  when concatenated — so a `spi(0x9f, 0x00)` pattern that spans a CS
+  boundary is not evidence of one exchange, and neither `assert` nor a
+  content trigger will treat it as one.
 
 ## Logic timing and VCD
 

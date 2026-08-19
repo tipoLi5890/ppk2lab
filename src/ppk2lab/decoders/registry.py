@@ -47,11 +47,17 @@ def decoder_capabilities() -> list[dict[str, Any]]:
                 "validated_max_baud": int(rate / VALIDATED_MIN),  # 10000 -> 9600 in practice
                 "conditional_max_baud": int(rate / CONDITIONAL_MIN),
                 "experimental_max_baud": int(rate / EXPERIMENTAL_MIN),
-                "note": "UART <= 9600 baud is the validated 0.1.0 target; 19200 is "
+                "note": "UART <= 9600 baud is the validated 0.2.0 target; 19200 is "
                 "conditional; 38400 is experimental; above is refused.",
             },
             "gap_policy": "frames touching a sample gap are reported as errors with "
-            "confidence 0; no decoding is claimed across missing data",
+            "confidence 0; every gap is marked in the annotation stream; no decoding "
+            "is claimed across missing data",
+            "sync_policy": "start-edge alignment is claimed only after a continuous "
+            "idle run of one whole frame time, the shortest high run that cannot "
+            "occur inside a frame. Before it - at stream start, after a gap, after a "
+            "break - candidate frames are still reported, tagged errors=['unsynced'] "
+            "with confidence 0, and are never treated as decoded bytes.",
         },
         {
             "name": "spi",
@@ -73,10 +79,13 @@ def decoder_capabilities() -> list[dict[str, Any]]:
                 "validated_max_hz": int(rate / VALIDATED_MIN),
                 "conditional_max_hz": int(rate / CONDITIONAL_MIN),
                 "experimental_max_hz": int(rate / EXPERIMENTAL_MIN),
-                "note": "SPI <= 10 kHz SCLK is the validated 0.1.0 target; <= 20 kHz is "
+                "note": "SPI <= 10 kHz SCLK is the validated 0.2.0 target; <= 20 kHz is "
                 "conditional; <= 40 kHz is experimental; above is refused.",
             },
             "gap_policy": "words/transactions touching a sample gap are closed with a "
             "gap error and confidence 0",
+            "sync_policy": "a word pattern is only recognized inside one transaction; "
+            "words exchanged under two CS assertions were two exchanges, whatever "
+            "they spell when concatenated.",
         },
     ]

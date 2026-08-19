@@ -35,7 +35,7 @@ from ..diagnostics import (
 from ..errors import StreamStalledError, TransportError, UsageError
 from ..protocol.samples import GapEvent, SampleBlock
 from ..triggers.engine import TriggerEngine
-from ..types import SAMPLE_RATE_HZ, VoltageBasis
+from ..types import SAMPLE_PERIOD_S, SAMPLE_RATE_HZ, VoltageBasis
 from .model import Capture, CaptureBuilder, CaptureMeta
 from .stats import StatsAccumulator, VoltageContext, WindowStats
 
@@ -53,6 +53,19 @@ MIN_RATE_CHECK_SECONDS = 2.0
 #: Refuse to buffer more than this in RAM without an explicit opt-in
 #: (4 bytes/sample: 60 s is ~24 MB, an 8 h capture would be ~11.5 GB).
 DEFAULT_IN_MEMORY_LIMIT_SAMPLES = 60 * SAMPLE_RATE_HZ
+#: The host clock and the device's sample clock are independent oscillators
+#: whose relative rate this project has never measured (a comparison against a
+#: disciplined reference is a soak-gate item). 500 ppm sits above the tolerance
+#: of any crystal a USB device ships with, so a shortfall inside it is
+#: arithmetic on two clocks rather than evidence of loss.
+UNMEASURED_CLOCK_TOLERANCE = 5e-4
+#: Either wall-clock anchor can sit behind the samples it marks: the stamp is
+#: taken when a whole USB block has been delivered *and* consumed, and the
+#: reader polls the transport on a bounded timeout. One poll interval per
+#: anchor is the floor; the block spans are added on top, and both the raw
+#: estimate and this floor are reported so a hardware session can replace the
+#: assumption with a measurement.
+ANCHOR_JITTER_S = 0.05
 
 
 @dataclass
@@ -91,6 +104,9 @@ def timeline_report(
     started_utc: str,
     ended_utc: str,
     applicable: bool = True,
+    first_sample_utc: str | None = None,
+    first_block_samples: int = 0,
+    last_block_samples: int = 0,
 ) -> dict[str, Any]:
     """Compare the sample timeline against the host's wall clock.
 
@@ -101,19 +117,31 @@ def timeline_report(
     went missing however quiet the counter stayed.
 
     Timing is measured between the first and last received samples, so the
-    device's start-up latency is not mistaken for loss.
+    device's start-up latency is not mistaken for loss. The two anchors are
+    stamped when a whole USB block reaches the host, not when its samples were
+    taken, so the interval is uncertain by the span of those two blocks; that
+    span, plus an allowance for two unsynchronized clocks, is the floor below
+    which a shortfall is not evidence of anything.
     """
     report: dict[str, Any] = {
         "started_utc": started_utc,
         "ended_utc": ended_utc,
+        "first_sample_utc": first_sample_utc,
+        "anchor_uncertainty_s": None,
         "wall_elapsed_s": None,
         "timeline_advance": timeline_advance,
         "achieved_sample_rate_hz": None,
         "rate_deficit_ratio": None,
+        "rate_offset_ratio": None,
+        "unaccounted_samples_estimate": None,
+        "unaccounted_floor_samples": None,
         "rate_check": "not_applicable",
     }
     if not applicable or first_sample_at is None or last_sample_at is None:
         return report
+    if first_block_samples:
+        # How much earlier than `first_sample_utc` the first sample was taken.
+        report["anchor_uncertainty_s"] = first_block_samples * SAMPLE_PERIOD_S
     elapsed = last_sample_at - first_sample_at
     report["wall_elapsed_s"] = elapsed
     if elapsed <= 0:
@@ -121,6 +149,18 @@ def timeline_report(
     achieved = timeline_advance / elapsed
     report["achieved_sample_rate_hz"] = achieved
     report["rate_deficit_ratio"] = max(0.0, 1.0 - achieved / SAMPLE_RATE_HZ)
+    # The unclamped companion: positive means the timeline advanced faster than
+    # wall time, which is an anchoring artifact rather than a measurement, and
+    # a clamped figure hides it.
+    report["rate_offset_ratio"] = achieved / SAMPLE_RATE_HZ - 1.0
+    expected = round(elapsed * SAMPLE_RATE_HZ)
+    report["unaccounted_samples_estimate"] = expected - timeline_advance
+    report["unaccounted_floor_samples"] = (
+        first_block_samples
+        + last_block_samples
+        + round(2 * ANCHOR_JITTER_S * SAMPLE_RATE_HZ)
+        + round(UNMEASURED_CLOCK_TOLERANCE * expected)
+    )
     if elapsed < MIN_RATE_CHECK_SECONDS:
         report["rate_check"] = "too_short"
     elif report["rate_deficit_ratio"] > RATE_DEFICIT_TOLERANCE:
@@ -148,7 +188,11 @@ def run_capture(
     from .artifact import ArtifactWriter
 
     if duration_s is None and sample_limit is None and trigger_engine is None:
-        raise ValueError("one of duration_s, sample_limit, or a trigger is required")
+        raise UsageError(
+            "one of duration_s, sample_limit, or a trigger is required",
+            remediation="A capture needs a stopping condition: pass duration_s=, "
+            "sample_limit=, or a trigger engine (`--duration`, `--samples`, `--trigger`).",
+        )
     if keep_in_memory is None:
         keep_in_memory = output is None
 
@@ -227,9 +271,13 @@ def run_capture(
     last_index: int | None = None
     first_sample_at: float | None = None
     last_sample_at: float | None = None
+    first_sample_utc: str | None = None
+    first_block_samples = 0
+    last_block_samples = 0
 
     def sink(event: SampleBlock | GapEvent) -> None:
         nonlocal first_index, last_index, first_sample_at, last_sample_at
+        nonlocal first_sample_utc, first_block_samples, last_block_samples
         if isinstance(event, SampleBlock):
             now = time.monotonic()
             if first_index is None:
@@ -237,7 +285,12 @@ def run_capture(
                 acc.start_index = event.start_index
                 acc.end_index = event.start_index
                 first_sample_at = now
+                # Stamped on delivery, so the first sample was taken up to one
+                # block earlier; `anchor_uncertainty_s` carries that bound.
+                first_sample_utc = datetime.now(UTC).isoformat(timespec="milliseconds")
+                first_block_samples = len(event)
             last_sample_at = now
+            last_block_samples = len(event)
             # Timeline extent is a property of the stream, not of whether the
             # samples could be converted: an uncalibrated device must not look
             # like a stalled one.
@@ -333,100 +386,121 @@ def run_capture(
             with contextlib.suppress(ValueError, OSError):
                 signal.signal(signal.SIGTERM, previous_handler)
 
-    if trigger_engine is not None and not trigger_engine.fired and interruption is None:
-        warnings.append(warn(W_TRIGGER, "stream ended before the trigger fired"))
-        interruption = {"reason": "trigger_never_fired"}
+    try:
+        if trigger_engine is not None and not trigger_engine.fired and interruption is None:
+            warnings.append(warn(W_TRIGGER, "stream ended before the trigger fired"))
+            interruption = {"reason": "trigger_never_fired"}
 
-    ended_utc = datetime.now(UTC).isoformat(timespec="milliseconds")
-    timeline = timeline_report(
-        first_sample_at=first_sample_at,
-        last_sample_at=last_sample_at,
-        timeline_advance=(
-            (last_index - first_index) if first_index is not None and last_index else 0
-        ),
-        started_utc=started_utc,
-        ended_utc=ended_utc,
-        # A triggered capture emits its whole pre-trigger ring buffer at the
-        # moment the trigger fires, so wall time covers only the post-trigger
-        # part while the timeline covers both. Comparing them would be
-        # arithmetic on two different intervals.
-        applicable=trigger_engine is None,
-    )
-    if timeline["rate_check"] == "deficit":
-        deficit = timeline["rate_deficit_ratio"]
-        achieved = timeline["achieved_sample_rate_hz"]
-        warnings.append(
-            warn(
-                W_TIMELINE_COMPRESSION,
-                f"timeline compression: {achieved:,.0f} samples/s reached against a nominal "
-                f"{SAMPLE_RATE_HZ:,} S/s ({deficit:.1%} short). Samples were lost beyond "
-                "what the 6-bit counter can report, so durations and integrals understate "
-                "reality",
+        ended_utc = datetime.now(UTC).isoformat(timespec="milliseconds")
+        timeline = timeline_report(
+            first_sample_at=first_sample_at,
+            last_sample_at=last_sample_at,
+            timeline_advance=(
+                (last_index - first_index) if first_index is not None and last_index else 0
+            ),
+            started_utc=started_utc,
+            ended_utc=ended_utc,
+            # A triggered capture emits its whole pre-trigger ring buffer at the
+            # moment the trigger fires, so wall time covers only the post-trigger
+            # part while the timeline covers both. Comparing them would be
+            # arithmetic on two different intervals.
+            applicable=trigger_engine is None,
+            first_sample_utc=first_sample_utc,
+            first_block_samples=first_block_samples,
+            last_block_samples=last_block_samples,
+        )
+        if timeline["rate_check"] == "deficit":
+            deficit = timeline["rate_deficit_ratio"]
+            achieved = timeline["achieved_sample_rate_hz"]
+            warnings.append(
+                warn(
+                    W_TIMELINE_COMPRESSION,
+                    f"timeline compression: {achieved:,.0f} samples/s reached against a nominal "
+                    f"{SAMPLE_RATE_HZ:,} S/s ({deficit:.1%} short). Samples were lost beyond "
+                    "what the 6-bit counter can report, so durations and integrals understate "
+                    "reality",
+                )
             )
-        )
-        if interruption is None:
-            interruption = {
-                "reason": "timeline_compression",
-                "detail": f"achieved {achieved:.0f} S/s, deficit {deficit:.3f}",
-            }
+            if interruption is None:
+                interruption = {
+                    "reason": "timeline_compression",
+                    "detail": f"achieved {achieved:.0f} S/s, deficit {deficit:.3f}",
+                }
 
-    if acc.gap_count:
-        warnings.append(
-            warn(
-                W_SAMPLE_GAPS,
-                f"capture contains {acc.gap_count} sample gap(s); see the gap table",
+        if acc.gap_count:
+            warnings.append(
+                warn(
+                    W_SAMPLE_GAPS,
+                    f"capture contains {acc.gap_count} sample gap(s); see the gap table",
+                )
             )
-        )
-    session = getattr(device, "last_session", None)
-    parser = getattr(session, "parser", None)
-    desync_events = getattr(parser, "desync_events", 0) if parser is not None else 0
-    if desync_events:
-        warnings.append(
-            warn(
-                W_STREAM_DESYNC,
-                f"{desync_events} byte-level framing desync(s) were detected and "
-                "re-aligned; samples around them were discarded rather than reported, "
-                "and the timeline is degraded across each one",
+        session = getattr(device, "last_session", None)
+        parser = getattr(session, "parser", None)
+        desync_events = getattr(parser, "desync_events", 0) if parser is not None else 0
+        if desync_events:
+            warnings.append(
+                warn(
+                    W_STREAM_DESYNC,
+                    f"{desync_events} byte-level framing desync(s) were detected and "
+                    "re-aligned; samples around them were discarded rather than reported, "
+                    "and the timeline is degraded across each one",
+                )
             )
-        )
-    if acc.implausible:
-        warnings.append(
-            warn(
-                W_IMPLAUSIBLE_SAMPLES,
-                f"{acc.implausible} sample(s) converted to a physically impossible current "
-                "and were excluded from statistics; this indicates a stream framing desync",
+        if acc.implausible:
+            warnings.append(
+                warn(
+                    W_IMPLAUSIBLE_SAMPLES,
+                    f"{acc.implausible} sample(s) converted to a physically impossible current "
+                    "and were excluded from statistics; this indicates a stream framing desync",
+                )
             )
-        )
-    if acc.stored == 0 and interruption is None:
-        warnings.append(
-            warn(W_NO_SAMPLES, "capture stored no samples; the device produced no data")
-        )
+        if acc.stored == 0 and interruption is None:
+            warnings.append(
+                warn(W_NO_SAMPLES, "capture stored no samples; the device produced no data")
+            )
 
-    complete = reached_target and interruption is None and acc.gap_count == 0
-    stats = acc.finalize(voltage=voltage) if calibration is not None else None
+        stats = acc.finalize(voltage=voltage, timing=timeline) if calibration is not None else None
+        if stats is not None:
+            # Saturation, an unenumerated gap table, and wall-clock loss the
+            # counter could not describe are all statements about the data the
+            # accumulator just walked; deriving them there keeps the live path and
+            # the offline `measure` path from disagreeing about what they mean.
+            warnings.extend(stats.diagnostics())
 
-    capture: Capture | None = None
-    if builder is not None:
-        builder.warnings.extend(warnings)
-        capture = builder.finish(
-            complete=reached_target and interruption is None, interruption=interruption
-        )
+        complete = reached_target and interruption is None and acc.gap_count == 0
 
-    path: str | None = None
-    sha256: str | None = None
-    if writer is not None:
-        manifest = writer.finalize(
-            complete=reached_target and interruption is None,
-            interruption=interruption,
-            stats=stats.to_json() if stats else None,
-            warnings=[w.to_json() for w in warnings],
-            calibration=_calibration_block(device),
-            timing=timeline,
-        )
-        path = str(writer.path)
-        sha256 = manifest["samples"]["sha256"]
-    elif capture is not None:
-        sha256 = capture.sha256()
+        capture: Capture | None = None
+        if builder is not None:
+            builder.warnings.extend(warnings)
+            capture = builder.finish(
+                complete=reached_target and interruption is None,
+                interruption=interruption,
+                timing=timeline,
+            )
+
+        path: str | None = None
+        sha256: str | None = None
+        if writer is not None:
+            manifest = writer.finalize(
+                complete=reached_target and interruption is None,
+                interruption=interruption,
+                stats=stats.to_json() if stats else None,
+                warnings=[w.to_json() for w in warnings],
+                calibration=_calibration_block(device),
+                timing=timeline,
+            )
+            path = str(writer.path)
+            sha256 = manifest["samples"]["sha256"]
+        elif capture is not None:
+            sha256 = capture.sha256()
+    except BaseException:
+        # Anything raised between the end of the stream and the rename leaves
+        # a temp file with no manifest, which is not a capture. abort() is a
+        # no-op once finalize has closed the container, so a complete capture
+        # that merely failed to be renamed is preserved rather than deleted.
+        if writer is not None:
+            writer.abort()
+        raise
 
     return CaptureResult(
         capture=capture,

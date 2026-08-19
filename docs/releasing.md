@@ -7,10 +7,10 @@ live in `CONTRIBUTING.md`. Read all three first; nothing here overrides them.
 
 ## 1. Preconditions
 
-- Every `0.1.0` release gate in `ROADMAP.md` ("`0.1.0` release gates") is
-  green, including the hardware compatibility matrix and the hardware
-  gates in the gating audit (OS matrix, firmware matrix, UART/SPI
-  error-rate thresholds, soak tests). These cannot be faked or waived.
+- Every release gate in `ROADMAP.md` ("`0.2.0` release gates") is green,
+  including the hardware compatibility matrix and the hardware gates in the
+  gating audit (OS matrix, firmware matrix, UART/SPI error-rate thresholds,
+  soak tests). These cannot be faked or waived.
 - The `ppk2lab-maintain` release-gating audit
   (`skills/ppk2lab-maintain/references/release-gating.md`) ends with
   **"ready to tag: yes"**, no blockers. On "no", fix the blockers and
@@ -22,7 +22,7 @@ Local and reversible only: no remote, no tag, no package index.
 
 ```bash
 git clean -xdn && python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev]" build   # build is a maintainer tool, not an extra
 
 pytest
 ruff check src tests
@@ -54,11 +54,13 @@ continuing.
 
 ## 3. Version and changelog
 
-1. Bump `__version__` in `src/ppk2lab/_version.py`. Stays `0.1.0.devN`
+1. Bump `__version__` in `src/ppk2lab/_version.py`. Stays `0.2.0.devN`
    until every hardware gate passes; the first release clearing all gates
-   becomes `0.1.0` — never `1.0.0`.
+   becomes `0.2.0`, the project's first stable release — never `1.0.0`.
+   `0.1.0.dev0` is on PyPI and is the only build there; it is a
+   pre-release, so `pip install ppk2lab` does not resolve to it.
 2. In `CHANGELOG.md`, rename `## [Unreleased]` to the release heading with
-   today's date (e.g. `## [0.1.0] - YYYY-MM-DD`), keeping its entries.
+   today's date (e.g. `## [0.2.0] - YYYY-MM-DD`), keeping its entries.
 3. If this release changes `SCHEMA_VERSION` or capture `format_version`,
    add a CHANGELOG migration note per the compatibility policy in
    `ROADMAP.md` — do not bump either silently.
@@ -71,8 +73,9 @@ continuing.
 **Everything below is an external write** (remote, tag, GitHub release,
 PyPI). Per `CLAUDE.md`, `AGENTS.md`, and `CONTRIBUTING.md`, none of it runs
 without the maintainer's explicit, in-the-moment authorization, and only
-after CI **and** the hardware release workflow are green on the exact tag
-commit (`ROADMAP.md` gate 8). Not executed here — listed for the maintainer:
+after CI is green on the exact tag commit and the hardware gates have been
+validated on a physical device (`ROADMAP.md` gate 8). Not executed here
+— listed for the maintainer:
 
 Publishing runs through PyPI **Trusted Publishing** (OIDC) via
 `.github/workflows/release.yml` — no API tokens are stored anywhere.
@@ -82,12 +85,15 @@ registered on PyPI (project `ppk2lab`, owner `tipoLi5890`, repository
 GitHub environment `pypi` exists under Settings → Environments with a
 required reviewer, so every upload needs a manual approval click.
 
-1. `git tag -a v0.1.0 -m "ppk2lab 0.1.0"` on the Section 3 commit, then
-   `git push origin main && git push origin v0.1.0`.
-2. Wait for CI and the hardware workflow to both go green on the tag
-   commit; never release on red or pending.
+1. `git tag -a v0.2.0 -m "ppk2lab 0.2.0"` on the Section 3 commit, then
+   `git push origin main && git push origin v0.2.0`.
+2. Wait for CI to go green on the tag commit; never release on red or
+   pending. The hardware gates have no workflow — they need a physical PPK2
+   and an MCU fixture attached — so confirm instead that they were validated
+   against this commit and that `ROADMAP.md`'s compatibility matrix records
+   the configurations covered.
 3. Create the GitHub release from the tag
-   (`gh release create v0.1.0 --notes-from-tag`). Publishing the release
+   (`gh release create v0.2.0 --notes-from-tag`). Publishing the release
    triggers `release.yml`, which verifies the tag matches
    `src/ppk2lab/_version.py`, builds, `twine check`s, and — after the
    `pypi` environment approval — uploads to PyPI.
@@ -96,10 +102,10 @@ required reviewer, so every upload needs a manual approval click.
 
 ## 5. Post-release
 
-1. In a fresh venv, `pip install ppk2lab==0.1.0` from PyPI (not the local
+1. In a fresh venv, `pip install ppk2lab==0.2.0` from PyPI (not the local
    checkout) and re-run the Section 2 doctor/discover smoke test with
    `--simulate`, confirming it matches the rehearsal build.
 2. Open a new `## [Unreleased]` section at the top of `CHANGELOG.md` for
-   the next `0.1.0.devN` cycle.
+   the next cycle.
 3. Update `ROADMAP.md`: remove the work items this release closed, and
    fill in the hardware compatibility matrix rows it validated.

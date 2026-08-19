@@ -164,9 +164,14 @@ class UartContentTrigger(TriggerDetector):
     def feed(self, block: SampleBlock, currents_ua: list[float] | None) -> int | None:
         annotations = self.decoder.feed(LogicChunk(block.start_index, block.logic))
         for ann in annotations:
-            if ann.kind != "frame" or ann.errors:
+            value = ann.fields.get("value") if ann.kind == "frame" and not ann.errors else None
+            if value is None or value > 0xFF:
+                # a gap, an unsynchronized or errored frame, a break, or a
+                # value wider than a byte breaks the run: the pattern has to
+                # be consecutive on the wire, not merely eventually present
+                self._window.clear()
                 continue
-            self._window.append((ann.fields["value"], ann.end_sample))
+            self._window.append((value, ann.end_sample))
             if (
                 len(self._window) == len(self.pattern)
                 and bytes(v for v, _ in self._window) == self.pattern
@@ -200,10 +205,11 @@ class SpiContentTrigger(TriggerDetector):
     def feed(self, block: SampleBlock, currents_ua: list[float] | None) -> int | None:
         annotations = self.decoder.feed(LogicChunk(block.start_index, block.logic))
         for ann in annotations:
-            if ann.kind != "word" or ann.errors:
-                continue
-            value = ann.fields.get(self.on)
+            value = ann.fields.get(self.on) if ann.kind == "word" and not ann.errors else None
             if value is None:
+                # a transaction boundary or an errored word breaks the run:
+                # words from two exchanges were never one exchange
+                self._window.clear()
                 continue
             self._window.append((value, ann.end_sample))
             if (

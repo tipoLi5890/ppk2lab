@@ -13,7 +13,7 @@ from typing import Any
 from ..capture.model import Capture
 from ..capture.stats import WindowStats, compute_stats
 from ..decoders.base import Annotation
-from ..errors import CaptureFileError
+from ..errors import CaptureFileError, UsageError
 
 
 def measure_window(
@@ -25,6 +25,7 @@ def measure_window(
     end_index: int | None = None,
     filtered: bool = False,
     assume_voltage_mv: int | None = None,
+    state_threshold_ua: float | None = None,
 ) -> WindowStats:
     """Statistics over a time or sample-index window of a capture."""
     if start_s is not None:
@@ -37,6 +38,7 @@ def measure_window(
         end_index=end_index,
         filtered=filtered,
         assume_voltage_mv=assume_voltage_mv,
+        state_threshold_ua=state_threshold_ua,
     )
 
 
@@ -74,7 +76,7 @@ def measure_annotations(
     if group_by == "annotation":
         return per_annotation
     if group_by != "kind":
-        raise ValueError(f"group_by must be 'annotation' or 'kind', got {group_by!r}")
+        raise UsageError(f"group_by must be 'annotation' or 'kind', got {group_by!r}")
     groups: dict[str, dict[str, Any]] = {}
     for entry in per_annotation:
         kind = entry["annotation"]["kind"]
@@ -135,7 +137,16 @@ def load_annotations_jsonl(path: str | os.PathLike[str]) -> list[Annotation]:
                     continue
                 try:
                     annotations.append(Annotation.from_json(json.loads(line)))
-                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                # OverflowError joins the tuple because a JSON integer literal
+                # has no width limit: an int too large for a C double raises it
+                # rather than ValueError when a field is coerced to float.
+                except (
+                    json.JSONDecodeError,
+                    KeyError,
+                    OverflowError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
                     raise CaptureFileError(
                         f"invalid annotation on line {line_no} of {path}: {exc}"
                     ) from exc

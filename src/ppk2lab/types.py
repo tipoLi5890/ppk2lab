@@ -106,12 +106,18 @@ class VoltageBasis(enum.Enum):
     UNKNOWN = "unknown"
 
 
-@dataclass
+@dataclass(frozen=True)
 class DeviceState:
     """Device state as tracked by the host session.
 
     ``None`` means "unknown / not observable"; unknown values are preserved,
     never replaced with invented defaults.
+
+    Frozen, and reached through the read-only :attr:`ppk2lab.PPK2.state`
+    property, because ``dut_power`` can never be read back from the device:
+    a host-side write to it would be recorded in a capture manifest as a
+    hardware state, indistinguishable from one the tool actually commanded.
+    Only the device driver updates this, and only after the command went out.
     """
 
     mode: Mode | None = None

@@ -281,3 +281,14 @@ def test_two_simulated_devices_keep_separate_state():
     finally:
         a.close()
         b.close()
+
+
+def test_simulator_rejects_an_impossible_chunk_size_with_a_typed_error():
+    """Every library error subclasses Ppk2labError, simulator setup included."""
+    from ppk2lab.errors import Ppk2labError, UsageError
+    from ppk2lab.transport.mock import SimulatedPPK2
+
+    with pytest.raises(UsageError) as excinfo:
+        SimulatedPPK2(metadata_chunk_bytes=0)
+    assert isinstance(excinfo.value, Ppk2labError)
+    assert excinfo.value.code == "INVALID_ARGUMENT"

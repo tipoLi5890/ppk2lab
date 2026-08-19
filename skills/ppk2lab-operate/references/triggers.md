@@ -29,10 +29,24 @@ trigger description for reproducibility.
 ## Failure semantics (relay honestly)
 
 - Timeout without firing → exit 6, `interruption.reason: trigger_timeout`;
-  suggest loosening the condition or checking wiring.
+  suggest loosening the condition or checking wiring. A stream that simply
+  ends first gives `trigger_never_fired`.
 - Less than `pre` existed before the fire → window starts at the first
   available sample; manifest `start_index` shows the truth.
 - Gaps reset hold counts and content-decoder state — a trigger cannot fire
   on missing data. UART/SPI content triggers inherit the decoder rate
   tiers (see `ppk2lab capabilities --json`), including
   `--allow-experimental` gating.
+- **A content trigger only fires on evidence that was actually on the
+  wire.** A UART pattern cannot fire before the decoder has seen a
+  confirmed idle run — at stream start, after a gap, and after a break, the
+  frames are `unsynced` and never become bytes (decode.md). A pattern is
+  also not matched around a corrupted frame or across two SPI CS
+  transactions: the match window is cleared at every such discontinuity.
+  So a trigger that used to fire on `D, O, <corrupted>, N, E` no longer
+  does. If a trigger stops firing after an upgrade, the pattern was being
+  matched on stitched evidence — fix the signal, don't loosen the trigger.
+- Because the confirmed-idle rule applies at stream start too, expect a
+  UART content trigger to ignore whatever was mid-transmission when the
+  capture began. Give the DUT a quiet moment before the event you want, or
+  trigger on something else and search the decode afterwards.

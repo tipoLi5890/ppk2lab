@@ -3,6 +3,9 @@
 import jsonschema
 import pytest
 
+from ppk2lab.capture.runner import timeline_report
+from ppk2lab.capture.stats import StatsAccumulator
+from ppk2lab.diagnostics import WARNING_CATALOG, warning_catalog
 from ppk2lab.errors import ERROR_CLASSES, SchemaNotFoundError, error_catalog
 from ppk2lab.schemas import SCHEMAS, get_schema, list_schemas
 
@@ -54,3 +57,73 @@ def test_schema_count_stability():
         "window-stats",
     }
     assert expected.issubset(set(SCHEMAS))
+
+
+def test_window_stats_publishes_every_field_it_emits():
+    """A result field the schema does not declare is a field no consumer can
+    validate against. Adding one to `to_json` must add it here in the same
+    change, which is what this comparison forces."""
+    emitted = StatsAccumulator(0).finalize().to_json()
+    declared = get_schema("window-stats")["properties"]
+    assert set(emitted) == set(declared)
+    assert set(emitted["samples"]) == set(declared["samples"]["properties"])
+    assert set(emitted["current_ua"]) == set(declared["current_ua"]["properties"])
+    jsonschema.validate(emitted, get_schema("window-stats"))
+
+
+def test_timeline_check_publishes_every_field_it_emits():
+    report = timeline_report(
+        first_sample_at=0.0,
+        last_sample_at=10.0,
+        timeline_advance=1_000_000,
+        started_utc="",
+        ended_utc="",
+        first_sample_utc="",
+        first_block_samples=4096,
+        last_block_samples=4096,
+    )
+    assert set(report) == set(get_schema("timeline-check")["properties"])
+    jsonschema.validate(report, get_schema("timeline-check"))
+
+
+def test_every_warning_code_has_a_published_meaning():
+    """The catalog is how an agent learns the vocabulary from the tool instead
+    of from the source, so a code without an entry is a code nobody can act
+    on."""
+    from ppk2lab import diagnostics
+
+    codes = {
+        value
+        for name, value in vars(diagnostics).items()
+        if name.startswith("W_") and isinstance(value, str)
+    }
+    assert codes == set(WARNING_CATALOG)
+    for entry in warning_catalog():
+        assert entry["meaning"].strip(), entry["code"]
+
+
+def test_every_catalog_entry_is_categorized():
+    """The three catalogs share one shape, so one reader handles all three."""
+    from ppk2lab.diagnostics import (
+        GAP_CATEGORY,
+        GAP_REASONS,
+        INTERRUPTION_CATEGORY,
+        INTERRUPTION_REASONS,
+        WARNING_CATALOG,
+        WARNING_CATEGORY,
+        gap_reason_catalog,
+        interruption_reason_catalog,
+        warning_catalog,
+    )
+
+    # A code without a category would raise KeyError at catalog time; asserting
+    # the key sets instead names the missing code.
+    assert set(WARNING_CATEGORY) == set(WARNING_CATALOG)
+    assert set(GAP_CATEGORY) == set(GAP_REASONS)
+    assert set(INTERRUPTION_CATEGORY) == set(INTERRUPTION_REASONS)
+    shapes = {
+        frozenset(entry)
+        for catalog in (warning_catalog(), gap_reason_catalog(), interruption_reason_catalog())
+        for entry in catalog
+    }
+    assert shapes == {frozenset({"code", "category", "meaning"})}

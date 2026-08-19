@@ -84,6 +84,42 @@ class CaptureFileError(UsageError):
     )
 
 
+class CaptureTooLargeError(UsageError):
+    """The artifact is valid; the caller asked to materialize more of it than fits.
+
+    Distinct from :class:`CaptureFileError` on purpose: an 8-hour soak capture
+    is the tool working correctly, and reporting it as a corrupt file sends an
+    agent down a repair path for a file that needs no repair.
+    """
+
+    code = "CAPTURE_TOO_LARGE"
+    default_remediation = (
+        "The capture is intact but too large to load whole. Read its manifest with "
+        "`ppk2lab inspect FILE.ppk2a --json`, measure a slice with `ppk2lab measure "
+        "FILE.ppk2a --window START:END`, or raise the ceiling with `--max-samples N` "
+        "(`--max-samples none` removes it, at roughly 8 bytes of RAM per sample)."
+    )
+
+
+class CalibrationUnavailableError(Ppk2labError):
+    """Raw ADC codes exist but nothing can convert them to current.
+
+    A capture recorded from a device whose metadata could not be read carries
+    no calibration constants. The samples, gaps, and D0-D7 logic stay usable;
+    only the current/charge/energy derivation is impossible, and inventing
+    constants to fill the hole would fabricate the measurement.
+    """
+
+    code = "CALIBRATION_UNAVAILABLE"
+    exit_code = EXIT_USAGE
+    default_remediation = (
+        "This capture carries no device metadata, so current cannot be derived from "
+        "its raw ADC codes. Inspect it with `ppk2lab inspect FILE.ppk2a --json`; raw "
+        "samples and D0-D7 logic remain readable. Re-capture with a device whose "
+        "metadata reads cleanly (`ppk2lab doctor --json`) for current measurements."
+    )
+
+
 class DeviceNotFoundError(Ppk2labError):
     code = "DEVICE_NOT_FOUND"
     exit_code = EXIT_DEVICE_NOT_FOUND
@@ -207,6 +243,8 @@ ERROR_CLASSES: tuple[type[Ppk2labError], ...] = (
     SchemaNotFoundError,
     OutputExistsError,
     CaptureFileError,
+    CaptureTooLargeError,
+    CalibrationUnavailableError,
     DeviceNotFoundError,
     PortBusyError,
     PermissionDeniedError,

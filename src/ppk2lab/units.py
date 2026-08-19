@@ -12,7 +12,7 @@ import re
 
 from .errors import UsageError
 
-_DURATION_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*(s|ms|us|min)?\s*$")
+_DURATION_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*(s|ms|us|min|h)?\s*$")
 
 _CURRENT_UNITS_UA = {"na": 1e-3, "ua": 1.0, "ma": 1e3, "a": 1e6}
 _CHARGE_UNITS_UC = {"nc": 1e-3, "uc": 1.0, "mc": 1e3, "c": 1e6}
@@ -22,13 +22,18 @@ _VALUE_UNIT_RE = re.compile(r"^\s*(-?[0-9]*\.?[0-9]+)\s*([a-zA-Zµ]+)\s*$")
 
 
 def parse_duration_s(text: str) -> float:
-    """Parse ``"5s"``, ``"20ms"``, ``"1.5min"`` or bare seconds into seconds."""
+    """Parse ``"5s"``, ``"20ms"``, ``"1.5min"``, ``"8h"`` or bare seconds into seconds.
+
+    Hours exist because the long-soak measurements this tool is built for are
+    stated in hours; writing them as ``28800s`` is an invitation to a
+    typo that no reviewer can catch by eye.
+    """
     match = _DURATION_RE.match(text)
     if not match:
-        raise UsageError(f"Invalid duration: {text!r} (expected e.g. 5s, 200ms, 1.5min)")
+        raise UsageError(f"Invalid duration: {text!r} (expected e.g. 5s, 200ms, 1.5min, 8h)")
     value = float(match.group(1))
     unit = match.group(2) or "s"
-    scale = {"s": 1.0, "ms": 1e-3, "us": 1e-6, "min": 60.0}[unit]
+    scale = {"s": 1.0, "ms": 1e-3, "us": 1e-6, "min": 60.0, "h": 3600.0}[unit]
     seconds = value * scale
     if seconds <= 0:
         raise UsageError(f"Duration must be positive: {text!r}")

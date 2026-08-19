@@ -18,9 +18,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..calibration import Calibration, SpikeFilter
+from ..errors import CalibrationUnavailableError
 from ..protocol.metadata import parse_metadata
 from ..protocol.samples import GapEvent, SampleBlock
 from ..types import SAMPLE_PERIOD_S, SAMPLE_RATE_HZ
+
+#: Loading an artifact materializes every sample plus a copy for hashing, so
+#: the read path needs the same honesty as the write path: roughly 8 bytes of
+#: peak RAM per stored sample. Defined here rather than beside the reader so
+#: that :meth:`Capture.load` can name it without importing its own writer.
+MAX_LOAD_SAMPLES = 200 * 1_000_000 // 8  # ~200 MB peak
 
 
 def _utcnow_iso() -> str:
@@ -63,6 +70,10 @@ class Capture:
         interruption: dict[str, Any] | None = None,
         warnings: list[Any] | None = None,
         timeline_degraded: bool = False,
+        timing: dict[str, Any] | None = None,
+        gaps_truncated: int = 0,
+        time_origin_index: int | None = None,
+        artifact_sha256: str | None = None,
     ) -> None:
         self.meta = meta
         self.words = words
@@ -70,7 +81,32 @@ class Capture:
         self.complete = complete and not self.gaps
         self.interruption = interruption
         self.warnings = list(warnings or [])
-        self.timeline_degraded = timeline_degraded or any(g.missing is None for g in self.gaps)
+        #: Gaps that occurred after the gap table hit its ceiling. The count is
+        #: exact; the spans are not recoverable.
+        self.gaps_truncated = gaps_truncated
+        #: Wall-clock cross-check of the sample timeline, as recorded when the
+        #: stream ran. It is the only witness to loss the 6-bit counter cannot
+        #: describe, so it travels with the capture instead of being recomputed
+        #: from stored data that no longer contains the evidence.
+        self.timing: dict[str, Any] = dict(timing or {})
+        # An unenumerated gap breaks the stored-to-timeline mapping just as an
+        # unknown-size one does: positions after it cannot all be resolved.
+        self.timeline_degraded = (
+            timeline_degraded or gaps_truncated > 0 or any(g.missing is None for g in self.gaps)
+        )
+        #: Timeline index that reads as t = 0. Defaults to this capture's own
+        #: first stored sample. A windowed read keeps the origin of the artifact
+        #: it came from, so a window's timestamps line up with a full export's
+        #: instead of restarting at zero and quietly answering a different
+        #: question than the one the column name implies.
+        self.time_origin_index = (
+            meta.start_index if time_origin_index is None else time_origin_index
+        )
+        #: SHA-256 the source artifact records over its raw sample bytes, and
+        #: only when this read actually verified it. ``None`` for an in-memory
+        #: capture, which has no artifact, and for a windowed read, which
+        #: verifies per-chunk CRC32s and never sees the whole file.
+        self.artifact_sha256 = artifact_sha256
         self._calibration: Calibration | None = None
         self._sha256: str | None = None
 
@@ -155,10 +191,10 @@ class Capture:
         return None
 
     def time_to_index(self, seconds: float) -> int:
-        return self.start_index + round(seconds * self.sample_rate_hz)
+        return self.time_origin_index + round(seconds * self.sample_rate_hz)
 
     def index_to_time(self, timeline_index: int) -> float:
-        return (timeline_index - self.start_index) / self.sample_rate_hz
+        return (timeline_index - self.time_origin_index) / self.sample_rate_hz
 
     # -- iteration ---------------------------------------------------------
     def iter_events(self, block_samples: int = 65536) -> Iterator[SampleBlock | GapEvent]:
@@ -202,7 +238,7 @@ class Capture:
         """Calibrated current for every stored sample (NaN preserved)."""
         calibration = self.calibration
         if calibration is None:
-            raise ValueError("capture has no calibration metadata")
+            raise CalibrationUnavailableError("capture has no calibration metadata")
         vdd = vdd_mv if vdd_mv is not None else self.source_voltage_mv
         spike = SpikeFilter() if filtered else None
         out: list[float] = []
@@ -230,10 +266,45 @@ class Capture:
         return write_capture(self, path, overwrite=overwrite)
 
     @classmethod
-    def load(cls, path: str) -> Capture:
+    def load(cls, path: str, *, max_samples: int | None = MAX_LOAD_SAMPLES) -> Capture:
+        """Read a stored artifact whole.
+
+        ``max_samples`` caps how much will be materialized; ``None`` removes
+        the cap. See :func:`~ppk2lab.capture.artifact.read_capture`.
+        """
         from .artifact import read_capture
 
-        return read_capture(path)
+        return read_capture(path, max_samples=max_samples)
+
+    @classmethod
+    def load_window(
+        cls,
+        path: str,
+        *,
+        start_index: int | None = None,
+        end_index: int | None = None,
+        start_s: float | None = None,
+        end_s: float | None = None,
+        max_samples: int | None = MAX_LOAD_SAMPLES,
+    ) -> Capture:
+        """Read one timeline window of a stored artifact.
+
+        Peak memory follows the window, not the file, so an hours-long capture
+        can be examined a slice at a time. The returned capture's
+        ``artifact_sha256`` is ``None``: a windowed read verifies the CRC32 of
+        the chunks it touches and never sees the whole file. See
+        :func:`~ppk2lab.capture.artifact.read_window`.
+        """
+        from .artifact import read_window
+
+        return read_window(
+            path,
+            start_index=start_index,
+            end_index=end_index,
+            start_s=start_s,
+            end_s=end_s,
+            max_samples=max_samples,
+        )
 
 
 class CaptureBuilder:
@@ -271,6 +342,7 @@ class CaptureBuilder:
         *,
         complete: bool = True,
         interruption: dict[str, Any] | None = None,
+        timing: dict[str, Any] | None = None,
     ) -> Capture:
         return Capture(
             self.meta,
@@ -280,4 +352,6 @@ class CaptureBuilder:
             interruption=interruption,
             warnings=self.warnings,
             timeline_degraded=self.timeline_degraded,
+            timing=timing,
+            gaps_truncated=self.gaps_truncated,
         )

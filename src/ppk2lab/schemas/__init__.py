@@ -126,6 +126,11 @@ _WINDOW_STATS = _obj(
                 "invalid_range": {"type": "integer"},
                 "not_convertible": {"type": "integer"},
                 "implausible": {"type": "integer"},
+                # Window positions holding neither a sample nor a recorded
+                # gap: the window reaches past what the capture covers.
+                "unpopulated": _NULLABLE_INT,
+                "saturated": {"type": "integer"},
+                "zero_code": {"type": "integer"},
                 "covered_fraction": _NULLABLE_NUMBER,
             }
         ),
@@ -135,8 +140,69 @@ _WINDOW_STATS = _obj(
                 "min": _NULLABLE_NUMBER,
                 "max": _NULLABLE_NUMBER,
                 "peak_index": _NULLABLE_INT,
+                # Quantiles describe a fraction of the distribution rather than
+                # its extreme, so unlike `max` they do not drift upward as a
+                # capture gets longer (range switches accumulate; the DUT does
+                # not change). See docs/energy-analysis.md.
+                "p50": _NULLABLE_NUMBER,
+                "p90": _NULLABLE_NUMBER,
+                "p99": _NULLABLE_NUMBER,
+                "p999": _NULLABLE_NUMBER,
             }
         ),
+        # The log-spaced grid the quantiles were read off. A quantile is
+        # quantized to it, and readings below the floor have no bin, so a
+        # quantile served from them is an upper bound.
+        "distribution": _obj(
+            {
+                "grid_min_ua": {"type": "number"},
+                "grid_max_ua": {"type": "number"},
+                "bins_per_decade": {"type": "integer"},
+                "quantile_half_width_fraction": {"type": "number"},
+                "below_grid_samples": {"type": "integer"},
+                "above_grid_samples": {"type": "integer"},
+            }
+        ),
+        # Null unless a state threshold was asked for: the split is a function
+        # of the caller's choice, so a default would bake one editorial
+        # boundary into every result.
+        "state_split": {
+            "anyOf": [
+                {"type": "null"},
+                _obj(
+                    {
+                        "threshold_ua": {"type": "number"},
+                        "below": {"type": "object"},
+                        "above": {"type": "object"},
+                    },
+                    ["threshold_ua", "below", "above"],
+                ),
+            ]
+        },
+        # Nordic publishes per-range accuracy as *typical*, not guaranteed, so
+        # every field says so and `guaranteed` is always false. The per-range
+        # figures are systematic gain specifications: fully correlated inside a
+        # range, summed linearly, never divided by sqrt(N). The statistical
+        # uncertainty of the mean is separate and separately labelled, because
+        # 10 us samples through a shunt-switching front end are autocorrelated.
+        "uncertainty": {
+            "anyOf": [
+                {"type": "null"},
+                _obj(
+                    {
+                        "model": {"type": "string"},
+                        "guaranteed": {"const": False},
+                        "mean_ua_typical": _NULLABLE_NUMBER,
+                        "charge_uc_typical": _NULLABLE_NUMBER,
+                        "energy_uj_typical": _NULLABLE_NUMBER,
+                        "mean_ua_batch_stderr": _NULLABLE_NUMBER,
+                        "batch_count": _NULLABLE_INT,
+                        "batch_samples": _NULLABLE_INT,
+                    },
+                    ["model", "guaranteed"],
+                ),
+            ]
+        },
         "charge_uc": _NULLABLE_NUMBER,
         "charge_is_lower_bound": {"type": "boolean"},
         "energy_uj": _NULLABLE_NUMBER,
@@ -149,7 +215,21 @@ _WINDOW_STATS = _obj(
         "voltage_measured": {"const": False},
         "energy_note": _NULLABLE_STR,
         "complete": {"type": "boolean"},
+        # The instrument's ceiling: a sample sitting on the ADC's full-scale
+        # code is pinned, so its amplitude is a lower bound whatever the
+        # calibrated value says.
+        "saturated_samples": {"type": "integer"},
+        "saturated_ranges": {"type": "array", "items": {"type": "integer"}},
+        "samples_per_range": {"type": "array", "items": {"type": "integer"}},
+        "charge_per_range_uc": {"type": ["array", "null"], "items": {"type": "number"}},
+        "range_switches": {"type": "integer"},
+        "range_switch_rate_hz": _NULLABLE_NUMBER,
+        # Capture-level: the wall clock witnesses loss the 6-bit counter
+        # cannot describe, and nothing localizes it to this window.
+        "unaccounted_samples_estimate": _NULLABLE_INT,
+        "unaccounted_loss_is_capture_level": {"type": "boolean"},
         "sample_gaps": {"type": "array", "items": _GAP},
+        "gaps_truncated": {"type": "integer"},
     },
     [
         "window",
@@ -170,10 +250,20 @@ _TIMELINE_CHECK = _obj(
     {
         "started_utc": {"type": "string"},
         "ended_utc": {"type": "string"},
+        # Stamped when the first block was delivered, not when its first
+        # sample was taken; anchor_uncertainty_s bounds the difference.
+        "first_sample_utc": _NULLABLE_STR,
+        "anchor_uncertainty_s": _NULLABLE_NUMBER,
         "wall_elapsed_s": _NULLABLE_NUMBER,
         "timeline_advance": {"type": "integer"},
         "achieved_sample_rate_hz": _NULLABLE_NUMBER,
         "rate_deficit_ratio": _NULLABLE_NUMBER,
+        # Signed companion to rate_deficit_ratio: a positive value means the
+        # timeline outran wall time, which is an anchoring artifact the
+        # clamped figure hides.
+        "rate_offset_ratio": _NULLABLE_NUMBER,
+        "unaccounted_samples_estimate": _NULLABLE_INT,
+        "unaccounted_floor_samples": _NULLABLE_INT,
         "rate_check": {"enum": ["ok", "deficit", "too_short", "not_applicable"]},
     },
     ["rate_check", "timeline_advance"],
@@ -191,6 +281,21 @@ _ANNOTATION = _obj(
     },
     ["decoder", "kind", "start_sample", "end_sample", "fields", "confidence", "errors"],
 )
+
+#: Why a capture stopped short. ``reason`` is deliberately an open string, not
+#: an enum: a new reason is a new way a capture can end, and closing this would
+#: make discovering one a breaking contract change. The meanings are published
+#: as ``interruption_reasons`` by ``ppk2lab capabilities``.
+_INTERRUPTION = _obj(
+    {
+        "reason": {"type": "string"},
+        "detail": _NULLABLE_STR,
+    },
+    ["reason"],
+)
+
+_NULLABLE_INTERRUPTION: dict[str, Any] = {"anyOf": [{"type": "null"}, _INTERRUPTION]}
+
 
 SCHEMAS: dict[str, dict[str, Any]] = {
     "envelope": _obj(
@@ -314,7 +419,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "capture_sha256": _NULLABLE_STR,
             "path": _NULLABLE_STR,
             "complete": {"type": "boolean"},
-            "interruption": {"type": ["object", "null"]},
+            "interruption": _NULLABLE_INTERRUPTION,
             "trigger": {"type": ["object", "null"]},
             "timeline": _TIMELINE_CHECK,
             "stats": {"anyOf": [{"type": "null"}, _WINDOW_STATS]},
@@ -322,6 +427,45 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         },
         ["capture_id", "complete", "stats", "warnings", "timeline"],
         **{"$schema": _DRAFT, "$id": "ppk2lab:capture-result"},
+    ),
+    "inspect-result": _obj(
+        {
+            "path": {"type": "string"},
+            "format": {"type": "string"},
+            "format_version": {"type": "integer"},
+            "capture_id": {"type": "string"},
+            "created_utc": {"type": "string"},
+            "device": {"type": "object"},
+            "configuration": {"type": "object"},
+            "timeline": _TIMELINE_CHECK,
+            "duration_s": {"type": "number"},
+            # A truncated gap table or an unknown-size gap makes the span a
+            # floor: the manifest can only price the loss it enumerated.
+            "duration_is_lower_bound": {"type": "boolean"},
+            "samples": _obj(
+                {
+                    "encoding": {"type": "string"},
+                    "stored": {"type": "integer"},
+                    "missing_known": {"type": "integer"},
+                    "invalid_range_count": {"type": ["integer", "null"]},
+                    "chunk_count": {"type": "integer"},
+                    "sha256": _NULLABLE_STR,
+                    # Always false here: a manifest-only read never touches a
+                    # sample chunk, so it cannot have verified the digest.
+                    "sha256_verified": {"type": "boolean"},
+                }
+            ),
+            "gap_count": {"type": "integer"},
+            "gaps_truncated": {"type": "integer", "minimum": 0},
+            "gaps_with_unknown_size": {"type": "integer"},
+            "complete": {"type": "boolean"},
+            "interruption": _NULLABLE_INTERRUPTION,
+            "calibration": {"type": ["object", "null"]},
+            "stats": {"type": ["object", "null"]},
+            "warnings": {"type": "array"},
+        },
+        ["path", "capture_id", "samples", "gap_count", "complete"],
+        **{"$schema": _DRAFT, "$id": "ppk2lab:inspect-result"},
     ),
     "decode-result": _obj(
         {
@@ -376,7 +520,44 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "output": {"type": "string"},
             "records": {"type": "integer"},
             "capture_id": {"type": "string"},
-            "capture_sha256": {"type": "string"},
+            # Null for a windowed export: only the chunks the window touched
+            # were CRC-checked, so publishing the whole-file digest would be
+            # asserting a check that was not run (see W_PARTIAL_INTEGRITY).
+            "capture_sha256": _NULLABLE_STR,
+            "window": {
+                "anyOf": [
+                    {"type": "null"},
+                    _obj(
+                        {
+                            "start_s": _NULLABLE_NUMBER,
+                            "end_s": _NULLABLE_NUMBER,
+                            "start_index": {"type": "integer"},
+                            "end_index": {"type": "integer"},
+                        }
+                    ),
+                ]
+            },
+            # Null for a raw export. A decimated export is a derived summary
+            # with its own header and its own record shape; the two are never
+            # produced by the same invocation (docs/decimation.md).
+            "decimation": {
+                "anyOf": [
+                    {"type": "null"},
+                    _obj(
+                        {
+                            "bucket_samples": {"type": "integer"},
+                            "bucket_ms": _NULLABLE_NUMBER,
+                            "buckets": {"type": "integer"},
+                        },
+                        ["bucket_samples", "buckets"],
+                    ),
+                ]
+            },
+            # Measured on a prefix of this capture's own records, so an agent
+            # can decide before committing to a multi-gigabyte write.
+            "estimated_bytes": _NULLABLE_INT,
+            "bytes_per_record": _NULLABLE_NUMBER,
+            "size_basis": _NULLABLE_STR,
         },
         ["format", "output", "records"],
         **{"$schema": _DRAFT, "$id": "ppk2lab:export-result"},
@@ -401,6 +582,11 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                     "timeline_advance": {"type": "integer"},
                     "achieved_sample_rate_hz": _NULLABLE_NUMBER,
                     "rate_deficit_ratio": _NULLABLE_NUMBER,
+                    "rate_offset_ratio": _NULLABLE_NUMBER,
+                    "first_sample_utc": _NULLABLE_STR,
+                    "anchor_uncertainty_s": _NULLABLE_NUMBER,
+                    "unaccounted_samples_estimate": _NULLABLE_INT,
+                    "unaccounted_floor_samples": _NULLABLE_INT,
                     "rate_check": {"type": "string"},
                 },
                 ["sample_rate_hz", "sample_period_ns", "start_index"],
@@ -429,8 +615,11 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 }
             ),
             "gaps": {"type": "array", "items": _GAP},
+            # Gaps the capture counted but did not enumerate; the count stays
+            # exact even when the table stops growing.
+            "gaps_truncated": {"type": "integer", "minimum": 0},
             "complete": {"type": "boolean"},
-            "interruption": {"type": ["object", "null"]},
+            "interruption": _NULLABLE_INTERRUPTION,
             "stats": {"type": ["object", "null"]},
             "warnings": {"type": "array"},
         },

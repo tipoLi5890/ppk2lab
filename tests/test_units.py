@@ -19,7 +19,18 @@ def test_duration_units():
     assert parse_duration_s("2") == 2.0  # bare seconds allowed for durations
 
 
-@pytest.mark.parametrize("bad", ["", "abc", "-1s", "0s", "5 hours"])
+def test_duration_hours():
+    """Hours are a first-class unit: the soak measurements are stated in them."""
+    assert parse_duration_s("1h") == 3600.0
+    assert parse_duration_s("8h") == 28800.0
+    assert parse_duration_s("24h") == 86400.0
+    assert parse_duration_s("0.5h") == 1800.0
+    assert parse_duration_s(" 8 h ") == 28800.0
+    # The unit is the suffix, not a prefix of a longer word.
+    assert parse_duration_s("8h") == parse_duration_s("28800s")
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "-1s", "0s", "5 hours", "8hr", "8H8", "h"])
 def test_duration_rejects_invalid(bad):
     with pytest.raises(UsageError):
         parse_duration_s(bad)

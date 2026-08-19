@@ -36,6 +36,10 @@ one sample period are unrecoverable. Consequences:
 
 ## Analysis primitives
 
+The three helpers below live in `ppk2lab.logic`, which `docs/api-baseline.md`
+lists as not frozen: they may change without a `SCHEMA_VERSION` bump. The
+`export --format vcd` output is a frozen file format and does not move.
+
 - `iter_transitions(events)` — state changes; the first sample (and the
   first after any gap) re-states levels with `after_gap=True` instead of
   claiming an edge.
@@ -50,7 +54,8 @@ one sample period are unrecoverable. Consequences:
 
 ## Diagnosing wiring
 
-Suggested checks (see the `ppk2lab-hardware-diagnostics` skill):
+Suggested checks (the `ppk2lab-operate` skill routes to the same ones in
+`references/diagnostics.md`):
 
 1. `ppk2lab capture --duration 1s` and export VCD; a floating channel shows
    noise or a constant level regardless of DUT activity.

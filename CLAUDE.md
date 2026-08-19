@@ -10,9 +10,10 @@ contracts that must not drift.
   package, Python import, and CLI executable.
 - License: MIT (`LICENSE`), covering this repository's original material
   only; trademark and firmware boundaries are in `NOTICE.md`.
-- Versioning: `0.1.0.devN` previews may ship to PyPI; the stable `0.1.0`
-  ships only after every gate in `ROADMAP.md` passes. Never label the
-  project `1.0.0` under the current plan.
+- Versioning: `0.2.0.devN` previews may ship to PyPI; the first stable
+  release is `0.2.0` and ships only after every gate in `ROADMAP.md`
+  passes. `0.1.0.dev0` is the only build currently on PyPI. Never label
+  the project `1.0.0` under the current plan.
 - Unofficial project, not affiliated with Nordic Semiconductor ASA. PPK2
   behavior is referenced from Nordic official documentation and the official
   Power Profiler app repository only (`docs/sources.md`). Never copy,
@@ -26,12 +27,12 @@ contracts that must not drift.
   100 kS/s stream parser, calibration, canonical `.ppk2a` capture artifact,
   D0-D7 logic analysis + VCD, streaming UART/SPI decoders with enforced
   rate tiers, software triggers, per-event energy analysis, assertion DSL
-  with JSON/JUnit reports, an 11-command CLI with `--simulate`, sync/async
+  with JSON/JUnit reports, a 12-command CLI with `--simulate`, sync/async
   Python APIs, and versioned JSON schemas.
 - Published: public GitHub repository with CI (Linux/macOS/Windows ×
-  Python 3.11-3.13) and a PyPI development preview released through the
+  Python 3.11-3.14) and a PyPI development preview released through the
   trusted-publishing workflow.
-- Remaining before `0.1.0`: hardware validation gates — see `ROADMAP.md`.
+- Remaining before `0.2.0`: hardware validation gates — see `ROADMAP.md`.
 - The frozen public surface is `docs/api-baseline.md`; data model and
   stability policy are `docs/SPEC.md`.
 
@@ -57,7 +58,7 @@ contracts that must not drift.
 
 ## Engineering expectations
 
-- Python ≥ 3.11; runtime dependency is `pyserial` only (NumPy optional).
+- Python ≥ 3.11; the only runtime dependency is `pyserial`.
 - Keep transport, protocol, calibration, capture, decoders, analysis, CLI,
   and agent adapters separated; unit tests use the mock transport and never
   require hardware. State-changing hardware tests stay separate.
@@ -75,8 +76,10 @@ contracts that must not drift.
 - `README.md` (English) is canonical and stays entry-level; details live
   under `docs/`. The translations `.github/README.zh-Hant.md`,
   `README.zh-Hans.md`, and `README.ja.md` must be updated in the same
-  change whenever README content changes (section parity; `../` links;
-  localized code-block comments are the established style).
+  change whenever README content changes (section parity; absolute GitHub
+  URLs, because PyPI renders `README.md` as the long description and
+  relative links 404 there; localized code-block comments are the
+  established style).
 - Machine-readable contracts (CLI JSON, schemas, exit codes, capture
   format) are frozen by `docs/api-baseline.md`; changes follow the
   stability policy in `docs/SPEC.md` plus a CHANGELOG entry.

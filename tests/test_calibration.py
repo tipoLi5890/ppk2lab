@@ -3,6 +3,7 @@ import math
 import pytest
 
 from ppk2lab.calibration import ADC_REFERENCE_FACTOR, Calibration, SpikeFilter
+from ppk2lab.errors import Ppk2labError, UsageError
 from ppk2lab.protocol.metadata import parse_metadata
 
 from .test_metadata import FULL
@@ -59,6 +60,18 @@ def test_unknown_vdd_yields_nan():
     cal = Calibration.from_metadata(parse_metadata(text))
     assert math.isnan(cal.convert(100, 0))
     assert not math.isnan(cal.convert(100, 0, vdd_mv=3000))
+
+
+def test_bad_construction_raises_the_documented_error_base():
+    """`except Ppk2labError` is the documented contract for library errors, so
+    a bare ValueError from a public constructor escapes every caller's
+    handler."""
+    with pytest.raises(UsageError) as excinfo:
+        Calibration([None, None])
+    assert isinstance(excinfo.value, Ppk2labError)
+    assert excinfo.value.exit_code == 2
+    with pytest.raises(UsageError):
+        SpikeFilter(settle_samples=0)
 
 
 def test_spike_filter_holds_after_range_switch():

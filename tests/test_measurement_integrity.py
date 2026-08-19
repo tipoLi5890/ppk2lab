@@ -15,6 +15,7 @@ import zipfile
 import pytest
 
 from ppk2lab.capture.runner import (
+    ANCHOR_JITTER_S,
     DEFAULT_IN_MEMORY_LIMIT_SAMPLES,
     MIN_RATE_CHECK_SECONDS,
     timeline_report,
@@ -22,9 +23,11 @@ from ppk2lab.capture.runner import (
 from ppk2lab.capture.stats import IMPLAUSIBLE_CURRENT_UA, VoltageContext, compute_stats
 from ppk2lab.device import PPK2
 from ppk2lab.diagnostics import (
+    W_CLIPPED,
     W_DUT_POWER_UNKNOWN,
     W_NOT_CALIBRATED,
     W_TIMELINE_COMPRESSION,
+    W_UNACCOUNTED_SAMPLES,
     W_VOLTAGE_ASSUMED,
     as_json,
 )
@@ -32,13 +35,14 @@ from ppk2lab.discovery import _classify, _interface_number
 from ppk2lab.errors import CaptureFileError, UsageError, VoltageRangeError
 from ppk2lab.exports import export_csv
 from ppk2lab.protocol.samples import (
+    ADC_FULL_SCALE,
     COUNTER_MASK,
     DESYNC_CONSECUTIVE_MISMATCHES,
     SampleBlock,
     SampleStreamParser,
     pack_sample,
 )
-from ppk2lab.testing.profiles import StepProfile
+from ppk2lab.testing.profiles import ConstantProfile, DemoActivityProfile, StepProfile
 from ppk2lab.transport.mock import MockTransport, SimulatedPPK2
 from ppk2lab.types import GapEvent, Mode, PortInfo, PortRole, VoltageBasis
 
@@ -171,6 +175,131 @@ def test_timeline_report_distinguishes_starvation_from_a_short_run():
         ended_utc="",
     )
     assert brief["rate_check"] == "too_short"  # jitter dominates; do not guess
+
+
+def test_timeline_report_estimates_loss_the_counter_cannot_describe():
+    """A loss of exactly k*64 samples leaves the counter continuous, so the
+    only witness is that wall time accounts for samples the timeline does
+    not. The estimate is the difference; the floor is what host anchoring and
+    two unsynchronized clocks can produce on their own."""
+    report = timeline_report(
+        first_sample_at=0.0,
+        last_sample_at=10.0,
+        timeline_advance=950_000,  # 10 s of wall clock, 9.5 s of timeline
+        started_utc="",
+        ended_utc="",
+        first_block_samples=4096,
+        last_block_samples=4096,
+    )
+    assert report["unaccounted_samples_estimate"] == 50_000
+    # anchoring (two blocks + two poll intervals) plus 500 ppm of clock slack
+    assert report["unaccounted_floor_samples"] == (
+        4096 + 4096 + round(2 * ANCHOR_JITTER_S * 100_000) + round(5e-4 * 1_000_000)
+    )
+    assert report["unaccounted_samples_estimate"] > report["unaccounted_floor_samples"]
+    # rate_deficit_ratio stays clamped; its signed companion does not
+    assert report["rate_deficit_ratio"] == pytest.approx(0.05)
+    assert report["rate_offset_ratio"] == pytest.approx(-0.05)
+
+
+def test_a_timeline_that_outruns_wall_time_is_reported_signed_not_clamped():
+    """Both anchors are stamped on delivery, so a short capture can look
+    faster than 100 kS/s. Clamping that to a zero deficit hides an artifact
+    the reader needs in order to judge the estimate."""
+    report = timeline_report(
+        first_sample_at=0.0,
+        last_sample_at=1.0,
+        timeline_advance=104_000,
+        started_utc="",
+        ended_utc="",
+        first_block_samples=4096,
+        last_block_samples=4096,
+    )
+    assert report["rate_deficit_ratio"] == 0.0
+    assert report["rate_offset_ratio"] == pytest.approx(0.04)
+    assert report["unaccounted_samples_estimate"] == -4_000
+
+
+def test_triggered_capture_emits_no_unaccounted_estimate():
+    """Wall time covers only the post-trigger window while the timeline covers
+    the pre-trigger ring buffer too. An estimate from those two intervals
+    would flag every triggered capture as lossy."""
+    report = timeline_report(
+        first_sample_at=0.0,
+        last_sample_at=10.0,
+        timeline_advance=950_000,
+        started_utc="",
+        ended_utc="",
+        applicable=False,
+    )
+    assert report["unaccounted_samples_estimate"] is None
+    assert report["unaccounted_floor_samples"] is None
+    assert report["rate_check"] == "not_applicable"
+
+
+@pytest.mark.slow
+def test_sub_threshold_wall_clock_loss_still_marks_charge_a_lower_bound():
+    """A 7% shortfall stays under the compression threshold and reports
+    rate_check "ok" — but the samples are gone all the same, and the integral
+    that omits them is a lower bound."""
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2(rate_limit_hz=93_000)), simulate=True)
+    try:
+        result = device.capture(duration_s=4.0, in_memory_limit_samples=None)
+    finally:
+        device.close()
+    timeline = result.timeline
+    assert timeline["rate_check"] == "ok"  # below RATE_DEFICIT_TOLERANCE
+    assert timeline["unaccounted_samples_estimate"] > timeline["unaccounted_floor_samples"]
+    assert result.stats.charge_is_lower_bound
+    assert result.stats.unaccounted_loss_is_capture_level
+    assert W_UNACCOUNTED_SAMPLES in _codes(result.warnings)
+    # Capture-level, so nothing pretends to place it inside the window.
+    assert result.stats.covered_fraction == 1.0
+
+
+@pytest.mark.slow
+def test_full_rate_capture_gains_no_lower_bound_flag():
+    """The false-alarm guard for the estimate: a healthy stream must not
+    acquire a lower-bound flag out of host jitter."""
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2(rate_limit_hz=100_000)), simulate=True)
+    try:
+        result = device.capture(duration_s=2.5, in_memory_limit_samples=None)
+    finally:
+        device.close()
+    assert not result.stats.unaccounted_loss_is_capture_level
+    assert not result.stats.charge_is_lower_bound
+    assert W_UNACCOUNTED_SAMPLES not in _codes(result.warnings)
+
+
+def test_stored_wall_clock_deficit_reaches_offline_statistics():
+    """The witness is written into the artifact, so a capture read back days
+    later must still report its integrals as lower bounds."""
+    from ppk2lab.capture.model import Capture, CaptureMeta
+
+    base = capture_of(StepProfile([(300, 100.0, 0)]), samples=300)
+    lossy = Capture(
+        CaptureMeta(
+            device=base.meta.device,
+            configuration=base.meta.configuration,
+            metadata_text=base.meta.metadata_text,
+        ),
+        base.words,
+        [],
+        timing={"unaccounted_samples_estimate": 50_000, "unaccounted_floor_samples": 12_000},
+    )
+    stats = compute_stats(lossy)
+    assert stats.unaccounted_samples_estimate == 50_000
+    assert stats.unaccounted_loss_is_capture_level
+    assert stats.charge_is_lower_bound
+    assert W_UNACCOUNTED_SAMPLES in {w.code for w in stats.diagnostics()}
+    # Inside the floor the same figure is arithmetic on two clocks, not loss.
+    quiet = Capture(
+        lossy.meta,
+        base.words,
+        [],
+        timing={"unaccounted_samples_estimate": 500, "unaccounted_floor_samples": 12_000},
+    )
+    assert not compute_stats(quiet).charge_is_lower_bound
 
 
 @pytest.mark.slow
@@ -361,7 +490,115 @@ def test_implausible_currents_are_excluded_and_counted():
 
 
 # ---------------------------------------------------------------------------
+# The instrument's own ceiling
+#
+# The ADC field is 14 bits. A DUT beyond the top of the selected range pins it
+# at full scale, and the calibrated value that comes back is by construction
+# just under the range maximum — plausible, flat, and wrong. Nothing about the
+# converted number can reveal that; only the raw code can.
+
+
+def test_saturated_samples_are_detected_and_force_a_lower_bound():
+    """A 2.5 A load reported mean and max of exactly 1000000.0 uA with
+    complete: true — a 2.5x error rendered as a perfectly regulated flat top.
+    The plausibility ceiling cannot catch it: a pinned sample sits below 1 A."""
+    device = PPK2.open(
+        transport=MockTransport(SimulatedPPK2(profile=ConstantProfile(2_500_000.0))), simulate=True
+    )
+    try:
+        result = device.capture(duration_s=0.05)
+    finally:
+        device.close()
+    stats = result.stats
+    assert stats.implausible_samples == 0  # the old guard still sees nothing
+    assert stats.saturated_samples == stats.stored_samples
+    assert stats.saturated_ranges == [4]  # the top range: past the 1 A span
+    assert stats.charge_is_lower_bound
+    assert W_CLIPPED in _codes(result.warnings)
+
+
+def test_an_ordinary_load_is_not_reported_as_clipped():
+    """The false-alarm guard: a 100 uA load sits mid-range and must acquire
+    neither a saturation count nor a lower-bound flag."""
+    device = open_simulated()
+    try:
+        result = device.capture(duration_s=0.05)
+    finally:
+        device.close()
+    assert result.stats.saturated_samples == 0
+    assert result.stats.saturated_ranges == []
+    assert not result.stats.charge_is_lower_bound
+    assert W_CLIPPED not in _codes(result.warnings)
+
+
+def test_range_occupancy_partitions_the_valid_samples():
+    """Per-range counts and charges are a decomposition, not a second opinion:
+    they must add up to the totals computed alongside them."""
+    device = PPK2.open(
+        transport=MockTransport(SimulatedPPK2(profile=DemoActivityProfile())), simulate=True
+    )
+    try:
+        result = device.capture(sample_limit=300_000, in_memory_limit_samples=None)
+    finally:
+        device.close()
+    stats = result.stats
+    assert sum(stats.samples_per_range) == stats.valid_samples
+    assert sum(stats.charge_per_range_uc) == pytest.approx(stats.charge_uc, rel=1e-12)
+    # 3 s of the demo cycle: 6 uA sleep in range 0, 12 mA bursts in range 3.
+    assert stats.samples_per_range == (255_000, 0, 0, 45_000, 0)
+    assert stats.range_switches == 59
+    assert stats.range_switch_rate_hz == pytest.approx(59 / 3.0)
+
+
+def test_a_sample_that_cannot_be_converted_lands_in_no_range():
+    """Range occupancy is computed over the samples that reached the mean; a
+    sample excluded from the statistics must not appear in the decomposition
+    either, or the two stop agreeing."""
+    capture = capture_of(StepProfile([(100, 10.0, 0)]), samples=100)  # all range 0
+    capture.meta.metadata_text = capture.meta.metadata_text.replace("R0:", "RX:")
+    capture._calibration = None  # force a re-parse without range 0
+    stats = compute_stats(capture)
+    assert stats.nan_samples == 100
+    assert stats.valid_samples == 0
+    assert stats.samples_per_range == (0, 0, 0, 0, 0)
+    assert stats.charge_per_range_uc is None
+
+
+def test_range_switches_are_not_counted_across_a_gap():
+    """Two samples separated by missing data are not adjacent, so a range
+    difference between them is not an observed switch."""
+    capture = capture_of(
+        StepProfile([(100, 10.0, 0), (100, 5000.0, 0)]), samples=200, gaps={100: 40}
+    )
+    stats = compute_stats(capture)
+    assert stats.gap_count == 1
+    # The only range change in this profile sits exactly at the gap.
+    assert stats.range_switches == 0
+
+
+def test_full_scale_is_the_top_code_of_the_fourteen_bit_field():
+    assert ADC_FULL_SCALE == 0x3FFF
+    assert pack_sample(ADC_FULL_SCALE, 4, 0, 0) & 0x3FFF == ADC_FULL_SCALE
+
+
+# ---------------------------------------------------------------------------
 # Memory, metadata delivery, and safety ceilings
+
+
+def test_capture_without_a_stop_condition_is_a_typed_usage_error():
+    """`except Ppk2labError` is the documented contract; a bare ValueError
+    from the most obvious public entry point escapes it."""
+    from ppk2lab.errors import Ppk2labError
+
+    device = open_simulated()
+    try:
+        with pytest.raises(UsageError) as excinfo:
+            device.capture()
+        assert isinstance(excinfo.value, Ppk2labError)
+        assert excinfo.value.exit_code == 2
+        assert "duration" in excinfo.value.remediation
+    finally:
+        device.close()
 
 
 def test_unbounded_in_memory_capture_is_refused():
@@ -621,6 +858,11 @@ def test_triggered_capture_declines_the_rate_check():
         device.close()
     assert result.timeline["rate_check"] == "not_applicable"
     assert result.timeline["achieved_sample_rate_hz"] is None
+    # And nothing derived from that comparison reaches the statistics, or
+    # every triggered capture would carry a bogus lower-bound flag.
+    assert result.timeline["unaccounted_samples_estimate"] is None
+    assert not result.stats.unaccounted_loss_is_capture_level
+    assert W_UNACCOUNTED_SAMPLES not in _codes(result.warnings)
 
 
 def test_failed_stream_start_does_not_brick_the_handle():

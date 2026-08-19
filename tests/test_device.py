@@ -1,10 +1,13 @@
 """Device API over the simulator: state changes, readback, restoration."""
 
+import dataclasses
+import gc
+
 import pytest
 
 from ppk2lab.errors import TransportError, UsageError, VoltageRangeError
 from ppk2lab.protocol.samples import SampleBlock
-from ppk2lab.types import GapEvent, Mode, VoltageBasis
+from ppk2lab.types import DeviceState, GapEvent, Mode, VoltageBasis
 
 from .conftest import open_simulated
 
@@ -132,6 +135,198 @@ def test_unplug_interrupts_capture_preserving_data():
     assert result.capture.stored_count > 0
     simulator.read = original_read
     device.close()
+
+
+# -- stream lifecycle ------------------------------------------------------
+def test_stream_iterator_is_iterable_without_a_with_block(sim_device):
+    """Bare iteration keeps working; the context manager is an addition."""
+    events = sim_device.stream(sample_limit=500)
+    assert iter(events) is events
+    blocks = [e for e in events if isinstance(e, SampleBlock)]
+    assert sum(len(b) for b in blocks) >= 500
+    assert not sim_device._stream_active
+
+
+def test_with_block_releases_the_device_when_the_body_raises():
+    """A stream owns the instrument, so leaving the block must release it
+    even when the caller's own code fails and stores the traceback."""
+    device = open_simulated()
+    errors = []
+    try:
+        with device.stream(sample_limit=1_000_000) as events:
+            for _event in events:
+                raise RuntimeError("consumer failed")
+    except RuntimeError as exc:
+        errors.append(exc)  # a stored traceback keeps the iterator alive
+
+    assert errors and device._stream_active is False
+    assert device.state.measuring is False
+    # The handle is usable again while the traceback is still referenced.
+    assert device.capture(sample_limit=500).capture.stored_count >= 500
+    device.close()
+
+
+def test_named_iterator_held_by_a_traceback_is_released_by_close():
+    """A device left holding a stream still closes cleanly and releases it."""
+    device = open_simulated()
+    errors = []
+
+    def consume():
+        events = device.stream(sample_limit=1_000_000)
+        for _event in events:
+            raise RuntimeError("consumer failed")
+
+    try:
+        consume()
+    except RuntimeError as exc:
+        errors.append(exc)
+
+    assert device._stream_active is True  # the traceback still owns it
+    device.close()
+    assert device._stream_active is False
+    errors.clear()
+    gc.collect()  # finalizing the stale iterator afterwards must not raise
+
+
+def test_iterator_dropped_before_the_first_event_releases_the_claim():
+    """stream() claims the device before the first iteration, so an iterator
+    that is abandoned unused must give the claim back rather than refuse
+    every later command for a stream that never started."""
+    device = open_simulated()
+    events = device.stream(sample_limit=500)
+    del events
+    gc.collect()
+    assert device._stream_active is False
+    assert device.capture(sample_limit=200).capture.stored_count >= 200
+    device.close()
+
+
+def test_explicit_close_on_an_unstarted_iterator_starts_no_measurement():
+    device = open_simulated()
+    simulator = device.transport.simulator
+    log_len = len(simulator.command_log)
+    events = device.stream(sample_limit=500)
+    events.close()
+    events.close()  # idempotent
+    assert simulator.command_log[log_len:] == []
+    assert device._stream_active is False
+    device.close()
+
+
+def test_closing_a_spent_iterator_does_not_release_a_newer_stream():
+    """Closing (or dropping) an iterator that is already finished must not
+    hand away the device a later stream is holding."""
+    device = open_simulated()
+    spent = device.stream(sample_limit=200)
+    assert list(spent)
+    current = device.stream(sample_limit=1_000_000)
+    next(current)
+    spent.close()
+    assert device._stream_active is True
+    with pytest.raises(UsageError):
+        device.capture(sample_limit=100)
+    current.close()
+    assert device._stream_active is False
+    device.close()
+
+
+def test_unplug_during_stream_reports_the_stream_interruption():
+    """The hot-unplug error must reach the caller, not the drain failure it
+    causes: a dead handle cannot be drained, and that symptom says nothing."""
+    device = open_simulated()
+    simulator = device.transport.simulator
+    with pytest.raises(TransportError) as excinfo:
+        for seen, _event in enumerate(device.stream(duration_s=2.0), start=1):
+            if seen == 2:
+                simulator.unplug()
+    assert "stream interrupted" in str(excinfo.value)
+    assert "Partial data was preserved" in excinfo.value.remediation
+    assert device._stream_active is False
+    # None, not 0: the port was gone, so nothing was drained and nothing was
+    # verified quiet. 0 is reserved for a drain that actually ran.
+    assert device.stale_bytes_after_stop is None
+
+
+def test_drain_failure_after_a_clean_stream_is_reported():
+    """With nothing in flight there is no error to protect, so a drain that
+    fails on its own must surface instead of vanishing."""
+    device = open_simulated()
+    original = device.transport.read
+
+    def read(max_bytes, timeout_s=0.1):
+        # 65536 is the post-stop drain; the reader thread asks for less.
+        if max_bytes == 65536:
+            raise TransportError("port went away after stop")
+        return original(max_bytes, timeout_s)
+
+    device.transport.read = read
+    with pytest.raises(TransportError, match="port went away after stop"):
+        list(device.stream(sample_limit=500))
+    assert device.stale_bytes_after_stop is None
+    device.transport.read = original
+    device.close()
+
+
+def test_a_completed_drain_records_a_count_rather_than_an_absence():
+    """0 must keep meaning "the channel was read until it stayed quiet". A
+    drain that could not run records None, so no future consumer can read the
+    absence of drained bytes as a positive verification."""
+    device = open_simulated()
+    assert device.stale_bytes_after_stop is None  # no stream has stopped yet
+    assert list(device.stream(sample_limit=500))
+    assert isinstance(device.stale_bytes_after_stop, int)
+    device.close()
+
+
+def test_capture_survives_unplug_and_replug_on_the_same_handle():
+    """Hot unplug mid-capture, then replug: no hang, a typed interruption
+    naming the real cause, and a usable handle afterwards."""
+    device = open_simulated()
+    simulator = device.transport.simulator
+    assert list(device.stream(sample_limit=400))
+    simulator.unplug()
+
+    interrupted = device.capture(sample_limit=1_000_000)
+    assert not interrupted.complete
+    assert interrupted.interruption == {
+        "reason": "transport_error",
+        "detail": "simulated device was unplugged",
+    }
+
+    simulator.unplugged = False
+    again = device.capture(sample_limit=500)
+    assert again.capture.stored_count >= 500
+    device.close()
+
+
+# -- device state ----------------------------------------------------------
+def test_device_state_cannot_be_written_from_outside(sim_device):
+    """dut_power can never be read back from the device, so a host-side write
+    to it would enter the capture manifest as a hardware claim nobody made."""
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        sim_device.state.dut_power = True
+    with pytest.raises(AttributeError):
+        sim_device.state = DeviceState(dut_power=True)
+    assert sim_device.state.dut_power is None
+
+
+def test_uncommanded_power_stays_unknown_in_the_capture_record(sim_device):
+    result = sim_device.capture(sample_limit=1000)
+    assert result.capture.meta.configuration["dut_power"] is None
+    assert [w.code for w in result.warnings] == ["W_DUT_POWER_UNKNOWN"]
+
+
+def test_confirmed_commands_still_update_state(sim_device):
+    sim_device.set_dut_power(True)
+    assert sim_device.state.dut_power is True
+    sim_device.set_mode(Mode.AMPERE)
+    assert sim_device.state.mode is Mode.AMPERE
+    sim_device.set_source_voltage_mv(3300)
+    assert sim_device.state.source_voltage_mv == 3300
+    sim_device.start_measuring()
+    assert sim_device.state.measuring is True
+    sim_device.stop_measuring()
+    assert sim_device.state.measuring is False
 
 
 def test_reset_clears_state(sim_device):

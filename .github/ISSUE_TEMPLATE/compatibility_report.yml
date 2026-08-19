@@ -7,7 +7,7 @@ body:
       value: |
         Compatibility reports fill the hardware matrix in
         [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md) and are
-        release gates for `0.1.0`. Both success and failure reports are valuable.
+        release gates for `0.2.0`. Both success and failure reports are valuable.
 
   - type: input
     id: version

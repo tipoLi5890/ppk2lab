@@ -76,6 +76,24 @@ explicitly.
 
 (Nordic official specification; see `docs/sources.md`.)
 
+This table is not illustrative. `RANGE_RESOLUTION_UA` and
+`RANGE_TYPICAL_ACCURACY` in `src/ppk2lab/capture/stats.py` are a
+transcription of its two right-hand columns and are what every
+`uncertainty.*_typical` figure is computed from;
+`tests/test_uncertainty.py` parses the rows above and fails if the two
+disagree, because then one of them is lying about where the number came
+from. Edit it only to correct a transcription error, and keep the row shape
+parseable.
+
+Two properties decide how the figures may be used. They are **typical**, not
+guaranteed limits — Nordic publishes them that way — and they are **gain**
+specifications, so the error is the same error on every sample taken in a
+range and does not average away with capture length. The resolution column is
+a separate additive term that dominates at the bottom of a range: a 1 uA
+reading in range 0 is ±0.1 uA of gain plus ±0.2 uA of resolution, so ±30%,
+not ±10%. The model is in docs/SPEC.md, "Measurement uncertainty", and what
+it looks like in a result is in docs/energy-analysis.md.
+
 ## Raw vs filtered series
 
 Range switches can produce short transients. ppk2lab always reports the raw

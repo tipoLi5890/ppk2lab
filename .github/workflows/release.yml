@@ -30,6 +30,23 @@ jobs:
         run: |
           pip install twine
           twine check dist/*
+      - name: Check the artifacts that will actually be uploaded
+        # This job builds its own dist/, so the CI build job's checks do not
+        # cover it. A wheel published without py.typed silently disables type
+        # checking for every downstream consumer, and PyPI records the license
+        # from this metadata — neither is fixable after an upload.
+        run: |
+          python -c "
+          import glob, zipfile
+          wheel = glob.glob('dist/*.whl')[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          assert 'ppk2lab/py.typed' in names, 'PEP 561 marker missing from ' + wheel
+          info = [n for n in names if n.endswith('.dist-info/METADATA')][0]
+          meta = zipfile.ZipFile(wheel).read(info).decode()
+          assert 'License-Expression: MIT' in meta, 'wheel does not declare License-Expression: MIT'
+          for name in ('LICENSE', 'NOTICE.md'):
+              assert 'License-File: ' + name in meta, 'wheel omits License-File: ' + name
+          "
       - uses: actions/upload-artifact@v4
         with:
           name: release-dist

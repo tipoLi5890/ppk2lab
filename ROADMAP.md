@@ -1,15 +1,29 @@
 # Roadmap
 
-The project ships its first public release as `0.1.0`, only after every
-release gate below passes. Version numbers before that are `0.1.0.devN`. The
-project is never labeled `1.0.0` as part of this plan.
+The project ships its first stable public release as `0.2.0`, only after
+every release gate below passes. Everything before that is a `0.2.0.devN`
+pre-release, which `pip install ppk2lab` does not resolve. The project is
+never labeled `1.0.0` as part of this plan.
 
 ## Current status
 
-The full planned `0.1.0` feature set is implemented, with hardware-free
-tests, lint, and types green. A first hardware validation pass succeeded on
-one PPK2 on macOS, confirming device metadata, automatic port probing, and a
-gap-free 10 s / 1M-sample capture.
+The full planned feature set is implemented, with hardware-free tests, lint,
+and types green. A first hardware validation pass succeeded on one PPK2 on
+macOS, confirming device metadata, automatic port probing, and a gap-free
+10 s / 1M-sample capture.
+
+A subsequent audit of the read path — the code between a stored `.ppk2a` and
+a number a person acts on — found and fixed a class of defects the write path
+did not have: conclusions reported without the evidence to support them. Those
+fixes are in `CHANGELOG.md` under "Behaviour changes"; the properties they
+enforce are below.
+
+Hour-scale captures are also usable now rather than in principle: `inspect`
+reads a manifest without touching a sample chunk, windowed reads cost the
+window rather than the file, and `export --decimate` produces a plottable
+summary that states, per bucket, how much of it was really there. Statistics
+gained the shape of the distribution (`p50`/`p90`/`p99`), an opt-in duty-cycle
+split, and a typical per-range error bar.
 
 ## Measurement-integrity guarantees
 
@@ -43,10 +57,15 @@ happy path. They are covered by `tests/test_measurement_integrity.py`.
   mismatch rate, reported once, and re-aligned by scoring the four candidate
   offsets.
 
-## Remaining work before 0.1.0
+## Remaining work before `0.2.0`
+
+Every item below needs a physical PPK2 and is run by the maintainer on the
+bench; the compatibility matrix at the end of this file is where the outcome
+is recorded.
 
 - OS/firmware compatibility matrix: Windows, macOS (Intel/AS), and Linux,
-  against firmware 1.1.0, 1.2.0, and 1.2.4.
+  against firmware 1.1.0, 1.2.0, and 1.2.4, keyed on the firmware fingerprint
+  that `ppk2lab info` and every capture manifest now record.
 - Known-load calibration cross-check against the official Power Profiler app.
 - UART/SPI decoder validation on real signals from an MCU fixture, against
   defined error-rate thresholds using golden captures.
@@ -59,7 +78,7 @@ happy path. They are covered by `tests/test_measurement_integrity.py`.
 - Release rehearsal per `docs/releasing.md`.
 - PyPI publish (requires explicit maintainer authorization).
 
-## `0.1.0` release gates
+## `0.2.0` release gates
 
 1. API, schemas, and capture format labeled with stability and version policy.
 2. README/INSTALL/CLI examples reproducible from a clean environment.
@@ -71,10 +90,13 @@ happy path. They are covered by `tests/test_measurement_integrity.py`.
 6. All dependencies pass the license allowlist scan.
 7. Claude Code and Codex skill/plugin installation and representative
    prompts verified.
-8. CI and the hardware release workflow are green on the tag commit before
-   any release or PyPI publish.
+8. CI is green on the tag commit before any release or PyPI publish, and
+   the maintainer has validated the hardware gates on a physical device.
+   Those gates have no workflow and are not meant to have one: they need a
+   PPK2 and an MCU fixture attached. The compatibility matrix below records
+   which configurations were validated.
 
-## Decoder support tiers (frozen for 0.1.0)
+## Decoder support tiers (frozen for `0.2.0`)
 
 | Protocol / rate | Tier | Behavior |
 |---|---|---|
@@ -100,24 +122,48 @@ alone.
 | 1.2.0 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | 1.2.4 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 
-## Post-0.1.0 direction (not commitments)
+## Post-`0.2.0` direction (not commitments)
 
-### 0.2.x
+### Waiting on tomorrow's measurements
 
-- **Decimation on export and measure** emitting mean, min, and max per
-  bucket — the ecosystem's most requested capability, answered without
-  pretending the acquisition rate is configurable.
-- **Absolute-time columns** anchored to the capture's `created_utc`.
-- **Uncertainty-aware statistics**: per-range sample occupancy and error
-  bounds derived from Nordic's per-range accuracy, so a CI threshold can be
-  defended ("mean 142 uA ± 2.1 uA" rather than a bare number). No PPK2 tool
-  has ever emitted an error bar.
-- **Streaming offline analysis** so hour-scale artifacts can be measured and
-  exported without loading them whole.
+These are designed and blocked only on numbers a hardware session produces.
+
+- **Absolute-time columns.** The anchor decision has shipped
+  (`first_sample_utc`, not `created_utc`, which is stamped before the stream
+  starts), but the columns wait on a *measured* `anchor_uncertainty_s`.
+  Publishing millisecond-precision absolute time over an unknown offset would
+  be the invented precision this project refuses everywhere else. The current
+  anchoring and clock-tolerance figures are stated assumptions, not
+  measurements, and are reported separately so they can be replaced without
+  changing any consumer.
+- **A settling window for the range-switch filter.** `SpikeFilter`'s three
+  samples have never been measured; `range_switches` and
+  `range_switch_rate_hz` now record what a real session would need to derive
+  it.
+- **The band a current figure is valid over.** `docs/bandwidth.md` states
+  what aliases and what survives, and is explicit that its tables are the
+  point-sampling model rather than a measured response. Closing it needs a
+  square-wave load swept across and past the Nyquist frequency on a real
+  unit. RMS current and any high-frequency-content statistic wait on that
+  answer, since they are the most alias-sensitive figures of the set.
+
+### Next
+
+- **Streaming offline analysis.** Windowed reads and `inspect` cover the
+  cases that blocked the soak gate; decimating an hour-scale file in one pass
+  straight from the artifact, without an in-memory capture, is the remaining
+  step.
+- **Battery-life estimation** from the duty-cycle decomposition, with its
+  assumptions stated. The deliverable is the caveat framework, not the
+  arithmetic — in particular it must refuse to answer when the charge it is
+  built on is a lower bound.
+- **A `compare` verb** for two captures. It needs the uncertainty surface to
+  be stable first: a bare delta with no error bar invites false regressions on
+  an instrument whose own accuracy is ±10% with auto-switching ranges. The
+  five fields that must agree before a delta means anything are documented
+  first.
 - **Firmware fingerprint matrix**: key the compatibility matrix on the
-  observable fingerprint already recorded in every capture.
-- **Battery-life estimation** from a measured duty cycle, with its
-  assumptions stated.
+  fingerprint every capture and `ppk2lab info` now records.
 
 ### Later
 
@@ -147,7 +193,7 @@ alone.
 
 ## Compatibility policy
 
-Until `0.1.0`, everything may change. From `0.1.0`, the JSON `schema_version`
+Until `0.2.0`, everything may change. From `0.2.0`, the JSON `schema_version`
 only changes with a documented migration note in CHANGELOG.md, and the
 capture `format_version` is append-only: newer readers open older artifacts;
 older readers refuse newer ones explicitly.

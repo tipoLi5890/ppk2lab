@@ -144,6 +144,25 @@ def test_gap_mid_transaction_closes_with_gap_error():
     assert all(t.confidence == 0.0 for t in txns if "gap" in t.errors)
 
 
+def test_errors_imply_zero_confidence():
+    """Cross-decoder invariant: an annotation with errors is never decoded data.
+
+    UART now matches this; pinning it on both sides keeps a consumer able to
+    filter on ``errors`` alone and get the same answer as ``confidence``.
+    """
+    waves = spi_wave([0x9F, 0x00, 0xA7], clock_hz=10_000, mode=0)
+    logic = logic_of(waves)
+    decoder = make_decoder(mode=0)
+    split = len(logic) // 2
+    annotations = decoder.feed(LogicChunk(0, logic[:split]))
+    annotations += decoder.notify_gap(GapEvent(index=split, missing=40))
+    annotations += decoder.feed(LogicChunk(split + 40, logic[split : split + 30]))
+    annotations += decoder.flush()
+    seen = {e for a in annotations for e in a.errors}
+    assert {"gap", "truncated"} & seen
+    assert all(a.confidence == 0.0 for a in annotations if a.errors)
+
+
 def test_rate_tiers():
     assert spi_feasibility(10_000).tier is Tier.VALIDATED
     assert spi_feasibility(20_000).tier is Tier.CONDITIONAL

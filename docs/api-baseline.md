@@ -1,8 +1,8 @@
-# Public API baseline (`0.1.0`)
+# Public API baseline (`0.2.0`)
 
 ## 1. Purpose
 
-This document is the **frozen surface** for the `0.1.0` release gate: the
+This document is the **frozen surface** for the `0.2.0` release gate: the
 Python names, CLI commands, exit codes, and file formats that downstream code
 and agents may depend on, and the checklist the release gate diffs against.
 
@@ -13,19 +13,19 @@ and agents may depend on, and the checklist the release gate diffs against.
   [SPEC.md - Stability policy](SPEC.md#stability-policy).
 - Anything not listed here is internal (section 5).
 
-Current: `ppk2lab.__version__ = "0.1.0.dev0"`, `ppk2lab.SCHEMA_VERSION = "1"`.
+Current: `ppk2lab.__version__ = "0.2.0.dev0"`, `ppk2lab.SCHEMA_VERSION = "1"`.
 
-## 2. Stable Python surface (`0.1.0`)
+## 2. Stable Python surface (`0.2.0`)
 
 Every name in `ppk2lab.__all__` (24 exports):
 
 | Name | Kind | Description |
 |---|---|---|
-| `PPK2` | class | Synchronous device handle; `PPK2.open(serial_number=, port=, transport=, simulate=, simulator=, read_metadata=)`, context manager, `refresh_metadata`, `set_mode`, `set_source_voltage_mv`, `set_dut_power`, `set_user_gain`, `reset`, `start_measuring`, `stop_measuring`, `stream`, `capture`, `recover_session`, `close`. |
-| `AsyncPPK2` | class | Async mirror of `PPK2` (`await AsyncPPK2.open(...)`, async context manager, `async def` state-changing and capture methods, `async for` over `stream()`). Blocking calls run via `asyncio.to_thread`. |
+| `PPK2` | class | Synchronous device handle; `PPK2.open(serial_number=, port=, transport=, simulate=, simulator=, read_metadata=)`, context manager, `refresh_metadata`, `set_mode`, `set_source_voltage_mv`, `set_dut_power`, `set_user_gain`, `reset`, `start_measuring`, `stop_measuring`, `stream`, `capture`, `recover_session`, `close`. `stream()` returns a closable `StreamIterator`; `with device.stream(...) as events:` is the documented idiom. |
+| `AsyncPPK2` | class | Async mirror of `PPK2` (`await AsyncPPK2.open(...)`, async context manager, `async def` state-changing and capture methods, `async for` over `stream()`). `stream()` returns a closable `AsyncStreamIterator`; `async with adev.stream(...) as events:` is the documented idiom. Blocking calls run via `asyncio.to_thread`. |
 | `discover` | function | `discover(*, simulate=False) -> list[DeviceInfo]`; read-only device enumeration. |
 | `DeviceInfo` | class | Frozen dataclass: `serial_number`, `vid`, `pid`, `ports`, `firmware_version`, `simulated`, `measurement_port`, `to_json()`. |
-| `DeviceState` | class | Dataclass: `mode`, `source_voltage_mv`, `dut_power`, `measuring`; `None` means unknown. |
+| `DeviceState` | class | **Frozen** dataclass: `mode`, `source_voltage_mv`, `dut_power`, `measuring`, `source_voltage_basis`; `None` means unknown. Reached through the read-only `PPK2.state` property — the host cannot assert a hardware state the device never confirmed. |
 | `StateChange` | class | Dataclass record of one state-changing operation: `operation`, `requested`, `before`, `after`, `applied`, `observed_after`, `warnings`. |
 | `Mode` | class | `IntEnum` with `AMPERE = 1`, `SOURCE = 2` (wire values). |
 | `GapEvent` | class | Frozen dataclass for sample loss: `index`, `missing`, `reason`, `ambiguous`. |
@@ -52,11 +52,12 @@ level): `ppk2lab.schemas` (`SCHEMAS`, `list_schemas`, `get_schema`) and the
 
 ## 3. Stable CLI surface
 
-Executable: `ppk2lab`. Eleven subcommands, frozen for `0.1.0`: `discover`,
-`info`, `capabilities`, `schema`, `doctor`, `configure`, `capture`, `decode`,
-`measure`, `assert`, `export`. All are read-only except `configure` (dry-run
-unless `--apply`) and `capture` (starts/stops measuring only; never enables
-DUT power).
+Executable: `ppk2lab`. Twelve subcommands, frozen for `0.2.0`: `discover`,
+`info`, `capabilities`, `schema`, `doctor`, `configure`, `capture`, `inspect`,
+`decode`, `measure`, `assert`, `export`. All are read-only except `configure`
+(dry-run unless `--apply`) and `capture` (starts/stops measuring only; never
+enables DUT power). `inspect` reads a capture's manifest without touching a
+sample chunk, so it is bounded regardless of how long the recording is.
 
 Global flags, accepted before or after the subcommand: `--json` (emit the JSON
 envelope instead of human text), `--simulate` (simulated PPK2 — toolchain
@@ -91,16 +92,21 @@ published by `ppk2lab capabilities --json`.
   written by `ppk2lab decode --output` and read back by `measure`/`assert`.
 - **Derived exports** — `csv`, `vcd`, `jsonl` via `ppk2lab export --format`;
   reproducible views over a capture, never a replacement for it.
-- **Schemas** (18, from `ppk2lab.schemas.SCHEMAS`, served by `ppk2lab schema`):
+- **Decimated exports** — `ppk2lab export --decimate N` / `--bucket-ms M`
+  emit one record per timeline bucket instead of one per sample. Opt-in only,
+  never a default, and the header shares no column name with the raw export so
+  the two can never be confused ([decimation.md](decimation.md)).
+- **Schemas** (21, from `ppk2lab.schemas.SCHEMAS`, served by `ppk2lab schema`):
   `annotation`, `assert-result`, `capabilities-result`, `capture-manifest`,
   `capture-result`, `configure-result`, `decode-result`, `device`,
-  `discover-result`, `doctor-result`, `envelope`, `error`, `export-result`,
-  `gap`, `info-result`, `measure-result`, `state-change`, `window-stats`.
+  `diagnostic`, `discover-result`, `doctor-result`, `envelope`, `error`,
+  `export-result`, `gap`, `info-result`, `inspect-result`, `measure-result`,
+  `state-change`, `timeline-check`, `window-stats`.
 
 ## 4b. Also stable at the subpackage level
 
 Not every stable name is re-exported at the top level. These are part of the
-`0.1.0` surface and follow the same change policy:
+`0.2.0` surface and follow the same change policy:
 
 | Name | Kind | Description |
 |---|---|---|
@@ -109,22 +115,56 @@ Not every stable name is re-exported at the top level. These are part of the
 | `ppk2lab.capture.stats.VoltageContext` | class | The voltage used for energy plus whether it is defensible. |
 | `ppk2lab.capture.runner.timeline_report` | function | Wall-clock cross-check of the sample timeline. |
 | `ppk2lab.errors.StreamStalledError` | class | A device that stopped streaming while keeping its port open (`STREAM_STALLED`). |
-| `PPK2.firmware_fingerprint()` | method | Observable firmware identity (HW, IA, metadata key set, port count). |
+| `ppk2lab.errors.CaptureTooLargeError` | class | A capture too large to load whole (`CAPTURE_TOO_LARGE`, exit 2). Subclasses `UsageError`, not `CaptureFileError`: a soak artifact is not an invalid file. |
+| `ppk2lab.errors.CalibrationUnavailableError` | class | A capture that carries no usable calibration, so no current can be derived from it. |
+| `PPK2.firmware_fingerprint()` | method | Observable firmware identity (HW, IA, metadata key set, port count). `port_count` is `len(info.ports)`, so it is `0` for a device opened by path, which discovery never enumerated; the CLI turns that `0` into `null` in `info --json` and `doctor`, because the compatibility matrix is keyed on this dict and unknown must not read as zero. |
+| `ppk2lab.device.StreamIterator` | class | Closable live-stream iterator: `__iter__`, `__next__`, `close()`, context manager. Released under a weakref identity check so a spent iterator cannot release a later stream's claim. |
+| `ppk2lab.aio.AsyncStreamIterator` | class | Async mirror: `__aiter__`, `__anext__`, `aclose()`, async context manager. |
+| `ppk2lab.capture.read_window` | function | `read_window(path, *, start_index=, end_index=, start_s=, end_s=, max_samples=) -> Capture`; reads only the chunks a window falls in. `Capture.load_window` is the classmethod mirror. |
+| `ppk2lab.capture.stats.format_with_uncertainty` | function | Renders a value to the digits its uncertainty supports. Human output only; JSON keeps full precision. |
+| `ppk2lab.capture.stats.StatePart` / `StateSplit` / `TypicalUncertainty` | class | Frozen dataclasses behind the `state_split` and `uncertainty` result blocks. |
+| `ppk2lab.exports.decimate` | module | `Bucket`, `iter_buckets`, `export_decimated_csv`, `export_decimated_jsonl`, `bucket_samples_for_ms`, `DECIMATED_CSV_HEADER`. |
+| `ppk2lab.exports.estimate_export_size` | function | Bytes an export would produce, measured on a prefix of this capture's own records. |
+| `ppk2lab.capture.stats.compute_stats` | function | `compute_stats(capture, *, start_index=, end_index=, filtered=, assume_voltage_mv=, state_threshold_ua=) -> WindowStats`; the statistics the CLI and the assertion evaluator both use. |
+| `ppk2lab.capture.stats.latency_until_below` | function | First timeline index where current stays below a threshold for N consecutive stored samples. A gap resets the hold — missing data never counts as evidence. |
+| `ppk2lab.decoders.uart.uart_runs` / `uart_bytes` | function | The clean decoded byte stream, split at every discontinuity (`uart_runs`) or concatenated (`uart_bytes`). Unsynchronized and errored frames are excluded from both. |
+| `ppk2lab.logic.transitions.edges` / `pulses` | function | Gap-aware digital edge and pulse extraction over `Capture.iter_events()`. |
 
 Result fields added under the append-only policy: `voltage_basis`,
 `voltage_measured`, `energy_note`, `charge_is_lower_bound`,
-`samples.implausible`, `samples.covered_fraction` in window statistics;
-`timeline` in capture results; `calibration`, `gaps_truncated`, and the
+`samples.implausible`, `samples.covered_fraction`, `samples.unpopulated`,
+`samples.saturated`, `samples.zero_code`, `current_ua.p50`/`p90`/`p99`/`p999`,
+`distribution`, `state_split`, `uncertainty`, `saturated_samples`,
+`saturated_ranges`, `samples_per_range`, `charge_per_range_uc`,
+`range_switches`, `range_switch_rate_hz`, `unaccounted_samples_estimate`,
+`unaccounted_loss_is_capture_level`, and `gaps_truncated` in window statistics;
+`timeline` in capture results, with `first_sample_utc`, `anchor_uncertainty_s`,
+`rate_offset_ratio`, `unaccounted_samples_estimate` and
+`unaccounted_floor_samples`; `calibration`, `gaps_truncated`, and the
 wall-clock fields in the capture manifest; `source_voltage_basis` in device
-state; `warning_codes` in the capabilities manifest. Envelope `warnings`
-entries are `{code, message}` objects.
+state; `warning_codes`, `gap_reasons`, `interruption_reasons` and per-option
+`choices` in the capabilities manifest; `window`, `decimation`,
+`estimated_bytes`, `bytes_per_record` and `size_basis` in export results, where
+`capture_sha256` is now `string|null` — a windowed read verifies only the
+chunks it touched, so the whole-file digest is reported as unverified rather
+than as verified. Assertion observations carry `covered_fraction`,
+`capture_end_sample`, and a machine-branchable `reason_code`. Envelope
+`warnings` entries are `{code, message}` objects, and the published catalogs
+carry `{code, category, meaning}`.
+
+New assertion metrics: `p50_current` (alias `median_current`), `p90_current`,
+`p99_current`, `p999_current`. A CI threshold on `max_current` drifts upward
+with capture length because range switches accumulate; `p99_current` describes
+a fraction of the distribution instead and does not.
 
 ## 5. Explicitly NOT frozen (may change without notice)
 
 - **Internal modules and any name not in `ppk2lab.__all__`** — including
   `ppk2lab.transport`, `ppk2lab.protocol`, `ppk2lab.session`, `ppk2lab.cli`,
-  `ppk2lab.triggers`, `ppk2lab.logic`, `ppk2lab.exports`, `ppk2lab.units`, and
-  private helpers in otherwise public modules.
+  `ppk2lab.triggers`, `ppk2lab.units`, and private helpers in otherwise public
+  modules. `ppk2lab.logic` and `ppk2lab.exports` are internal **except** for
+  the names listed in section 4b, which the documentation teaches and which
+  are therefore frozen with everything else here.
 - **`SpikeFilter` heuristic parameters** (`ppk2lab.calibration.SpikeFilter`,
   `settle_samples`, default `3`) — an experimental range-switch smoothing
   heuristic. The raw series is always preserved alongside it; do not build

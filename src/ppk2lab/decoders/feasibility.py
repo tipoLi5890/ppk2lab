@@ -1,6 +1,6 @@
 """Protocol-rate feasibility against the fixed 100 kS/s capture grid.
 
-Support tiers (frozen for 0.1.0, hardware-validated thresholds tracked in
+Support tiers (frozen for 0.2.0, hardware-validated thresholds tracked in
 ROADMAP.md):
 
 - ``validated``     >= 10 samples per bit/cycle (UART <= 9600 baud, SPI <= 10 kHz)

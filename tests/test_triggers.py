@@ -2,21 +2,27 @@
 
 import pytest
 
+from ppk2lab.decoders.base import decode_capture
+from ppk2lab.decoders.spi import SPIDecoder
 from ppk2lab.decoders.uart import UARTDecoder
 from ppk2lab.errors import UsageError
 from ppk2lab.protocol.samples import SampleBlock
 from ppk2lab.testing.profiles import StepProfile
-from ppk2lab.testing.signals import uart_wave
+from ppk2lab.testing.signals import merge_logic, spi_wave, uart_wave
 from ppk2lab.triggers.engine import (
     CurrentThresholdTrigger,
     DigitalEdgeTrigger,
     DigitalPatternTrigger,
+    SpiContentTrigger,
     TriggerEngine,
     UartContentTrigger,
     parse_trigger_spec,
 )
 
 from .conftest import open_simulated, wave_capture
+
+SPB = 100000 / 9600
+SPI_CH = {"sclk": 1, "mosi": 2, "miso": 3, "cs": 4}
 
 
 def run_trigger(profile, detector, *, pre=0, post=100, samples=5000, gaps=None):
@@ -74,27 +80,95 @@ def test_digital_pattern_trigger_with_hold():
     assert engine.fire_index == 100
 
 
+def drive(capture, detector, *, pre=100, post=100):
+    engine = TriggerEngine(
+        detector,
+        pre_samples=pre,
+        post_samples=post,
+        calibration=capture.calibration,
+        vdd_mv=capture.source_voltage_mv,
+    )
+    for event in capture.iter_events():
+        engine.process(event)
+        if engine.done:
+            break
+    return engine
+
+
 def test_uart_content_trigger():
     wave = uart_wave(b"BOOT DONE", 9600, idle_before=500)
     logic = bytes(b | 0x00 for b in wave)  # D0 carries UART
-    profile_capture = wave_capture(logic)
-    decoder = UARTDecoder(rx="D0", baud=9600)
-    detector = UartContentTrigger(decoder, b"DONE")
-    engine = TriggerEngine(
-        detector,
-        pre_samples=100,
-        post_samples=100,
-        calibration=profile_capture.calibration,
-        vdd_mv=profile_capture.source_voltage_mv,
-    )
-    fired = []
-    for event in profile_capture.iter_events():
-        fired.extend(engine.process(event))
-        if engine.done:
-            break
+    detector = UartContentTrigger(UARTDecoder(rx="D0", baud=9600), b"DONE")
+    engine = drive(wave_capture(logic), detector)
     assert engine.fired
     # fires at the end of the final 'E' frame
     assert engine.fire_index > 500 + 8 * 104
+
+
+def test_uart_trigger_does_not_fire_before_confirmed_idle():
+    """``capture --trigger`` starts mid-stream, with no gap involved.
+
+    Until a whole frame time of idle proves where the frames are, every
+    candidate frame is a guess and must not arm a trigger.
+    """
+    wave = uart_wave(b"BOOT DONE", 9600, idle_before=0, idle_after=0)
+    capture = wave_capture(bytes(wave))
+    decoder = UARTDecoder(rx="D0", baud=9600)
+    engine = drive(capture, UartContentTrigger(decoder, b"DONE"), pre=0)
+    assert not engine.fired
+    # nothing the decoder produced here is offered as a byte at all
+    frames = [
+        a for a in decode_capture(capture, UARTDecoder(rx="D0", baud=9600)) if a.kind == "frame"
+    ]
+    assert frames and all("unsynced" in f.errors for f in frames)
+
+
+def test_uart_trigger_pattern_must_be_consecutive_frames():
+    """A corrupted frame between the pattern bytes is a discontinuity.
+
+    The trigger may not stitch ``DO`` and ``NE`` around the frame the line
+    actually carried between them.
+    """
+    idle = 116  # one frame time at 9600 8E1 (11 bit times)
+    bad = list(uart_wave(b"X", 9600, parity="even", idle_before=0, idle_after=0))
+    for i in range(round(9 * SPB), round(10 * SPB)):
+        bad[i] ^= 1  # parity bit inverted; framing and length untouched
+    wave = list(uart_wave(b"DO", 9600, parity="even", idle_before=idle, idle_after=0))
+    wave += bad
+    wave += list(uart_wave(b"NE", 9600, parity="even", idle_before=0, idle_after=idle))
+
+    decoder = UARTDecoder(rx="D0", baud=9600, parity="even")
+    engine = drive(wave_capture(bytes(wave)), UartContentTrigger(decoder, b"DONE"))
+    assert not engine.fired
+
+    # the same four bytes with nothing between them do fire
+    clean = uart_wave(b"DONE", 9600, parity="even", idle_before=idle, idle_after=idle)
+    decoder = UARTDecoder(rx="D0", baud=9600, parity="even")
+    assert drive(wave_capture(bytes(clean)), UartContentTrigger(decoder, b"DONE")).fired
+
+
+def spi_logic(*transactions):
+    """One CS transaction per argument, back to back."""
+    waves: dict[str, list[int]] = {"sclk": [], "mosi": [], "miso": [], "cs": []}
+    for words in transactions:
+        part = spi_wave(list(words), clock_hz=10_000, mode=0)
+        for name, wave in waves.items():
+            wave.extend(part[name])
+    return merge_logic(
+        {SPI_CH[name]: wave for name, wave in waves.items()},
+        idle_levels={SPI_CH["cs"]: 1},
+    )
+
+
+def test_spi_trigger_pattern_must_be_one_transaction():
+    """0x9f then 0x00 in two exchanges is not the JEDEC ID read it looks like."""
+    detector = SpiContentTrigger(SPIDecoder(sclk="D1", mosi="D2", cs="D4"), [0x9F, 0x00])
+    engine = drive(wave_capture(spi_logic([0x9F], [0x00])), detector, pre=0)
+    assert not engine.fired
+
+    detector = SpiContentTrigger(SPIDecoder(sclk="D1", mosi="D2", cs="D4"), [0x9F, 0x00])
+    engine = drive(wave_capture(spi_logic([0x9F, 0x00])), detector, pre=0)
+    assert engine.fired
 
 
 def test_gap_resets_hold_and_edge_state():

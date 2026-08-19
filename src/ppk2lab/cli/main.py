@@ -33,10 +33,33 @@ COMMAND_CATEGORIES: dict[str, str] = {
     "doctor": "read-only (stream check is opt-in measurement)",
     "configure": "state-changing (dry-run by default; requires --apply)",
     "capture": "measurement (never enables DUT power)",
+    "inspect": "offline",
     "decode": "offline",
     "measure": "offline",
     "assert": "offline",
     "export": "offline",
+}
+
+#: One sentence per command, used as both argparse ``help`` (the subcommand
+#: list) and ``description`` (the per-command page). It is the same string in
+#: both places deliberately: ``capabilities --json`` publishes ``description``,
+#: and an empty description is what an agent reading the surface sees instead
+#: of what the command does.
+COMMAND_SUMMARIES: dict[str, str] = {
+    "discover": "list connected PPK2 devices (read-only)",
+    "info": "device metadata, calibration, firmware fingerprint, and state (read-only)",
+    "capabilities": "machine-readable command/decoder surface (read-only)",
+    "schema": "print a JSON schema (read-only)",
+    "doctor": (
+        "diagnose environment and devices; exits nonzero on a failing check (read-only by default)"
+    ),
+    "configure": "set mode / source voltage / DUT power (dry-run unless --apply)",
+    "capture": "record current + D0-D7 to a .ppk2a artifact (never enables DUT power)",
+    "inspect": "read a capture's manifest without loading its samples (offline)",
+    "decode": "decode UART/SPI from a capture (offline)",
+    "measure": "current/charge/energy for windows or events (offline)",
+    "assert": "evaluate power/protocol assertions against a capture (offline)",
+    "export": "derived views: CSV, VCD, JSONL (offline)",
 }
 
 STATE_CHANGING_COMMANDS = frozenset({"configure"})
@@ -52,6 +75,22 @@ class CliParser(argparse.ArgumentParser):
 def _add_device_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--device", metavar="SERIAL", help="device serial number")
     parser.add_argument("--port", metavar="PATH", help="explicit measurement port path")
+
+
+def _add_max_samples_option(parser: argparse.ArgumentParser) -> None:
+    """Ceiling on how much of a capture an offline command materializes.
+
+    Loading costs roughly 8 bytes of RAM per stored sample, so an unbounded
+    default would turn a long soak artifact into an OOM kill instead of an
+    error message. ``none`` removes the ceiling for a machine that has the
+    memory; ``ppk2lab inspect`` reads the manifest without any of this.
+    """
+    parser.add_argument(
+        "--max-samples",
+        metavar="N|none",
+        help="refuse to load more than N samples (default ~25 M, about 200 MB of RAM); "
+        "'none' removes the ceiling",
+    )
 
 
 def _add_spi_options(parser: argparse.ArgumentParser) -> None:
@@ -94,7 +133,12 @@ def build_parser() -> CliParser:
         prog="ppk2lab",
         description="Control, capture, decode, and test Nordic PPK2 hardware.",
     )
-    parser.add_argument("--version", action="version", version=f"ppk2lab {__version__}")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"ppk2lab {__version__}",
+        help="print the ppk2lab version and exit",
+    )
     parser.add_argument("--json", action="store_true", help="emit the JSON envelope contract")
     parser.add_argument(
         "--simulate",
@@ -113,20 +157,21 @@ def build_parser() -> CliParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND", parser_class=CliParser)
 
     def add_command(name: str, **kwargs: Any) -> argparse.ArgumentParser:
-        return sub.add_parser(name, parents=[common], **kwargs)
+        summary = COMMAND_SUMMARIES[name]
+        return sub.add_parser(name, parents=[common], help=summary, description=summary, **kwargs)
 
-    p = add_command("discover", help="list connected PPK2 devices (read-only)")
+    p = add_command("discover")
 
-    p = add_command("info", help="device metadata, calibration, and state (read-only)")
+    p = add_command("info")
     _add_device_options(p)
 
-    add_command("capabilities", help="machine-readable command/decoder surface (read-only)")
+    add_command("capabilities")
 
-    p = add_command("schema", help="print a JSON schema (read-only)")
+    p = add_command("schema")
     p.add_argument("name", nargs="?", help="schema name; omit with --list")
     p.add_argument("--list", action="store_true", help="list available schemas")
 
-    p = add_command("doctor", help="diagnose environment and devices (read-only by default)")
+    p = add_command("doctor")
     _add_device_options(p)
     p.add_argument(
         "--stream-check",
@@ -135,10 +180,7 @@ def build_parser() -> CliParser:
         "starts/stops measuring but never touches DUT power",
     )
 
-    p = add_command(
-        "configure",
-        help="set mode / source voltage / DUT power (dry-run unless --apply)",
-    )
+    p = add_command("configure")
     _add_device_options(p)
     p.add_argument("--mode", choices=("ampere", "source"), help="measurement mode")
     p.add_argument(
@@ -156,10 +198,7 @@ def build_parser() -> CliParser:
         "--apply", action="store_true", help="actually apply the changes (default is a dry run)"
     )
 
-    p = add_command(
-        "capture",
-        help="record current + D0-D7 (never enables DUT power)",
-    )
+    p = add_command("capture")
     _add_device_options(p)
     p.add_argument("--duration", metavar="DUR", help="capture length, e.g. 5s, 500ms")
     p.add_argument("--samples", type=int, metavar="N", help="capture length in samples")
@@ -210,35 +249,56 @@ def build_parser() -> CliParser:
     )
     _add_spi_options(p)
 
-    p = add_command("decode", help="decode UART/SPI from a capture (offline)")
+    p = add_command("inspect")
     p.add_argument("capture", help="capture artifact (.ppk2a)")
+
+    p = add_command("decode")
+    p.add_argument("capture", help="capture artifact (.ppk2a)")
+    _add_max_samples_option(p)
     p.add_argument("--uart", metavar="Dn", help="decode UART on this channel")
     p.add_argument("--baud", type=int, default=9600, help="UART baud rate (default 9600)")
     p.add_argument("--data-bits", type=int, default=8, help="UART data bits 5-9 (default 8)")
-    p.add_argument("--parity", choices=("none", "even", "odd"), default="none")
-    p.add_argument("--stop-bits", type=int, default=1, choices=(1, 2))
+    p.add_argument(
+        "--parity",
+        choices=("none", "even", "odd"),
+        default="none",
+        help="UART parity (default none)",
+    )
+    p.add_argument(
+        "--stop-bits", type=int, default=1, choices=(1, 2), help="UART stop bits (default 1)"
+    )
     p.add_argument("--invert", action="store_true", help="UART signal is inverted")
     p.add_argument("--msb-first", action="store_true", help="UART data bits MSB-first")
     _add_spi_options(p)
     p.add_argument("--output", metavar="FILE.jsonl", help="write annotations as JSON Lines")
-    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--overwrite", action="store_true", help="allow replacing the output file")
     p.add_argument(
         "--allow-experimental",
         action="store_true",
         help="allow experimental-tier protocol rates (low confidence)",
     )
 
-    p = add_command("measure", help="current/charge/energy for windows or events (offline)")
+    p = add_command("measure")
     p.add_argument("capture", help="capture artifact (.ppk2a)")
+    _add_max_samples_option(p)
     p.add_argument("--window", metavar="START:END", help="time window in seconds, e.g. 0.1:0.25")
     p.add_argument("--annotations", metavar="FILE.jsonl", help="measure decoded events")
     p.add_argument(
-        "--group-by", choices=("annotation", "kind", "frame", "transaction"), default="annotation"
+        "--group-by",
+        choices=("annotation", "kind", "frame", "transaction"),
+        default="annotation",
+        help="one result per annotation, or aggregated per kind (default annotation)",
     )
     p.add_argument(
         "--filtered",
         action="store_true",
         help="also apply range-switch spike filtering (raw stats are default)",
+    )
+    p.add_argument(
+        "--state-threshold",
+        metavar="CURRENT",
+        help="split the window at this current (e.g. 1mA) and report time, mean, "
+        "charge, and run count for each side; the threshold is echoed in the result",
     )
     p.add_argument(
         "--assume-voltage-mv",
@@ -247,8 +307,9 @@ def build_parser() -> CliParser:
         help="DUT supply voltage for energy when the capture cannot know it (ampere mode)",
     )
 
-    p = add_command("assert", help="evaluate power/protocol assertions against a capture (offline)")
+    p = add_command("assert")
     p.add_argument("capture", help="capture artifact (.ppk2a)")
+    _add_max_samples_option(p)
     p.add_argument(
         "--rule",
         action="append",
@@ -279,13 +340,24 @@ def build_parser() -> CliParser:
         help="report format (default json)",
     )
     p.add_argument("--output", metavar="FILE", help="write the report to a file")
-    p.add_argument("--allow-experimental", action="store_true")
+    p.add_argument(
+        "--allow-experimental",
+        action="store_true",
+        help="allow experimental-tier protocol rates in uart()/spi() events",
+    )
 
-    p = add_command("export", help="derived views: CSV, VCD, JSONL (offline)")
+    p = add_command("export")
     p.add_argument("capture", help="capture artifact (.ppk2a)")
-    p.add_argument("--format", required=True, choices=("csv", "vcd", "jsonl"), dest="export_format")
-    p.add_argument("--output", required=True, metavar="FILE")
-    p.add_argument("--overwrite", action="store_true")
+    _add_max_samples_option(p)
+    p.add_argument(
+        "--format",
+        required=True,
+        choices=("csv", "vcd", "jsonl"),
+        dest="export_format",
+        help="export format",
+    )
+    p.add_argument("--output", required=True, metavar="FILE", help="destination file")
+    p.add_argument("--overwrite", action="store_true", help="allow replacing the output file")
     p.add_argument(
         "--filtered", action="store_true", help="CSV: add the spike-filtered current column"
     )
@@ -294,6 +366,26 @@ def build_parser() -> CliParser:
         default="D0-D7",
         metavar="CHANNELS",
         help="VCD: channels to export (default D0-D7)",
+    )
+    p.add_argument(
+        "--window",
+        metavar="START:END",
+        help="export only this time window in seconds, e.g. 0.1:0.25 (either side "
+        "may be empty); only the chunks it falls in are read",
+    )
+    group = p.add_mutually_exclusive_group()
+    group.add_argument(
+        "--decimate",
+        type=int,
+        metavar="N",
+        help="CSV/JSONL: summarize into buckets of N samples instead of one record "
+        "per sample. Opt-in; the output has a different header (docs/decimation.md)",
+    )
+    group.add_argument(
+        "--bucket-ms",
+        type=float,
+        metavar="MS",
+        help="CSV/JSONL: same as --decimate, with the bucket width given in milliseconds",
     )
 
     return parser
@@ -346,6 +438,7 @@ def main(argv: list[str] | None = None) -> int:
             "doctor": impl.cmd_doctor,
             "configure": impl.cmd_configure,
             "capture": impl.cmd_capture,
+            "inspect": impl.cmd_inspect,
             "decode": impl.cmd_decode,
             "measure": impl.cmd_measure,
             "assert": impl.cmd_assert,

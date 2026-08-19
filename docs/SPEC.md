@@ -1,6 +1,6 @@
 # Public data model, states, API, and schema contracts
 
-Status: pre-`0.1.0`; everything here may change until the release freeze.
+Status: pre-`0.2.0`; everything here may change until the release freeze.
 `SCHEMA_VERSION` is `"1"` and is independent of the package version.
 
 ## Core concepts
@@ -28,7 +28,12 @@ Every loss of samples is an explicit event:
 - Reasons: `counter_skip` (device-side), `host_overflow` (bounded queue
   dropped chunks; exact byte count converted to samples),
   `discontinuous_feed` (decoder fed non-contiguous data), `usb_stall`,
-  `stream_desync` (byte framing lost and re-aligned).
+  `stream_desync` (byte framing lost and re-aligned), `sample_gap` (a
+  decoder annotation marking the samples a gap removed, so a gap between
+  frames is visible in decoded output). The list is an **open** catalog
+  published by `capabilities --json` as `gap_reasons`, each entry
+  `{code, category, meaning}`; a new reason is a new way samples can be
+  lost, not a breaking change.
 
 ### Device state
 
@@ -37,6 +42,13 @@ defaulted: `mode` (`ampere`/`source`), `source_voltage_mv`, `dut_power`,
 `measuring`, plus `source_voltage_basis` recording how the voltage was
 learned (`configured_source` beats `device_metadata`, which is only a
 regulator setpoint).
+
+`DeviceState` is frozen and `PPK2.state` is read-only: it is updated only by
+the documented state-changing methods, each of which has already put its
+command on the wire. The reason is `dut_power`, which the device cannot
+report back — a host-side assignment would suppress `W_DUT_POWER_UNKNOWN`
+and write `dut_power: true` into a capture manifest as a hardware claim
+nobody commanded. Direct assignment raises.
 
 ### StateChange
 
@@ -56,6 +68,51 @@ Every state-changing operation returns:
 `observed_after=false` means the "after" state is the requested state, not a
 device readback (DUT power is in this category — metadata cannot report it).
 
+### Concurrency
+
+One `PPK2` handle owns one serial port and is **not** safe to use from two
+threads at once. The stream claim is the only part that is synchronized, and
+it exists to refuse a second reader rather than to allow one: the 4-byte
+sample words carry no sync word, so two readers taking turns on one port
+would split words between them and neither would notice. A second `stream()`
+on a handle that already has one open is refused with `UsageError`.
+
+`AsyncPPK2` does not change this. It runs each blocking call on a worker
+thread through `asyncio.to_thread`, so concurrency is between an awaiting
+coroutine and one worker, never between two callers of the same handle.
+Cancellation is safe but not instantaneous — `asyncio.to_thread` cannot
+interrupt a worker mid-call, so a cancelled `open()` still finishes opening
+the port (and then closes it), and a cancelled `capture()` runs to its
+stopping condition. Use the stream iterator's context manager rather than
+cancelling around a bare `async for`.
+
+Separate devices are independent: two `PPK2` handles on two units share no
+state and may be used from two threads or two processes, one handle each.
+
+### Multiple devices
+
+`discover()` returns every attached unit and `--device SERIAL` selects one.
+What the project does **not** provide is a common time base. Each unit
+free-runs its own 100 kS/s clock; nothing synchronizes them, and the only
+shared reference is each capture's `first_sample_utc`, whose accuracy is
+bounded by `anchor_uncertainty_s` — currently a stated assumption about host
+scheduling and clock rate rather than a measurement. Two captures from two
+units can therefore be aligned to within roughly that bound and no better, and
+their sample indexes cannot be compared at all. A two-rail measurement that
+needs sample-accurate alignment is outside what this hardware can support
+through this tool.
+
+### Interrupted sessions
+
+A PPK2 left streaming by a process that exited without stopping it keeps
+sending samples into the port's buffer, and the next session's first read
+would parse that residue as its own data. `PPK2.open()` therefore performs
+recovery before reading metadata: it sends the stop command, drains whatever
+is queued, and records the byte count. `doctor` reports it as
+`session_recovery`, and a recovered session raises `W_SESSION_RECOVERED`.
+`PPK2.recover_session()` is the same routine exposed for a caller who needs to
+run it again mid-session; `open()` has already done it once.
+
 ## Python API surface (sync)
 
 ```python
@@ -68,13 +125,34 @@ dev.set_mode(ppk2lab.Mode.SOURCE, dry_run=True)   # -> StateChange
 dev.set_source_voltage_mv(3300)          # validated 800-5000 mV
 dev.set_dut_power(True)                  # never called implicitly
 dev.reset()
-dev.stream(duration_s=..., sample_limit=...)      # yields SampleBlock | GapEvent
+with dev.stream(duration_s=..., sample_limit=...) as events:   # SampleBlock | GapEvent
+    for event in events:
+        ...
 result = dev.capture(duration_s=5.0, output="run.ppk2a")  # -> CaptureResult
 dev.close()                              # restores session-start power state
 ```
 
-`ppk2lab.AsyncPPK2` mirrors the same surface with `async` methods and an
-async `stream()` iterator.
+`with dev.stream(...) as events:` is the documented idiom. A stream owns the
+instrument — the claim is taken when `stream()` returns, not at the first
+iteration, so an iterator that is created and never started still holds it —
+and releasing it must not depend on when the iterator happens to be
+collected. A bare `for event in dev.stream(...)` still works.
+
+`ppk2lab.AsyncPPK2` mirrors the same surface with `async` methods, and its
+`stream()` returns an `AsyncStreamIterator`:
+
+```python
+async with adev.stream(duration_s=1.0) as events:
+    async for event in events:
+        ...
+```
+
+`async for event in adev.stream(...)` and `contextlib.aclosing()` are
+unchanged; the context manager is the requirement rather than a nicety
+because an abandoned async generator holds the device claim until the event
+loop finalizes it. Cancelling an `await` on `AsyncPPK2.capture()` does not
+stop the capture: `asyncio.to_thread` cannot interrupt its worker, so bound a
+capture with `duration_s`/`sample_limit` rather than with a cancellation.
 
 Offline:
 
@@ -117,6 +195,103 @@ figure is charge times an assumption. In Ampere Meter mode the assumption is
 not defensible and `energy_uj` is `null` unless the caller supplies the DUT's
 real supply voltage. See docs/energy-analysis.md.
 
+### Distribution statistics
+
+Window results carry `current_ua.p50/p90/p99/p999` alongside mean/min/max,
+and a `distribution` block naming the grid they came from. They are computed
+from a fixed log-spaced histogram (200 nA to 1 A, 128 bins per decade)
+accumulated in the same pass as everything else, so they cost no extra memory
+and are available for an hours-long capture. Consequences a consumer must
+know:
+
+- A quantile is **quantized to the grid**: it carries up to ±0.90% of
+  relative error on top of the instrument's own. That is about a tenth of
+  Nordic's typical ±10%, so it never decides whether a quantile is usable.
+- A quantile is clamped into the observed `[min, max]` and is never a value
+  outside what was measured.
+- Readings at or below 200 nA — including zero and negative ones — have no
+  bin. They are counted in `distribution.below_grid_samples`, and a quantile
+  served from them is reported at the grid floor, which is an **upper bound**,
+  not an estimate.
+- `state_split` is `null` unless a threshold was supplied. When present it
+  carries `threshold_ua` with it, because the split is a function of the
+  threshold and is unreadable without it. `runs` counts runs of consecutive
+  *stored* samples in a state; a gap ends a run rather than bridging it.
+
+Quantiles are collected unconditionally, so a capture's own recorded
+statistics and a later `measure` of the same window always agree — including
+the sub-window batching behind `mean_ua_batch_stderr`, which is keyed on the
+valid-sample count and not on how the samples happened to arrive.
+
+### Measurement uncertainty
+
+Every window result carries an `uncertainty` block. It reports two different
+quantities that must never be added together or confused for each other.
+
+**1. Typical per-range uncertainty (systematic).** Nordic publishes a typical
+accuracy and a typical resolution per shunt range (transcribed in
+docs/calibration.md, sourced in docs/sources.md). ppk2lab combines them as
+
+```
+charge_uncertainty = Σ_r ( accuracy_r · |charge_r| + resolution_r · n_r · 10 µs )
+mean_uncertainty   = charge_uncertainty / (valid_samples · 10 µs)
+energy_uncertainty = |energy| · charge_uncertainty / |charge|
+```
+
+with `accuracy = (0.10, 0.10, 0.10, 0.10, 0.15)` and
+`resolution_µA = (0.2, 0.5, 5.0, 50.0, 1000.0)`, and `charge_r` / `n_r` the
+per-range decomposition already reported in `charge_per_range_uc` and
+`samples_per_range`.
+
+Three properties of that formula are load-bearing:
+
+- **Summed linearly, never in quadrature and never divided by √N.** These are
+  *gain* specifications. Within a range the error is the same multiplicative
+  error on every sample taken in it — fully correlated — so it does not
+  partially cancel and it does not average away. An error bar that shrank as
+  the capture got longer would be describing a random error the instrument
+  does not have.
+- **The resolution term is required, not decorative.** A purely multiplicative
+  model understates the error at the bottom of a range, where the absolute
+  step size dominates: a 1 µA sleep current in range 0 is ±0.1 µA of gain plus
+  ±0.2 µA of resolution, so ±30%, not ±10%. It is summed linearly too, because
+  an unmeasured offset of up to one resolution step is the same offset on
+  every sample.
+- **These are *typical*, not guaranteed.** Nordic publishes them that way.
+  Every field is named `..._typical...`, and `uncertainty.guaranteed` is
+  always `false`. Treating them as limits would be a claim the project cannot
+  source.
+
+**2. Statistical uncertainty of the mean.** `mean_ua_batch_stderr` is a
+separate, separately-labelled quantity: how repeatable this particular mean
+is, estimated from the spread of ~20-40 sub-window batch means. It is *not*
+σ/√N over samples. Samples 10 µs apart through a shunt-switching front end are
+heavily autocorrelated — a duty-cycled load holds one level for thousands of
+them — so σ/√N would report an interval an order of magnitude too small. On a
+strictly periodic load whose batches do not contain whole periods, the batch
+estimate is conservative; it is never optimistic. It says nothing about
+whether the instrument is reading *true*, only about how much this mean would
+move if the window moved.
+
+**Reporting.** JSON keeps full precision. Human-readable output is rounded to
+the digits the interval supports — `1810 ± 190 µA`, not
+`1806.719544039553` — with the uncertainty at two significant figures and the
+value at the same decimal place
+(`ppk2lab.capture.stats.format_with_uncertainty`).
+
+**A worked figure, so the order of magnitude is not guessed at.** A 142 µA
+mean sits in range 1, where this model gives `0.10 × 142 + 0.5 = 14.7 µA`,
+i.e. **142 ± 15 µA**. Any tighter interval — a percent-level bar on the same
+reading — is not derivable from anything Nordic publishes; the only route
+from ±10% to ±1.5% is dividing by √N, which is exactly the invalid step
+described above. docs/faq.md's ±10% is the correct order.
+
+**What would make this better, and what it would take.** A per-unit *measured*
+error bar needs a known-load cross-check against a calibrated reference at
+several points inside each range, on each unit, recorded with its firmware
+fingerprint. Until that exists the project publishes the vendor's typical
+figures and says so; it does not invent a tighter number.
+
 ## Exit codes (frozen)
 
 | code | meaning |
@@ -132,6 +307,11 @@ real supply voltage. See docs/energy-analysis.md.
 | 8 | unsafe state change refused |
 | 9 | internal error |
 
+Exit 4 also covers a transport failure and a stalled stream
+(`TRANSPORT_ERROR`, `STREAM_STALLED`): all four are "the host cannot talk to
+this device right now". `capabilities --json` (`error_codes`) maps every
+error code to its exit code.
+
 ## Schemas
 
 `ppk2lab schema --list` enumerates all published schemas; `ppk2lab schema
@@ -143,6 +323,14 @@ uses (`ppk2lab.schemas`), and tests validate live CLI output against them.
 - Adding fields to results is backward compatible; removing or renaming
   fields, error codes, or exit codes requires a `SCHEMA_VERSION` bump and a
   CHANGELOG migration note.
+- The warning, gap-reason and interruption-reason catalogs are **open**:
+  adding a code is not a breaking change, and a reader must treat an
+  unfamiliar one as unknown rather than as invalid. An existing code never
+  changes meaning within a schema version.
+- A value that changes because it was affirmatively wrong is a bug fix, not a
+  change of meaning, and does not bump `SCHEMA_VERSION` — but it does need a
+  CHANGELOG entry under behaviour changes, because a result that used to read
+  as a pass can start reading as "cannot be evaluated".
 - The capture `format_version` (currently 1) is append-only: newer readers
   open older files; older readers refuse newer files explicitly.
 - Derived exports (CSV/VCD/JSONL) are reproducible views over raw captures

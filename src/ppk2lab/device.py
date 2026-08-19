@@ -7,10 +7,14 @@ read back from the device. Nothing here ever enables DUT power implicitly.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import sys
 import threading
 import time
-from collections.abc import Iterator
+import weakref
+from collections.abc import Generator, Iterator
+from dataclasses import replace
 from typing import Any
 
 from .calibration import Calibration
@@ -85,6 +89,77 @@ def _env_voltage_ceiling() -> int | None:
         ) from exc
 
 
+class StreamIterator(Iterator[SampleBlock | GapEvent]):
+    """Closable iterator over one device's stream events.
+
+    Iterating it is exactly iterating the stream; what it adds is a close
+    path the caller controls::
+
+        with device.stream(duration_s=1.0) as events:
+            for event in events:
+                ...
+
+    That matters because the stream owns hardware, not just memory: an
+    iterator kept alive by a stored exception traceback keeps the device
+    claimed *and keeps the PPK2 measuring* until the traceback is dropped.
+    Bare iteration still works and still cleans up when the iterator is
+    finalized; only the ``with`` form is prompt regardless of who holds a
+    reference.
+    """
+
+    def __init__(self, device: PPK2, events: Generator[SampleBlock | GapEvent, None, None]) -> None:
+        self._device = device
+        self._events = events
+        self._closed = False
+
+    def __iter__(self) -> StreamIterator:
+        return self
+
+    def __next__(self) -> SampleBlock | GapEvent:
+        return next(self._events)
+
+    def close(self) -> None:
+        """Stop measuring and release the device claim. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._events.close()
+        finally:
+            self._release_claim()
+
+    def _release_claim(self) -> None:
+        """Give the device back, but only if this stream still holds it.
+
+        A generator that was never started does not run its own finally
+        block, so the claim ``stream()`` takes before the first iteration has
+        to be released here too. The identity check keeps that from reaching
+        too far: an exhausted iterator closed or collected after a later
+        stream began must not release *that* stream's claim.
+        """
+        active = self._device._active_stream
+        if active is not None and active() is self:
+            self._device._stream_active = False
+            self._device._active_stream = None
+
+    def __enter__(self) -> StreamIterator:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # The last resort for an iterator that is simply dropped. It matters
+        # most for one that was never iterated at all: its generator never
+        # ran, so no finally block of its own will ever release the claim
+        # stream() took, and every later command on the handle would be
+        # refused for a stream that never started. Nothing here can be
+        # reported to anyone, so failures are discarded rather than printed
+        # as an "Exception ignored" traceback the caller cannot act on.
+        with contextlib.suppress(Exception):
+            self.close()
+
+
 class PPK2:
     """One open PPK2 measurement session."""
 
@@ -93,7 +168,7 @@ class PPK2:
     ) -> None:
         self.transport = transport
         self.info = info
-        self.state = DeviceState()
+        self._state = DeviceState()
         self.metadata: Metadata | None = None
         self.calibration: Calibration | None = None
         self.session_log: list[StateChange] = []
@@ -113,19 +188,45 @@ class PPK2:
         #: thread would silently corrupt 4-byte framing.
         self._stream_active = False
         self._lock = threading.RLock()
+        #: The stream handed to the caller, tracked weakly: a strong
+        #: reference would make the device and the generator hold each
+        #: other, so a dropped iterator would wait for the cycle collector
+        #: instead of being finalized — and stop measuring — at once.
+        self._active_stream: weakref.ref[StreamIterator] | None = None
         #: The most recent streaming session, kept so a capture can report
         #: what its parser observed (desyncs, truncated gap tables).
         self.last_session: StreamSession | None = None
-        #: Bytes discarded after the last stop command.
-        self.stale_bytes_after_stop = 0
+        #: Bytes discarded after the last stop command, or ``None`` when no
+        #: drain has completed on this handle. The distinction is the whole
+        #: point of the field: a dead port drains nothing, so recording 0
+        #: there would be indistinguishable from "the channel was read until
+        #: it stayed quiet", which is a positive verification nobody made.
+        self.stale_bytes_after_stop: int | None = None
+
+    @property
+    def state(self) -> DeviceState:
+        """Host-tracked device state; read-only, see :class:`DeviceState`."""
+        return self._state
+
+    def _update_state(self, **fields: Any) -> None:
+        """Record state the device has been commanded into.
+
+        The only writer of :attr:`state`. Every caller is a code path that
+        has already put the command on the wire (or read the value back),
+        which is what keeps a capture manifest's ``dut_power`` an account of
+        what this session did rather than an assertion anyone can make.
+        """
+        self._state = replace(self._state, **fields)
 
     # -- guards ------------------------------------------------------------
     def _require_no_active_stream(self, action: str) -> None:
         if self._stream_active:
             raise UsageError(
                 f"cannot {action} while a capture stream is active on this device",
-                remediation="Let the active stream finish (or close its iterator) before "
-                "issuing other commands. One device serves one stream at a time.",
+                remediation="Let the active stream finish, or close it explicitly — "
+                "`with device.stream(...) as events:` releases the device even when "
+                "the block exits on an exception, whereas a named iterator held alive "
+                "by a stored traceback keeps it claimed. One device, one stream.",
             )
 
     def _require_not_measuring(self, action: str) -> None:
@@ -252,7 +353,7 @@ class PPK2:
         """
         self.transport.write(cmd_stop_measuring())
         self.recovered_stale_bytes = _drain_input(self.transport)
-        self.state.measuring = False
+        self._update_state(measuring=False)
         return self.recovered_stale_bytes
 
     def close(self, *, restore_power: bool = True) -> list[StateChange]:
@@ -263,6 +364,7 @@ class PPK2:
         """
         if self._closed:
             return []
+        self._close_active_stream()
         changes: list[StateChange] = []
         try:
             if self.state.measuring:
@@ -309,6 +411,23 @@ class PPK2:
         self.session_log.extend(changes)
         return changes
 
+    def _close_active_stream(self) -> None:
+        """Close a still-open stream before the transport goes away.
+
+        The stream's own cleanup writes a stop command and drains the
+        channel, so it has to run while the port is still open; left to the
+        garbage collector it would run against a closed transport and only
+        raise. Failures are ignored: at this point the caller has already
+        stopped consuming the stream, so nothing measured is at stake, and
+        the transport must close regardless.
+        """
+        ref = self._active_stream
+        stream = ref() if ref is not None else None
+        if stream is not None:
+            with contextlib.suppress(Exception):
+                stream.close()
+        self._active_stream = None
+
     def __enter__(self) -> PPK2:
         return self
 
@@ -343,13 +462,13 @@ class PPK2:
         self.metadata = metadata
         self.calibration = Calibration.from_metadata(metadata)
         if metadata.mode in (int(Mode.AMPERE), int(Mode.SOURCE)):
-            self.state.mode = Mode(metadata.mode)
+            self._update_state(mode=Mode(metadata.mode))
         if metadata.vdd_mv is not None:
-            self.state.source_voltage_mv = metadata.vdd_mv
+            self._update_state(source_voltage_mv=metadata.vdd_mv)
             # A readback after this session set the voltage keeps the stronger
             # basis; otherwise the value is just the regulator's setpoint.
             if not self._voltage_configured:
-                self.state.source_voltage_basis = VoltageBasis.DEVICE_METADATA
+                self._update_state(source_voltage_basis=VoltageBasis.DEVICE_METADATA)
         return metadata
 
     def firmware_fingerprint(self) -> dict[str, Any]:
@@ -424,7 +543,7 @@ class PPK2:
             self._require_no_active_stream("change mode")
             self._require_not_measuring("change mode")
             self.transport.write(request)
-            self.state.mode = mode
+            self._update_state(mode=mode)
             observed = self._readback(warnings)
             if observed and self.state.mode is not mode:
                 warnings.append(f"device reports mode {self.state.mode} after requesting {mode}")
@@ -458,8 +577,10 @@ class PPK2:
             self._require_no_active_stream("change the source voltage")
             self._require_not_measuring("change the source voltage")
             self.transport.write(request)
-            self.state.source_voltage_mv = voltage_mv
-            self.state.source_voltage_basis = VoltageBasis.CONFIGURED_SOURCE
+            self._update_state(
+                source_voltage_mv=voltage_mv,
+                source_voltage_basis=VoltageBasis.CONFIGURED_SOURCE,
+            )
             self._voltage_configured = True
             observed = self._readback(warnings)
             if observed and self.state.source_voltage_mv != voltage_mv:
@@ -491,7 +612,7 @@ class PPK2:
             if not self._power_changed:
                 self._initial_dut_power = self.state.dut_power
             self.transport.write(request)
-            self.state.dut_power = on
+            self._update_state(dut_power=on)
             self._power_changed = True
             change = StateChange(
                 "set_dut_power",
@@ -529,7 +650,7 @@ class PPK2:
             self._require_no_active_stream("reset the device")
             self._require_not_measuring("reset the device")
             self.transport.write(cmd_reset())
-            self.state = DeviceState()  # all state unknown after reset
+            self._state = DeviceState()  # all state unknown after reset
             self._voltage_configured = False
             observed = self._readback(warnings)
             change = StateChange(
@@ -576,11 +697,11 @@ class PPK2:
     # -- measurement -------------------------------------------------------
     def start_measuring(self) -> None:
         self.transport.write(cmd_start_measuring())
-        self.state.measuring = True
+        self._update_state(measuring=True)
 
     def stop_measuring(self) -> None:
         self.transport.write(cmd_stop_measuring())
-        self.state.measuring = False
+        self._update_state(measuring=False)
 
     def stream(
         self,
@@ -588,13 +709,21 @@ class PPK2:
         sample_limit: int | None = None,
         duration_s: float | None = None,
         wall_timeout_s: float | None = None,
-    ) -> Iterator[SampleBlock | GapEvent]:
+    ) -> StreamIterator:
         """Start measuring and yield loss-aware stream events.
 
         Stops measuring when the iterator is closed or exhausted. Claiming the
         device happens here rather than inside the generator body, so the
         claim is made when the caller asks for the stream and not deferred to
         whenever they first iterate it.
+
+        The returned :class:`StreamIterator` is a context manager, and that
+        is the documented idiom — a stream owns the instrument, so releasing
+        it should not depend on when the iterator happens to be collected::
+
+            with device.stream(duration_s=1.0) as events:
+                for event in events:
+                    ...
         """
         from .types import SAMPLE_RATE_HZ
 
@@ -615,14 +744,16 @@ class PPK2:
             self._stream_active = True
         session = StreamSession(self.transport)
         self.last_session = session
-        return self._stream_events(session, sample_limit, wall_timeout_s)
+        iterator = StreamIterator(self, self._stream_events(session, sample_limit, wall_timeout_s))
+        self._active_stream = weakref.ref(iterator)
+        return iterator
 
     def _stream_events(
         self,
         session: StreamSession,
         sample_limit: int | None,
         wall_timeout_s: float | None,
-    ) -> Iterator[SampleBlock | GapEvent]:
+    ) -> Generator[SampleBlock | GapEvent, None, None]:
         try:
             # start_measuring and session.start are inside the try: if either
             # raises, the claim must still be released or the handle is stuck
@@ -631,18 +762,33 @@ class PPK2:
             session.start()
             yield from session.events(sample_limit=sample_limit, wall_timeout_s=wall_timeout_s)
         finally:
+            # Whatever ended the stream — a hot unplug, a stall, the
+            # caller's own error — is what the caller has to see. Read it
+            # before any nested handler below can clear it.
+            in_flight = sys.exception()
             self._stream_active = False
             session.stop()
             try:
                 self.stop_measuring()
             except Exception:
-                self.state.measuring = False
+                self._update_state(measuring=False)
             # Bytes already in flight when the stop command lands would
             # otherwise be parsed as the head of the next session on this
             # handle, silently shifting its framing.
-            self.stale_bytes_after_stop = _drain_input(
-                self.transport, max_seconds=0.5, quiet_reads=2
-            )
+            try:
+                self.stale_bytes_after_stop = _drain_input(
+                    self.transport, max_seconds=0.5, quiet_reads=2
+                )
+            except Exception:
+                # A dead handle drains nothing, and "nothing" is not zero
+                # verified-quiet bytes: record the drain as not performed
+                # rather than leaving the previous stream's count standing.
+                # The failure is only reportable when the stream ended
+                # cleanly — during an unwind it would replace the real cause
+                # with a symptom.
+                self.stale_bytes_after_stop = None
+                if in_flight is None:
+                    raise
 
     def capture(self, **kwargs: Any):
         """Capture to a :class:`~ppk2lab.capture.model.Capture`; see

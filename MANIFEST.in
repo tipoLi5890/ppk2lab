@@ -1,0 +1,18 @@
+# Extra files the source distribution must carry.
+#
+# NOTICE.md ships as a License-File and points readers at docs/sources.md for
+# the Nordic references it relies on, so docs/ has to travel with it or the
+# distributed legal text dangles. THIRD_PARTY_NOTICES.md is the dependency
+# license audit that docs/releasing.md reconciles at every tag, and examples/
+# is what CI runs as its simulated smoke test — both belong next to the code
+# they describe.
+include CHANGELOG.md
+include CONTRIBUTING.md
+include INSTALL.md
+include NOTICE.md
+include ROADMAP.md
+include SECURITY.md
+include THIRD_PARTY_NOTICES.md
+graft docs
+graft examples
+graft tests

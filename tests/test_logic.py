@@ -3,6 +3,9 @@
 import io
 from array import array
 
+import pytest
+
+from ppk2lab.errors import OutputExistsError
 from ppk2lab.logic import edges, export_vcd, iter_transitions, pulses
 from ppk2lab.protocol.samples import SampleBlock
 from ppk2lab.types import GapEvent
@@ -74,3 +77,45 @@ def test_vcd_export_marks_gaps_as_x():
     assert "#2\n0!" in body
     assert "#3\nx!" in body  # gap drives x
     assert "#8\n1!" in body  # value re-established after the gap
+
+
+def test_vcd_export_to_a_path_matches_the_stream_form(tmp_path):
+    """Writing through the temp file must not change a byte of the output."""
+    events = [block(0, [0x01, 0x00]), GapEvent(2, 3), block(5, [0x01])]
+    stream = io.StringIO()
+    expected_records = export_vcd(events, stream, channels=[0])
+    path = tmp_path / "out.vcd"
+    assert export_vcd(events, path, channels=[0]) == expected_records
+    assert path.read_text() == stream.getvalue()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["out.vcd"]
+
+
+def test_vcd_export_failure_leaves_the_previous_export_intact(tmp_path):
+    """A mid-write failure must not cost the user the file already there."""
+    path = tmp_path / "out.vcd"
+    path.write_text("previous good export\n")
+
+    def events():
+        yield block(0, [0x01, 0x00, 0x01])
+        raise OSError(28, "No space left on device")
+
+    with pytest.raises(OSError):
+        export_vcd(events(), path, channels=[0])
+    assert path.read_text() == "previous good export\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["out.vcd"]
+
+
+def test_vcd_export_can_refuse_an_existing_target(tmp_path):
+    """The writer can own the refusal; the CLI's --output check still can too."""
+    path = tmp_path / "out.vcd"
+    path.write_text("previous good export\n")
+    with pytest.raises(OutputExistsError):
+        export_vcd([block(0, [0x01])], path, channels=[0], overwrite=False)
+    assert path.read_text() == "previous good export\n"
+
+
+def test_vcd_export_leaves_a_caller_owned_stream_open():
+    """A stream the caller opened is never closed or renamed by the exporter."""
+    stream = io.StringIO()
+    export_vcd([block(0, [0x01])], stream, channels=[0])
+    assert not stream.closed

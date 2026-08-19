@@ -35,6 +35,11 @@ from dataclasses import dataclass
 from ..types import GapEvent
 
 ADC_MASK = 0x3FFF
+#: The largest code the 14-bit ADC field can carry. A sample sitting on it is
+#: pinned rather than measured — the input is at or beyond the top of the
+#: selected range — so the current it converts to is a lower bound on what the
+#: DUT actually drew, and no calibrated value can reveal that.
+ADC_FULL_SCALE = ADC_MASK
 RANGE_SHIFT = 14
 RANGE_MASK = 0x7
 COUNTER_SHIFT = 18

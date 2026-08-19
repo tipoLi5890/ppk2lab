@@ -30,6 +30,19 @@ W_IMPLAUSIBLE_SAMPLES = "W_IMPLAUSIBLE_SAMPLES"
 W_NO_SAMPLES = "W_NO_SAMPLES"
 #: The stream was interrupted; partial data was preserved.
 W_INTERRUPTED = "W_INTERRUPTED"
+#: Wall-clock elapsed time accounts for more samples than the timeline does,
+#: by more than the anchoring and clock-rate floor can explain.
+W_UNACCOUNTED_SAMPLES = "W_UNACCOUNTED_SAMPLES"
+#: The requested window extends past where the capture has data.
+W_WINDOW_UNPOPULATED = "W_WINDOW_UNPOPULATED"
+#: The gap table hit its enumeration ceiling; gaps exist that it does not list.
+W_GAP_TABLE_TRUNCATED = "W_GAP_TABLE_TRUNCATED"
+#: Samples sat on the ADC's full-scale code: the reading is pinned, not measured.
+W_CLIPPED = "W_CLIPPED"
+#: A stored manifest states something the capture itself cannot support.
+W_MANIFEST_IMPLAUSIBLE = "W_MANIFEST_IMPLAUSIBLE"
+#: Only part of the capture was read, so the whole-file digest is unverified.
+W_PARTIAL_INTEGRITY = "W_PARTIAL_INTEGRITY"
 
 # -- measurement trust -------------------------------------------------------
 #: Energy could not be derived because no defensible supply voltage is known.
@@ -58,6 +71,8 @@ W_SESSION_RECOVERED = "W_SESSION_RECOVERED"
 W_DECODER_RATE = "W_DECODER_RATE"
 #: A trigger never fired.
 W_TRIGGER = "W_TRIGGER"
+#: The output is a decimated summary, not the raw per-sample series.
+W_DECIMATED = "W_DECIMATED"
 #: No device matched the discovery filter.
 W_DEVICE_NOT_FOUND = "W_DEVICE_NOT_FOUND"
 #: Anything that does not warrant its own code yet.
@@ -92,6 +107,34 @@ WARNING_CATALOG: dict[str, str] = {
     ),
     W_NO_SAMPLES: "The capture stored no samples at all.",
     W_INTERRUPTED: "The stream was interrupted; partial data was preserved.",
+    W_UNACCOUNTED_SAMPLES: (
+        "Wall-clock elapsed time accounts for more samples than the timeline does, by more "
+        "than host anchoring and clock rate can explain. The loss is real but belongs to the "
+        "whole capture: nothing localizes it to a window, so coverage cannot show it."
+    ),
+    W_WINDOW_UNPOPULATED: (
+        "The requested window extends past where the capture has data; the positions beyond "
+        "it hold neither a sample nor a recorded gap, so every integral over the window is a "
+        "lower bound."
+    ),
+    W_GAP_TABLE_TRUNCATED: (
+        "The gap table hit its enumeration ceiling. The gap count stays exact, but gaps exist "
+        "that the table does not list, so timeline positions cannot all be resolved."
+    ),
+    W_CLIPPED: (
+        "Samples sat on the ADC's full-scale code. In the top range the DUT exceeded the "
+        "instrument's 1 A span; in a lower range the auto-range switch had not completed. "
+        "Either way those amplitudes are understated and the integral is a lower bound."
+    ),
+    W_MANIFEST_IMPLAUSIBLE: (
+        "A stored manifest states something the capture itself cannot support. The value is "
+        "reported as stored rather than corrected — a plausible substitute would be invented."
+    ),
+    W_PARTIAL_INTEGRITY: (
+        "Only part of the capture was read, so only the chunks it touched had their CRC32 "
+        "verified. The manifest's SHA-256 over the whole file was not checked and is "
+        "reported as null rather than as verified."
+    ),
     W_VOLTAGE_ASSUMED: (
         "Energy could not be derived because no defensible supply voltage is known. Pass "
         "the DUT's real supply voltage to compute it."
@@ -113,13 +156,140 @@ WARNING_CATALOG: dict[str, str] = {
     W_DEVICE_NOT_FOUND: "No device matched the discovery filter.",
     W_DECODER_RATE: "A decoder is running outside its validated rate tier.",
     W_TRIGGER: "A trigger never fired.",
+    W_DECIMATED: (
+        "The output is a decimated summary with its own record shape, not the raw "
+        "per-sample series. Each bucket reports how many of its samples were present, "
+        "so a bucket over a gap cannot pass for a full one; the artifact remains the "
+        "evidence."
+    ),
     W_GENERIC: "A condition that does not warrant its own code yet.",
+}
+
+
+#: Which part of a result a code speaks about. Published alongside the
+#: meaning so an agent can route a warning without pattern-matching its name.
+#: Deliberately not a severity: how much a warning matters depends on the
+#: question being asked, and freezing an editorial judgment into the contract
+#: would answer it for everyone.
+WARNING_CATEGORY: dict[str, str] = {
+    W_SAMPLE_GAPS: "capture integrity",
+    W_TIMELINE_COMPRESSION: "capture integrity",
+    W_STREAM_DESYNC: "capture integrity",
+    W_IMPLAUSIBLE_SAMPLES: "capture integrity",
+    W_NO_SAMPLES: "capture integrity",
+    W_INTERRUPTED: "capture integrity",
+    W_UNACCOUNTED_SAMPLES: "capture integrity",
+    W_WINDOW_UNPOPULATED: "capture integrity",
+    W_GAP_TABLE_TRUNCATED: "capture integrity",
+    W_CLIPPED: "capture integrity",
+    W_MANIFEST_IMPLAUSIBLE: "capture integrity",
+    W_PARTIAL_INTEGRITY: "capture integrity",
+    W_VOLTAGE_ASSUMED: "measurement trust",
+    W_NOT_CALIBRATED: "measurement trust",
+    W_CALIBRATION_INCOMPLETE: "measurement trust",
+    W_USER_GAIN: "measurement trust",
+    W_METADATA: "measurement trust",
+    W_DUT_POWER_UNKNOWN: "device state",
+    W_STATE_UNVERIFIED: "device state",
+    W_DRY_RUN: "device state",
+    W_SESSION_RECOVERED: "device state",
+    W_DECODER_RATE: "analysis",
+    W_TRIGGER: "analysis",
+    W_DECIMATED: "analysis",
+    W_DEVICE_NOT_FOUND: "analysis",
+    W_GENERIC: "analysis",
+}
+
+
+#: Why a gap appears in a capture's gap table. Published as an **open**
+#: catalog, in the same ``{code, meaning}`` shape as the warning codes: a new
+#: reason is a new way the hardware or host can lose samples, and closing this
+#: into an enum would make discovering one a breaking contract change.
+#: Where the loss happened, for each gap reason. Same purpose as
+#: :data:`WARNING_CATEGORY`: it lets one reader handle all three catalogs, and
+#: it is the first thing worth knowing about a gap — a host-side loss is
+#: fixable by the operator, a device-side one is not.
+GAP_CATEGORY: dict[str, str] = {
+    "counter_skip": "device or transit",
+    "host_overflow": "host",
+    "usb_stall": "transport",
+    "stream_desync": "framing",
+    "discontinuous_feed": "analysis",
+    "sample_gap": "analysis",
+}
+
+#: What ended the capture, for each interruption reason.
+INTERRUPTION_CATEGORY: dict[str, str] = {
+    "keyboard_interrupt": "operator",
+    "transport_error": "transport",
+    "stream_stalled": "device",
+    "trigger_timeout": "trigger",
+    "trigger_never_fired": "trigger",
+    "timeline_compression": "capture integrity",
+}
+
+GAP_REASONS: dict[str, str] = {
+    "counter_skip": (
+        "The device's 6-bit sample counter jumped: samples were lost on the device or in "
+        "transit. The count is exact modulo 64, so it can understate the loss by a multiple "
+        "of 64 and never overstate it."
+    ),
+    "host_overflow": (
+        "The host's bounded stream queue dropped whole chunks; the exact byte count is known "
+        "and converted to samples."
+    ),
+    "usb_stall": "The USB stream stopped delivering data for an unknown number of samples.",
+    "stream_desync": (
+        "Byte-level framing was lost and re-established. The 4-byte sample words have no sync "
+        "word, so the number of samples spanned is unknown."
+    ),
+    "discontinuous_feed": (
+        "A decoder was fed sample data that does not continue where the previous feed ended; "
+        "the decoder fences its state at the discontinuity rather than joining across it."
+    ),
+    "sample_gap": (
+        "A decoder annotation marking the samples a gap removed, so a gap between frames is "
+        "visible in decoded output rather than closing silently."
+    ),
+}
+
+#: Why a capture stopped short of what was asked for. Open catalog, same shape
+#: and same reasoning as :data:`GAP_REASONS`.
+INTERRUPTION_REASONS: dict[str, str] = {
+    "keyboard_interrupt": "The operator interrupted the capture; partial data was preserved.",
+    "transport_error": "The serial transport failed (USB disconnect or I/O error).",
+    "stream_stalled": "The device kept its serial port open but stopped streaming samples.",
+    "trigger_timeout": "The trigger had not fired within --trigger-timeout, so the run aborted.",
+    "trigger_never_fired": "The stream ended before the trigger condition was ever met.",
+    "timeline_compression": (
+        "The sample timeline advanced far slower than the wall clock: samples were lost beyond "
+        "what the 6-bit counter can report, so durations and integrals understate reality."
+    ),
 }
 
 
 def warning_catalog() -> list[dict[str, str]]:
     """Machine-readable catalog of every stable warning code."""
-    return [{"code": code, "meaning": meaning} for code, meaning in sorted(WARNING_CATALOG.items())]
+    return [
+        {"code": code, "category": WARNING_CATEGORY[code], "meaning": meaning}
+        for code, meaning in sorted(WARNING_CATALOG.items())
+    ]
+
+
+def gap_reason_catalog() -> list[dict[str, str]]:
+    """Machine-readable catalog of gap reasons (open: new reasons may appear)."""
+    return [
+        {"code": code, "category": GAP_CATEGORY[code], "meaning": meaning}
+        for code, meaning in sorted(GAP_REASONS.items())
+    ]
+
+
+def interruption_reason_catalog() -> list[dict[str, str]]:
+    """Machine-readable catalog of interruption reasons (open, like gaps)."""
+    return [
+        {"code": code, "category": INTERRUPTION_CATEGORY[code], "meaning": meaning}
+        for code, meaning in sorted(INTERRUPTION_REASONS.items())
+    ]
 
 
 def warn(code: str, message: str) -> Diagnostic:

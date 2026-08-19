@@ -13,7 +13,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        # Every version here is also advertised as a classifier in
+        # pyproject.toml; the two lists must stay in step, or the package
+        # claims support that nothing measures.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -63,11 +66,38 @@ jobs:
           /tmp/fresh/bin/pip install dist/*.whl
           /tmp/fresh/bin/ppk2lab --version
           PPK2LAB_SIMULATE=1 /tmp/fresh/bin/ppk2lab doctor --json > /dev/null
+      - name: Installed wheel is typed and correctly licensed
+        # These have to be checked against the installed package, not the
+        # source tree: py.typed exists in src/ whether or not packaging puts
+        # it in the wheel, and a source-tree check would pass either way.
+        # Without the marker, PEP 561 makes every downstream type checker
+        # treat the whole ppk2lab surface as Any.
+        run: |
+          /tmp/fresh/bin/python -c "
+          import pathlib
+          from importlib.metadata import metadata
+          import ppk2lab
+          marker = pathlib.Path(ppk2lab.__file__).parent / 'py.typed'
+          assert marker.is_file(), 'PEP 561 marker missing from the installed package: ' + str(marker)
+          m = metadata('ppk2lab')
+          assert m['License-Expression'] == 'MIT', 'License-Expression is ' + repr(m['License-Expression'])
+          files = sorted(m.get_all('License-File') or [])
+          assert files == ['LICENSE', 'NOTICE.md'], 'License-File lines: ' + repr(files)
+          "
+      - name: Sdist carries the legal and reference files
+        # NOTICE.md ships as a License-File and points at docs/sources.md, so
+        # the docs have to travel with it; THIRD_PARTY_NOTICES.md is the
+        # license audit the release checklist reconciles against.
+        run: |
+          for path in CHANGELOG.md THIRD_PARTY_NOTICES.md docs/sources.md examples tests; do
+            tar tzf dist/*.tar.gz | grep -q "/$path" || {
+              echo "::error::$path is missing from the sdist; check MANIFEST.in"; exit 1; }
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
 
-# A separate hardware workflow (self-hosted runner with a PPK2 and MCU
-# fixture) covers the release gates in ROADMAP.md; it is intentionally not
-# part of the default PR matrix.
+# The release gates in ROADMAP.md need a physical PPK2 and an MCU fixture, so
+# they are run by the maintainer on the bench rather than produced by a
+# workflow here. ROADMAP.md's compatibility matrix records what was covered.

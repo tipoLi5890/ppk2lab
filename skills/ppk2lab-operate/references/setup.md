@@ -4,10 +4,10 @@ Nothing here changes hardware state.
 
 1. `ppk2lab --version` — if missing, `pip install ppk2lab` (or
    `pip install -e ".[dev]"` from a checkout). Check the version before
-   trusting anything here: this skill describes `0.2.0`, and the commands it
-   names — `inspect`, `--max-samples`, `--window`, `--state-threshold` — do
-   not exist in the `0.1.0.dev0` preview that preceded it. On that build they
-   fail with a usage error rather than doing something surprising.
+   trusting anything here: this skill describes `0.4.0`. `inspect`,
+   `--max-samples`, `--window` and `--state-threshold` arrived in `0.2.0`;
+   `compare` and `--tag` arrived in `0.3.0`. On an older build they fail with
+   a usage error rather than doing something surprising.
 2. `ppk2lab doctor --json` — diagnose first; apply each failing check's
    `remediation`, then re-run doctor to confirm. Doctor **exits nonzero on
    a failing check** (`warn` and `skip` stay non-blocking, and

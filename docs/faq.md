@@ -205,7 +205,7 @@ The artifact writer compressed each 4 MB chunk on the thread consuming the
 sample stream, and the ~290 ms pause overflowed the reader's queue, so a
 capture lost a gap at every chunk boundary it crossed. That is why the runs
 below each show exactly five gaps over 60 s, and why load made the gaps
-*larger* rather than more numerous. Fixed in the Unreleased CHANGELOG entry;
+*larger* rather than more numerous. Fixed in `0.3.0`;
 on the same host, 5 x 30 s and 1 x 60 s captures now record every sample.
 
 The measurements below are kept as the record of that behaviour. Measured
@@ -522,7 +522,7 @@ default) as a back-pressure target, and the device sends 100,000 samples/s x
 4 bytes = 400 kB/s, so that buffer is about ten seconds of stream: a callable
 that returns well inside that costs nothing, and one that does not drops
 samples. It is the same class of stall that produced a `host_overflow` gap at
-every artifact chunk boundary until the Unreleased fix (see "I lost samples on
+every artifact chunk boundary until the `0.3.0` fix (see "I lost samples on
 an idle machine"). Do the slow part after the capture returns.
 
 `on_progress` takes the same care but is cheaper to get right: it is called at

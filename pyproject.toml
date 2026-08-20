@@ -49,12 +49,24 @@ version = { attr = "ppk2lab._version.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+# Explicit rather than "whatever is under src/": a new directory there should
+# not join the distribution by being created.
+include = ["ppk2lab*", "ppk2lab_web*"]
 
 [tool.setuptools.package-data]
 # PEP 561: without this marker beside the installed package, every downstream
 # type checker treats the whole ppk2lab surface as Any.
 "ppk2lab" = ["py.typed"]
 "ppk2lab.schemas" = ["*.json"]
+# The built web console, plus the PEP 561 marker the `Typing :: Typed`
+# classifier promises for every package in this distribution. The build is
+# committed and shipped so that installing from PyPI never requires a Node
+# toolchain; `cd webui && npm run build` regenerates it.
+#
+# The glob is recursive on purpose. A single-level `static/*` silently drops
+# anything the bundler decides to put in a subdirectory — a self-hosted font, a
+# split chunk — and it drops it with every test still green.
+"ppk2lab_web" = ["py.typed", "static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -84,7 +96,8 @@ warn_redundant_casts = true
 no_implicit_optional = true
 check_untyped_defs = true
 mypy_path = "src"
-packages = ["ppk2lab"]
+packages = ["ppk2lab", "ppk2lab_web"]
+exclude = ["^src/ppk2lab_web/static/"]
 
 [[tool.mypy.overrides]]
 module = "serial.*"

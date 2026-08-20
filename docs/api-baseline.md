@@ -1,13 +1,18 @@
-# Public API baseline (`0.3.0`)
+# Public API baseline (`0.4.0`)
 
 ## 1. Purpose
 
-This document is the **frozen surface** as of `0.3.0`: the Python names, CLI
+This document is the **frozen surface** as of `0.4.0`: the Python names, CLI
 commands, exit codes, and file formats that downstream code and agents may
 depend on, and the checklist the release gate diffs against. The surface was
-frozen at `0.2.0`; every change `0.3.0` made to it is recorded below, and
-every one of them is an addition — nothing a `0.2.0` reader was told to expect
-was removed, renamed, or re-typed.
+frozen at `0.2.0`; every change since is recorded below, and every one of them
+is an addition — nothing a `0.2.0` reader was told to expect was removed,
+renamed, or re-typed.
+
+`0.4.0` adds one thing to this document: a **second importable top-level
+package**, `ppk2lab_web`. It contains the built web console and one accessor
+for it. The HTTP/WebSocket server that will serve those assets does not exist
+yet, so nothing about a server is frozen here.
 
 - **Additions** (exported names, result fields, schemas, optional CLI flags)
   are backward compatible and may land in a patch or minor release.
@@ -16,7 +21,7 @@ was removed, renamed, or re-typed.
   [SPEC.md - Stability policy](SPEC.md#stability-policy).
 - Anything not listed here is internal (section 5).
 
-Current: `ppk2lab.__version__ = "0.3.0"`, `ppk2lab.SCHEMA_VERSION = "1"` — the
+Current: `ppk2lab.__version__ = "0.4.0"`, `ppk2lab.SCHEMA_VERSION = "1"` — the
 schema version has not moved since `0.2.0`, and under the policy below it does
 not have to, because nothing was removed, renamed, or given a new meaning.
 
@@ -123,6 +128,23 @@ published by `ppk2lab capabilities --json`.
   `error`, `export-result`, `gap`, `info-result`, `inspect-result`,
   `measure-result`, `state-change`, `timeline-check`, `window-stats`.
 
+## 4a. `ppk2lab_web` (new in `0.4.0`)
+
+| Name | Kind | Description |
+|---|---|---|
+| `ppk2lab_web.static_dir` | function | `static_dir() -> Path`; the directory holding the built console. Raises `FileNotFoundError`, naming the directory and how to rebuild it, rather than returning a path that would serve nothing. |
+
+That is the whole frozen surface of this package. Two things about it are
+deliberately **not** frozen, and are repeated in section 5 because they are the
+two a reader is most likely to assume:
+
+- `ppk2lab_web.STATIC_DIR` — the unvalidated path behind `static_dir()`. It is
+  a module attribute, not an export, and may become private.
+- Everything **inside** `static/`: the file names `app.js` and `app.css`, the
+  structure of the JavaScript and CSS, and the console's HTML. Those names are
+  pinned by `webui/vite.config.ts` so that the committed build produces a
+  reviewable diff — a build decision, not a contract.
+
 ## 4b. Also stable at the subpackage level
 
 Not every stable name is re-exported at the top level. These are part of the
@@ -139,7 +161,7 @@ same change policy:
 | `ppk2lab.errors.CaptureTooLargeError` | class | A capture too large to load whole (`CAPTURE_TOO_LARGE`, exit 2). Subclasses `UsageError`, not `CaptureFileError`: a soak artifact is not an invalid file. |
 | `ppk2lab.errors.CalibrationUnavailableError` | class | A capture that carries no usable calibration, so no current can be derived from it. |
 | `PPK2.firmware_fingerprint()` | method | Observable firmware identity (HW, IA, metadata key set, port count). `port_count` is `len(info.ports)`, so it is `0` for a device opened by path, which discovery never enumerated; the CLI turns that `0` into `null` in `info --json` and `doctor`, because the compatibility matrix is keyed on this dict and unknown must not read as zero. |
-| `ppk2lab.device.StreamIterator` | class | Closable live-stream iterator: `__iter__`, `__next__`, `close()`, context manager. Released under a weakref identity check so a spent iterator cannot release a later stream's claim. |
+| `ppk2lab.device.StreamIterator` | class | Closable live-stream iterator: `__iter__`, `__next__`, `close()`, context manager. Released under a weakref identity check so a spent iterator cannot release a later stream's claim, and only after the stream's teardown has stopped the measurement and drained the port. |
 | `ppk2lab.aio.AsyncStreamIterator` | class | Async mirror: `__aiter__`, `__anext__`, `aclose()`, async context manager. |
 | `ppk2lab.capture.read_window` | function | `read_window(path, *, start_index=, end_index=, start_s=, end_s=, max_samples=) -> Capture`; reads only the chunks a window falls in. `Capture.load_window` is the classmethod mirror. |
 | `ppk2lab.capture.stats.format_with_uncertainty` | function | Renders a value to the digits its uncertainty supports. Human output only; JSON keeps full precision. |
@@ -236,6 +258,13 @@ with capture length because range switches accumulate; `p99_current` describes
 a fraction of the distribution instead and does not.
 
 ## 5. Explicitly NOT frozen (may change without notice)
+
+- `ppk2lab_web` beyond `static_dir()`: the contents and file names under
+  `static/`, `STATIC_DIR`, and anything to do with the not-yet-written
+  HTTP/WebSocket server, including whether it arrives as a `web` extra, a
+  console script, or a subcommand. There is no `web` extra in `0.4.0`.
+- The frontend sources under `webui/` are not part of the distribution at all;
+  they are not shipped in the wheel or the sdist.
 
 - **Internal modules and any name not in `ppk2lab.__all__`** — including
   `ppk2lab.transport`, `ppk2lab.protocol`, `ppk2lab.session`, `ppk2lab.cli`,

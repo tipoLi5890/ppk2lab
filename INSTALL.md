@@ -12,8 +12,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install ppk2lab
 ```
 
-> `0.2.0` is the first stable release, so plain `pip install ppk2lab` resolves
-> it. Stable numbering covers the machine-readable contracts, not the hardware
+> `0.4.0` is the current release and `0.2.0` was the first stable one, so plain
+> `pip install ppk2lab` resolves it. Stable numbering covers the machine-readable contracts, not the hardware
 > validation behind them: that is partial — one unit, macOS only, and no
 > decoder has read a real signal yet. `ROADMAP.md` names what is outstanding.
 > To follow work newer than the release, install from a source checkout

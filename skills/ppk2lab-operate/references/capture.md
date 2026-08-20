@@ -170,7 +170,7 @@ Little to none. The table below is the `0.2.0` behaviour and is kept because
 it is what the bug looked like: the artifact writer compressed each 4 MB
 chunk on the thread consuming samples, so a 60 s capture — five chunk
 boundaries crossed — lost exactly five gaps, and host load lengthened each
-stall rather than adding gaps. Fixed in Unreleased; on the same host, 5 x 30 s
+stall rather than adding gaps. Fixed in `0.3.0`; on the same host, 5 x 30 s
 and 1 x 60 s captures now record every sample. Measured over 60 s at
 100 kS/s on one macOS host, before the fix:
 

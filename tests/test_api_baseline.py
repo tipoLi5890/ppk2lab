@@ -186,7 +186,10 @@ def test_subpackage_level_names_resolve():
     undocumented addition.
     """
     for dotted in _table_names(_section("4b")):
-        if not dotted.startswith("ppk2lab."):
+        # `ppk2lab_web.` has to be listed explicitly: it does not start with
+        # `ppk2lab.`, so the obvious prefix test would skip every entry for the
+        # second package while still reporting green.
+        if not dotted.startswith(("ppk2lab.", "ppk2lab_web.")):
             continue  # e.g. `PPK2.firmware_fingerprint()`, covered by section 2
         module, _, attribute = dotted.rpartition(".")
         try:

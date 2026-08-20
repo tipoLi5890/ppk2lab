@@ -76,7 +76,7 @@ so a report can say exactly how much of the asked-about window existed.
 normal outcome for any capture longer than ten seconds — this project's own
 artifact writer stalled the consumer at every chunk boundary, so a rule over
 a whole capture almost never returned a verdict. That is fixed (see the
-Unreleased CHANGELOG entry) and gap-free captures are now the expectation,
+`0.3.0`) and gap-free captures are now the expectation,
 which means a rule that comes back `incomplete` is worth investigating
 rather than routine. A CI gate still needs a policy decided in advance —
 retry the capture a bounded number of times, or record the run as not

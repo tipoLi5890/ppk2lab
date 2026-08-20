@@ -6,6 +6,14 @@
 # license audit that docs/releasing.md reconciles at every tag, and examples/
 # is what CI runs as its simulated smoke test — both belong next to the code
 # they describe.
+#
+# `webui/` is deliberately absent. The sdist carries the *built* console in
+# src/ppk2lab_web/static/, not the TypeScript it was built from: no Python build
+# backend reads webui/, and rebuilding the bundle needs Node plus a node_modules
+# tree an sdist cannot carry. Shipping the sources would invite a downstream
+# packager to believe the bundle can be reproduced from the sdist, which it
+# cannot. The sources are in the git repository; the licenses of everything
+# compiled into the bundle are in THIRD_PARTY_NOTICES.md.
 include CHANGELOG.md
 include CONTRIBUTING.md
 include INSTALL.md

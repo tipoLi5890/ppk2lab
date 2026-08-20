@@ -1,10 +1,11 @@
 # Roadmap
 
-`0.3.0` is the current release; `0.2.0` was the project's first stable
-version. Stable numbering puts the machine-readable contracts under the policy
-at the end of this file; it is not a claim that every gate below has passed. Several need hardware this
-project has not had, and each says what closing it would take. The project is
-never labeled `1.0.0` as part of this plan.
+`0.4.0` is the current release; `0.2.0` was the project's first stable version.
+Stable numbering puts the machine-readable contracts under the policy in
+[docs/SPEC.md](docs/SPEC.md#stability-policy); it is not a claim that the gates
+below have passed. Several need hardware this project has not had, and each
+says what closing it would take. The project is never labeled `1.0.0` as part
+of this plan.
 
 This file is what is left. Completed work lives in `CHANGELOG.md`.
 
@@ -13,63 +14,56 @@ This file is what is left. Completed work lives in `CHANGELOG.md`.
 The planned feature set is implemented, with hardware-free tests, lint, and
 types green.
 
-The first full hardware session (2026-08-20) ran the tool end to end on one
-PPK2 — firmware fingerprint `HW=49625 IA=59.0 keys=40 ports=2`, macOS on Apple
-silicon, Python 3.14.5. It closed the macOS pass and the timing questions the
-absolute-time work was blocked on; what it measured is in `CHANGELOG.md`. It
-used one unit, one firmware, one OS, one host, and no calibrated reference, so
-every other hardware gate below is still open, and each says what closing it
-would take.
+One full hardware session (2026-08-20) ran the tool end to end on a single
+PPK2 — `HW=49625 IA=59.0 keys=40 ports=2`, macOS on Apple silicon. It closed
+the macOS pass and the absolute-time timing questions; what it measured is in
+`CHANGELOG.md`. One unit, one firmware, one OS, one host, no calibrated
+reference — so every other hardware gate below is still open.
 
 ## Remaining work
 
 ### Needs hardware the session did not have
 
 - **Physical pass on Windows and on Linux** (gate 3). One PPK2 attached to
-  each: `discover`, `info`, `doctor`, and a capture long enough to exercise
-  the timeline. macOS exposes no USB interface numbers, so both ports reported
+  each: `discover`, `info`, `doctor`, and a capture long enough to exercise the
+  timeline. macOS exposes no USB interface numbers, so both ports reported
   `role: unknown` and the measurement port was found by the read-only metadata
   probe — the interface-number classification path has never run against
   hardware, and only Windows and Linux can run it.
-- **A second unit, and a second firmware fingerprint.** Only
-  `HW=49625 IA=59.0 keys=40 ports=2` has ever been seen. That unit also
-  reports `Calibrated: 0` while all five of its ranges carry constants;
-  `doctor` warns (`calibrated_flag`) and converts anyway, and the flag is
-  unexplained. A second unit is the cheapest way to learn whether it is a
-  quirk of this one.
+- **A second unit, and a second firmware fingerprint.** Only one has ever been
+  seen. That unit also reports `Calibrated: 0` while all five of its ranges
+  carry constants; `doctor` warns (`calibrated_flag`) and converts anyway, and
+  the flag is unexplained. A second unit is the cheapest way to learn whether
+  it is a quirk of this one.
 - **Decoder validation on real signals** (gate 4). Needs an MCU fixture
   emitting known content at UART 9600 baud and SPI 10 kHz, captured as golden
   artifacts, with the error rate measured against the pre-defined thresholds.
-  No decoder in this project has yet seen a signal from real hardware; the
-  tiers below rest on samples-per-bit arithmetic alone.
-- **A cross-check that can resolve gain error.** A 680 kΩ ±5% resistor across
-  VOUT at the unit's 3700 mV setpoint read 5.55 µA where the series circuit
-  through this unit's own 1000.625 Ω R0 predicts 5.4332 µA — +2.1%. But ±5%
-  puts the true current anywhere in [5.175, 5.719] µA, so that check
-  establishes only that there is no gross error. It cannot resolve the
-  instrument's own gain error and must not be reported as if it did. Closing
-  this needs a resistor an order of magnitude tighter, or a calibrated
+  No decoder in this project has yet seen a signal from real hardware.
+- **A cross-check that can resolve gain error.** The one known load measured so
+  far was a ±5% resistor, whose own tolerance is wider than the deviation being
+  checked (`docs/faq.md`), so it establishes only that there is no gross error.
+  Closing this needs a resistor an order of magnitude tighter, or a calibrated
   reference. (Running the same load through Nordic's official Power Profiler
   application answers a different question — whether this project's conversion
   path agrees with Nordic's, not what the instrument's error is.)
 - **Hot-unplug recovery.** The cable was never pulled mid-capture.
 - **8-24 h soak.** The longest capture so far is 60 s. Memory is no longer the
-  obstacle: `inspect` read a 6,000,000-sample artifact in 0.126 s without
-  opening a sample chunk, a whole-file read peaked at 35.7 MB, and a windowed
-  read peaked flat at 10.7 MB for a 0.5 s window and for a 5 s window alike.
-  What this gate needs now is bench time and disk.
+  obstacle; what this gate needs is bench time and disk.
 - **Multi-device session.** One unit was attached; this needs two.
-
-Two more measurements need hardware but gate no release: the bandwidth
-sweep and the range-switch settling window, both under "Blocked on a
-measurement" below.
+- **A bandwidth sweep and a range-switch settling window.** Both need hardware,
+  neither gates a release; see "Blocked on a measurement" below.
 
 ### Needs no hardware
 
+- **The web console has no server.** `0.4.0` ships the built console inside
+  `ppk2lab_web/static/` and nothing that serves it: no `web` extra, no console
+  script, no subcommand. Outstanding: the supervisor that owns the one open
+  `PPK2` session, a `WebSocketSource` to replace the browser-side simulation
+  the frontend runs against today, and evidence that a single session's
+  exclusive claim on the port behaves against a real device.
 - Codex plugin manifest verification against the current Codex release.
 - Docs/examples reproducibility check from a clean environment (gate 2).
-- Dependency license re-scan at tag time (initial audit recorded in
-  `THIRD_PARTY_NOTICES.md`).
+- Dependency license re-scan at tag time (audit in `THIRD_PARTY_NOTICES.md`).
 - Release rehearsal per `docs/releasing.md`.
 - PyPI publish (requires explicit maintainer authorization).
 
@@ -82,8 +76,10 @@ measurement" below.
 4. UART 9600 and SPI 10 kHz error-rate tests meet pre-defined thresholds on
    the hardware fixture.
 5. No source code copied from other projects; no unlicensed firmware
-   binaries in the repository.
-6. All dependencies pass the license allowlist scan.
+   binaries in the repository. A licensed dependency compiled into a shipped
+   bundle is not "copied" here — that is gate 6.
+6. All dependencies pass the license allowlist scan — Python **and** the npm
+   packages bundled into `ppk2lab_web/static/`.
 7. Claude Code and Codex skill/plugin installation and representative
    prompts verified.
 8. CI is green on the tag commit before any release or PyPI publish, and the
@@ -94,40 +90,30 @@ measurement" below.
 
 ## Decoder support tiers (frozen since `0.2.0`)
 
-| Protocol / rate | Tier | Behavior |
-|---|---|---|
-| UART 1200-9600 baud | validated | full support, confidence 1.0 |
-| UART 19200 baud | conditional | decodes with warning, confidence 0.7 |
-| UART 38400 baud | experimental | requires `--allow-experimental`, confidence 0.4 |
-| UART ≥ 57600 baud | unsupported | refused (`DECODER_RATE_UNSUPPORTED`) |
-| SPI ≤ 10 kHz | validated | full support, confidence 1.0 |
-| SPI 10-20 kHz | conditional | decodes with warning, reduced confidence |
-| SPI 20-40 kHz | experimental | requires `--allow-experimental` |
-| SPI > 40 kHz | unsupported | refused |
+The tiers and their behaviour are in [docs/decoders.md](docs/decoders.md).
+Thresholds are ≥10 / ≥5 / ≥2.5 samples per bit or clock cycle at the fixed
+100 kS/s capture rate.
 
-Tier thresholds are ≥10 / ≥5 / ≥2.5 samples per bit or clock cycle at the
-fixed 100 kS/s capture rate. "Validated" names the tier's intent, not a
-measurement: promoting a conditional or experimental tier — and confirming the
-validated one — requires measured error rates from the hardware fixture, not
-code changes alone.
+"Validated" names the tier's intent, not a measurement: promoting a conditional
+or experimental tier — and confirming the validated one — requires measured
+error rates from the hardware fixture, not code changes alone.
 
 ## Hardware compatibility matrix
 
 Keyed on the firmware fingerprint that `ppk2lab info`, `doctor`, and every
 capture manifest record, because the measurement port reports no version
 string. One row per fingerprint actually attached; no row is written for a
-configuration nobody ran.
+configuration nobody ran. The matrix covers the CLI and Python paths — the web
+console is not in it and cannot be until it has a server.
 
 | Firmware fingerprint | Windows | macOS (Apple silicon) | macOS (Intel) | Linux | Multi-device | Hot unplug | 8-24 h soak |
 |---|---|---|---|---|---|---|---|
 | `HW=49625 IA=59.0 keys=40 ports=2` | ⬜ | ✅ 2026-08-20 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 
-That macOS pass covered: discovery and automatic measurement-port selection
-by metadata probe, `info`, `doctor` (11 pass, 1 warn `calibrated_flag`, 1 skip
+That macOS pass covered: discovery and automatic measurement-port selection by
+metadata probe, `info`, `doctor` (11 pass, 1 warn `calibrated_flag`, 1 skip
 `stream_rate`, exit 0), 3 s and 60 s captures at 100 kS/s with all sample loss
-accounted for in the gap table — that loss has since been traced to this
-project's own artifact writer and fixed, see the Unreleased CHANGELOG entry —
-recovery from SIGTERM and from SIGKILL
+accounted for in the gap table, recovery from SIGTERM and from SIGKILL
 mid-capture, and the offline commands on the resulting artifacts. It did not
 cover decoding a real signal, a calibrated reference, or anything the matrix
 still shows as empty. The bench evidence itself stays with the maintainer.
@@ -135,12 +121,11 @@ still shows as empty. The bench evidence itself stays with the maintainer.
 ## Later (not commitments)
 
 **Blocked on a measurement.** Each needs a load or a reference this project has
-not applied; the measurements it does have are in CHANGELOG.md.
+not applied; the measurements it does have are in `CHANGELOG.md`.
 
 - *Absolute-time columns.* The anchor decision shipped and the anchoring error
-  is measured (a fixed ≈ −2.27 ms, device clock within ~10 ppm of that host).
-  What blocks publishing millisecond-precision absolute time is that this is
-  one unit, one host, one OS.
+  is measured. What blocks publishing millisecond-precision absolute time is
+  that the measurement covers one unit, one host, one OS.
 - *A settling window for the range-switch filter.* `SpikeFilter.settle_samples
   = 3` is a guess; every capture so far sat wholly in range 0 with zero
   switches. Needs a load that crosses a range boundary.
@@ -149,21 +134,9 @@ not applied; the measurements it does have are in CHANGELOG.md.
   across and past the 50 kHz Nyquist frequency. RMS and any high-frequency
   statistic wait on that answer.
 
-**Next.** Streaming decimation straight from an artifact, without an in-memory
-capture. Battery-life estimation from the duty-cycle split — the deliverable is
-the caveat framework, not the arithmetic.
-
-`compare` has shipped. The precondition it was waiting on — that a delta mean
-something on a ±10% instrument — turned out to be answerable from the existing
-uncertainty model rather than to need a new one: that ±10% is a per-range gain
-error, the same fraction of reading on every sample through that shunt, so two
-captures taken through the same shunt share the unknown factor and it scales
-their difference instead of each reading. `compare` makes that claim only when
-both captures really did stay in one range — 99.5% of valid samples *and* of
-absolute charge, because the figures it differences are charge-weighted and a
-sample count is not — and only when both came from the same instrument, since
-a gain error is one physical shunt's residual. It adds the two gains when
-either condition fails, and always adds the resolution term.
+**Next.** The web console's server. Streaming decimation straight from an
+artifact, without an in-memory capture. Battery-life estimation from the
+duty-cycle split — the deliverable is the caveat framework, not the arithmetic.
 
 **Later.** A lossy `.ppk2` import/export layer; bit-banged I2C, PWM,
 Manchester/NRZ and 1-Wire decoders; an optional stdio MCP server once the API
@@ -172,14 +145,17 @@ tolerance against a disciplined reference rather than against one host.
 
 **Explicitly not adopted.** A configurable acquisition rate — the hardware
 samples at 100 kS/s and decimation answers the real need. Smoothing by default
-— the raw series is the evidence and `--filtered` never replaces it. GUI
-concerns, which have no data-path analogue. Automatic DUT power, forbidden by
-the safety contract and impossible anyway, since VOUT de-energizes within half
-a second of the USB host going away. Higher decoder tiers without fixture data.
+— the raw series is the evidence and `--filtered` never replaces it. A second
+source of measurement logic — the console added in `0.4.0` reads the buckets
+the library produces and issues the state changes the CLI does; it will never
+compute its own answer, replace the raw artifact, or offer a route around the
+preview-then-apply gate. Automatic DUT power, forbidden by the safety contract
+and impossible anyway, since VOUT de-energizes within half a second of the USB
+host going away. Higher decoder tiers without fixture data.
 
 ## Compatibility policy
 
-Before `0.2.0`, everything could change. From `0.2.0` onward the JSON `schema_version`
-only changes with a documented migration note in CHANGELOG.md, and the
-capture `format_version` is append-only: newer readers open older artifacts;
-older readers refuse newer ones explicitly.
+The normative rules are in
+[docs/SPEC.md](docs/SPEC.md#stability-policy): from `0.2.0` onward the JSON
+`schema_version` only changes with a documented migration note in
+`CHANGELOG.md`, and the capture `format_version` is append-only.

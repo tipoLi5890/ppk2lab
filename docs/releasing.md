@@ -7,7 +7,7 @@ live in `CONTRIBUTING.md`. Read all three first; nothing here overrides them.
 
 ## 1. Preconditions
 
-- Every release gate in `ROADMAP.md` ("`0.2.0` release gates") is green,
+- Every release gate in `ROADMAP.md` ("Release gates") is green,
   including the gates that need a bench: a physical pass on Windows, macOS,
   and Linux (gate 3 — macOS on Apple silicon passed 2026-08-20, the other two
   are open), the UART 9600 / SPI 10 kHz error-rate thresholds on the fixture
@@ -43,6 +43,15 @@ ppk2lab --version
 PPK2LAB_SIMULATE=1 ppk2lab doctor --json
 ```
 
+Confirm the committed frontend build matches its sources. Nothing at install
+time rebuilds it, so a stale bundle would ship with every other check green:
+
+```bash
+cd webui && npm ci && npm run build && cd ..
+git diff --exit-code -- src/ppk2lab_web/static
+unzip -l dist/ppk2lab-*.whl | grep ppk2lab_web/static
+```
+
 Reproduce the README quickstart commands with `--simulate` /
 `PPK2LAB_SIMULATE=1` against this wheel (`discover`, `info`, `capture`,
 `decode`), per `ROADMAP.md` gate 2. Then deactivate and remove the temp venv.
@@ -50,8 +59,14 @@ Reproduce the README quickstart commands with `--simulate` /
 Re-run the dependency license scan and confirm `THIRD_PARTY_NOTICES.md`
 matches the current dependency set against the MIT/BSD/Apache-2.0 allowlist,
 each row verified from installed metadata — `ROADMAP.md` gate 6 and
-gating-audit gate 6. The only runtime dependency is `pyserial`; the `dev`
-extra is the rest of the audited set.
+gating-audit gate 6. Two scopes: the Python dependencies (`pyserial` at
+runtime, the `dev` extra for the rest) **and** the npm packages compiled into
+`ppk2lab_web/static/app.js`, which no Python metadata mentions. Confirm their
+notices survived minification:
+
+```bash
+grep -c "@license" src/ppk2lab_web/static/app.js   # must be > 0
+```
 
 If anything here fails, stop, fix it, and re-run the gating audit before
 continuing.
@@ -69,10 +84,13 @@ continuing.
 3. If this release changes `SCHEMA_VERSION` or capture `format_version`,
    add a CHANGELOG migration note per the compatibility policy in
    `ROADMAP.md` — do not bump either silently.
-4. Confirm version sync: `ppk2lab --version` (rehearsal venv) ==
-   `_version.py` == the new CHANGELOG heading — the gating audit's
-   preconditions check the same three.
-5. Commit locally. Still not a release action.
+4. Bump `"version"` in `.claude-plugin/plugin.json` to match. Gate 7 requires
+   it and it was missed at both `0.2.0` and `0.3.0`, which is why the release
+   workflow now fails on a mismatch rather than trusting this step.
+5. Confirm version sync: `ppk2lab --version` (rehearsal venv) ==
+   `_version.py` == `.claude-plugin/plugin.json` == the new CHANGELOG heading
+   — the gating audit's preconditions check the same set.
+6. Commit locally. Still not a release action.
 
 ## 4. Tag and publish — requires explicit maintainer authorization
 
@@ -91,15 +109,15 @@ registered on PyPI (project `ppk2lab`, owner `tipoLi5890`, repository
 GitHub environment `pypi` exists under Settings → Environments with a
 required reviewer, so every upload needs a manual approval click.
 
-1. `git tag -a v0.2.0 -m "ppk2lab 0.2.0"` on the Section 3 commit, then
-   `git push origin main && git push origin v0.2.0`.
+1. `git tag -a vX.Y.Z -m "ppk2lab X.Y.Z"` on the Section 3 commit, then
+   `git push origin main && git push origin vX.Y.Z`.
 2. Wait for CI to go green on the tag commit; never release on red or
    pending. The hardware gates have no workflow — they need a physical PPK2
    and an MCU fixture attached — so confirm instead that they were validated
    against this commit and that `ROADMAP.md`'s compatibility matrix records
    the configurations covered.
 3. Create the GitHub release from the tag
-   (`gh release create v0.2.0 --notes-from-tag`). Publishing the release
+   (`gh release create vX.Y.Z --notes-from-tag`). Publishing the release
    triggers `release.yml`, which verifies the tag matches
    `src/ppk2lab/_version.py`, builds, `twine check`s, asserts the wheel it is
    about to upload carries `py.typed` and `License-Expression: MIT`, and —
@@ -109,7 +127,7 @@ required reviewer, so every upload needs a manual approval click.
 
 ## 5. Post-release
 
-1. In a fresh venv, `pip install ppk2lab==0.2.0` from PyPI (not the local
+1. In a fresh venv, `pip install ppk2lab==X.Y.Z` from PyPI (not the local
    checkout) and re-run the Section 2 doctor/discover smoke test with
    `--simulate`, confirming it matches the rehearsal build.
 2. Open a new `## [Unreleased]` section at the top of `CHANGELOG.md` for

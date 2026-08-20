@@ -159,8 +159,11 @@ uncertainty model rather than to need a new one: that ±10% is a per-range gain
 error, the same fraction of reading on every sample through that shunt, so two
 captures taken through the same shunt share the unknown factor and it scales
 their difference instead of each reading. `compare` makes that claim only when
-both captures really did stay in one range, adds the two gains when they did
-not, and always adds the resolution term.
+both captures really did stay in one range — 99.5% of valid samples *and* of
+absolute charge, because the figures it differences are charge-weighted and a
+sample count is not — and only when both came from the same instrument, since
+a gain error is one physical shunt's residual. It adds the two gains when
+either condition fails, and always adds the resolution term.
 
 **Later.** A lossy `.ppk2` import/export layer; bit-banged I2C, PWM,
 Manchester/NRZ and 1-Wire decoders; an optional stdio MCP server once the API

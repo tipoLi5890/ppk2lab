@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project uses semantic versioning once released.
 
+## [Unreleased]
+
+Nothing yet.
+
 ## [0.3.0] — 2026-08-20
 
 A minor rather than a patch release: it adds a subcommand, two capture flags,

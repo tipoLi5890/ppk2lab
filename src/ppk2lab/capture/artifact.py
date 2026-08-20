@@ -582,28 +582,37 @@ def write_capture(
     return str(writer.path)
 
 
+def _span(samples: int, sample_rate_hz: int) -> str:
+    """Human span for a sample count, scaled to what is being refused.
+
+    Fixed hour formatting rendered a one-minute capture as "0.0 h", which
+    reads as a refusal for no reason.
+    """
+    seconds = samples / sample_rate_hz
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f} h"
+    if seconds >= 60:
+        return f"{seconds / 60:.1f} min"
+    return f"{seconds:.1f} s"
+
+
+def _memory(samples: int) -> str:
+    """Roughly what loading that many samples costs, at 8 bytes each."""
+    need = samples * 8
+    return f"{need / 1e9:.1f} GB" if need >= 1e9 else f"{need / 1e6:.0f} MB"
+
+
 def read_capture(
     path: str | os.PathLike[str], *, max_samples: int | None = MAX_LOAD_SAMPLES
 ) -> Capture:
     with ArtifactReader(path) as reader:
         stored = reader.stored_count
         if max_samples is not None and stored > max_samples:
-            # Fixed h/GB formatting rendered a one-minute capture as
-            # "0.0 h ... 0.0 GB of RAM", which reads as a refusal for no
-            # reason. Scale both to the size actually being refused.
-            seconds = stored / reader.sample_rate_hz
-            span = (
-                f"{seconds / 3600:.1f} h"
-                if seconds >= 3600
-                else f"{seconds / 60:.1f} min"
-                if seconds >= 60
-                else f"{seconds:.1f} s"
-            )
-            need = stored * 8
-            memory = f"{need / 1e9:.1f} GB" if need >= 1e9 else f"{need / 1e6:.0f} MB"
             raise CaptureTooLargeError(
-                f"capture holds {stored:,} samples ({span}); loading it whole would "
-                f"need roughly {memory} of RAM, above the {max_samples:,}-sample ceiling"
+                f"capture holds {stored:,} samples "
+                f"({_span(stored, reader.sample_rate_hz)}); loading it whole would need "
+                f"roughly {_memory(stored)} of RAM, above the "
+                f"{max_samples:,}-sample ceiling"
             )
         meta = reader.read_meta()
         stored_warnings = _stored_warnings(reader)
@@ -706,10 +715,10 @@ def read_window(
         stored_hi = min(max(stored_hi, stored_lo), reader.stored_count)
         count = stored_hi - stored_lo
         if max_samples is not None and count > max_samples:
-            hours = count / reader.sample_rate_hz / 3600
             raise CaptureTooLargeError(
-                f"the requested window holds {count:,} samples ({hours:.1f} h); loading it "
-                f"would need roughly {count * 8 / 1e9:.1f} GB of RAM"
+                f"the requested window holds {count:,} samples "
+                f"({_span(count, reader.sample_rate_hz)}); loading it would need roughly "
+                f"{_memory(count)} of RAM, above the {max_samples:,}-sample ceiling"
             )
         words = array("I")
         for _, chunk_words in reader.iter_raw_words(stored_start=stored_lo, stored_end=stored_hi):

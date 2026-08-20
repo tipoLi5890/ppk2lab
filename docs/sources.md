@@ -23,9 +23,17 @@ Referenced materials (last reviewed 2026-08-19):
 
 Facts recorded from these sources are summarized in `docs/protocol-spec.md`
 (protocol and sample format), `docs/calibration.md` (conversion), and
-`docs/logic-port.md` (wiring and limits). Items not yet confirmed on real
-hardware are explicitly listed in `docs/protocol-spec.md` under "Unverified
-items".
+`docs/logic-port.md` (wiring and limits).
+
+Everything this project knows falls into one of three buckets, kept apart on
+purpose:
+
+- **Sourced** — from the materials above, cited where used.
+- **Measured here** — recorded in `docs/protocol-spec.md` under "Hardware
+  observations", with the firmware fingerprint of the unit it was seen on.
+  These are this project's own measurements, not Nordic figures.
+- **Neither** — listed in `docs/protocol-spec.md` under "Unverified items".
+  Nothing is promoted out of that list without evidence.
 
 This project does not distribute Nordic firmware binaries; firmware updates
 go through Nordic's official tools.

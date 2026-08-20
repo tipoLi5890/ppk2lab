@@ -2,9 +2,10 @@
 
 ## The physical budget
 
-PPK2 samples D0-D7 at a fixed 100 kS/s (typical analog bandwidth ~50 kHz).
-Decoding is therefore a low-speed capability, not a MHz-class logic
-analyzer. Support tiers are enforced at decoder construction:
+PPK2 samples D0-D7 at a fixed 100 kS/s (Nordic states ~50 kHz bandwidth for
+the digital inputs; `docs/sources.md`). Decoding is therefore a low-speed
+capability, not a MHz-class logic analyzer. Support tiers are enforced at
+decoder construction:
 
 | samples per bit/cycle | tier | behavior |
 |---|---|---|
@@ -16,6 +17,18 @@ analyzer. Support tiers are enforced at decoder construction:
 For UART that means 9600 baud validated, 19200 conditional, 38400
 experimental, ≥ 57600 refused. For SPI: ≤ 10 kHz validated, ≤ 20 kHz
 conditional, ≤ 40 kHz experimental, above refused.
+
+**"Validated" names a tier, not a hardware result.** The boundaries are
+samples-per-bit arithmetic against the fixed grid — 100 kS/s over 9600 baud
+is 10.4 samples per bit — and they are tested against generated waveforms fed
+at every chunk size from one sample upward. No decoder here has yet read a
+real signal: the hardware session behind the measurements elsewhere in these
+docs had no MCU fixture attached, so **no decoder error rate has been
+measured on hardware, at any tier**. Measuring one takes a device
+transmitting a known byte sequence on D0-D7 and a comparison against it.
+Until then, a tier is a statement about how much resolution a bit gets, and
+`confidence` is this decoder's own certainty about a decode — neither is an
+observed error rate.
 
 ## Streaming contract (all decoders)
 

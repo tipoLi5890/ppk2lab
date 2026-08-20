@@ -21,8 +21,8 @@ Every name in `ppk2lab.__all__` (24 exports):
 
 | Name | Kind | Description |
 |---|---|---|
-| `PPK2` | class | Synchronous device handle; `PPK2.open(serial_number=, port=, transport=, simulate=, simulator=, read_metadata=)`, context manager, `refresh_metadata`, `set_mode`, `set_source_voltage_mv`, `set_dut_power`, `set_user_gain`, `reset`, `start_measuring`, `stop_measuring`, `stream`, `capture`, `recover_session`, `close`. `stream()` returns a closable `StreamIterator`; `with device.stream(...) as events:` is the documented idiom. |
-| `AsyncPPK2` | class | Async mirror of `PPK2` (`await AsyncPPK2.open(...)`, async context manager, `async def` state-changing and capture methods, `async for` over `stream()`). `stream()` returns a closable `AsyncStreamIterator`; `async with adev.stream(...) as events:` is the documented idiom. Blocking calls run via `asyncio.to_thread`. |
+| `PPK2` | class | Synchronous device handle; `PPK2.open(serial_number=, port=, transport=, simulate=, simulator=, read_metadata=, max_voltage_mv=)`, context manager, `refresh_metadata`, `set_mode`, `set_source_voltage_mv`, `set_dut_power`, `set_user_gain`, `reset`, `start_measuring`, `stop_measuring`, `stream`, `capture`, `recover_session`, `close`, and the read-only `state` property. `stream()` returns a closable `StreamIterator`; `with device.stream(...) as events:` is the documented idiom. |
+| `AsyncPPK2` | class | Async handle over the same device, taking `PPK2.open`'s keyword arguments: `await AsyncPPK2.open(...)`, async context manager, `close`, `refresh_metadata`, `set_mode`, `set_source_voltage_mv`, `set_dut_power`, `reset`, `capture`, `stream`, and the `state` / `info` properties. It is not a complete mirror — `set_user_gain`, `start_measuring`, `stop_measuring`, `recover_session` and `firmware_fingerprint` have no async counterpart. `stream()` returns a closable `AsyncStreamIterator`; `async with adev.stream(...) as events:` is the documented idiom. Blocking calls run via `asyncio.to_thread`. |
 | `discover` | function | `discover(*, simulate=False) -> list[DeviceInfo]`; read-only device enumeration. |
 | `DeviceInfo` | class | Frozen dataclass: `serial_number`, `vid`, `pid`, `ports`, `firmware_version`, `simulated`, `measurement_port`, `to_json()`. |
 | `DeviceState` | class | **Frozen** dataclass: `mode`, `source_voltage_mv`, `dut_power`, `measuring`, `source_voltage_basis`; `None` means unknown. Reached through the read-only `PPK2.state` property — the host cannot assert a hardware state the device never confirmed. |
@@ -152,6 +152,18 @@ than as verified. Assertion observations carry `covered_fraction`,
 `capture_end_sample`, and a machine-branchable `reason_code`. Envelope
 `warnings` entries are `{code, message}` objects, and the published catalogs
 carry `{code, category, meaning}`.
+
+The `W_*` catalog itself is new to a PyPI consumer: `0.1.0.dev0` emitted
+warnings as bare strings with no codes at all, so every code in
+`ppk2lab.diagnostics` reaches an installed package for the first time in
+`0.2.0`. The catalog is **open** — a new code is an addition, not a breaking
+change — so the authoritative list is `ppk2lab capabilities --json`
+(`warning_codes`) rather than this page. Two of them change what a reported
+number means and must not be softened: `W_BELOW_MEASUREMENT_FLOOR` (a reported
+quantile was served from the distribution grid's floor and bounds the true
+value from above; `distribution.quantiles_at_floor` names which) and
+`W_DUT_POWER_TRANSIENT` (DUT power was enabled, and the device drops VOUT once
+the port closes, so a later command measures an unpowered DUT).
 
 New assertion metrics: `p50_current` (alias `median_current`), `p90_current`,
 `p99_current`, `p999_current`. A CI threshold on `max_current` drifts upward

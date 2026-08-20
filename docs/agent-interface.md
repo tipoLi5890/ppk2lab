@@ -13,10 +13,12 @@ worked example lives in `examples/agent_workflow.md`.
   documented `exit_code`. Agents branch on `code`/`exit_code`, never on
   message text.
 - Warnings are the same shape: every entry in `warnings` is
-  `{code, message}` with a frozen `W_*` code (`W_SAMPLE_GAPS`,
-  `W_TIMELINE_COMPRESSION`, `W_VOLTAGE_ASSUMED`, `W_NOT_CALIBRATED`, …).
-  `capabilities --json` publishes the catalog with each code's meaning, so
-  the vocabulary is discoverable rather than something to memorize.
+  `{code, message}` with a `W_*` code (`W_SAMPLE_GAPS`,
+  `W_TIMELINE_COMPRESSION`, `W_VOLTAGE_ASSUMED`, `W_NOT_CALIBRATED`, …). A
+  code's meaning never changes within a schema version, but codes are added,
+  so the set is open. `capabilities --json` publishes the catalog with each
+  code's meaning, which makes the vocabulary discoverable rather than
+  something to memorize or pin.
 - `ppk2lab capabilities --json` is generated from the live parser and
   registries: commands with their options, `choices`, and state-changing
   classification, decoder rate tiers, exit codes, the error, warning,
@@ -66,7 +68,13 @@ tool does not know.
 
 Assertion observations carry their own `reason_code` when a window could not
 be evaluated: `sample_gaps`, `window_past_capture_end`, `window_unpopulated`,
-`metric_not_computable`. Branch on it rather than on the prose `reason`.
+`metric_not_computable`, `metric_at_measurement_floor`. Branch on it rather
+than on the prose `reason`.
+
+An observation also carries `metric_is_upper_bound: true` when its metric is a
+quantile the distribution grid could only bound from above. The verdict is
+still reported when it holds for every smaller true value — `p99 < 1mA`
+passing, or `p99 > 1mA` failing — and becomes `incomplete` when it would flip.
 
 ## Read-only vs state-changing
 
@@ -78,7 +86,8 @@ be evaluated: `sample_gaps`, `window_past_capture_end`, `window_unpopulated`,
 is a working pre-flight gate; `warn` and `skip` never block. Use it before a
 bench session rather than discovering the problem mid-capture.
 
-Safety rules an agent must follow:
+Hardware-safety rules an agent must follow (the trust rules are the checklist
+further down):
 
 1. Never enable DUT power, change voltage, or reset unless the user asked
    for it in this task. Use `configure` without `--apply` first and show the
@@ -87,19 +96,15 @@ Safety rules an agent must follow:
    by the user or a fixture profile, stop and ask.
 3. Treat `observed_after: false` in a StateChange as "requested, not
    confirmed".
-4. Check `complete` and `sample_gaps` in every capture/measure/assert
-   result. Never present an incomplete result as a success; exit code 6
-   means "neither pass nor fail — data is missing".
-5. Check `timeline.rate_check` on captures. The device's 6-bit counter
-   cannot describe a loss of 64 samples or more, so each capture is
-   cross-checked against the wall clock; `deficit` means samples went
-   missing however quiet the gap table is.
-6. Energy carries its provenance: `voltage_basis` and
-   `voltage_measured: false`, because the instrument measures current only.
-   `energy_uj: null` in ampere mode is the correct answer, not a failure —
-   supply the DUT's real voltage with `--assume-voltage-mv` to compute it.
-7. Persist `capture_id` and `capture_sha256` with every conclusion so it can
-   be audited against raw evidence.
+4. **DUT power does not survive the command that enabled it.** The device
+   de-energizes VOUT once the host closes the serial port — measured off in
+   every trial once the port had been closed for 500 ms. So
+   `configure --dut-power on --apply` followed by a separate `capture` measures
+   an *unpowered* board, whatever `applied: true` said. The configure result
+   carries `W_DUT_POWER_TRANSIENT` for exactly this. A powered measurement has
+   to happen inside one open session (`ppk2lab.PPK2` in Python), and has to be
+   confirmed from the current itself, because this hardware cannot report its
+   power state back.
 
 ## Fields whose meaning an agent must not soften
 
@@ -120,6 +125,16 @@ Safety rules an agent must follow:
   `device_metadata`, `unknown`. It names where the voltage behind an energy
   figure came from; `voltage_measured` is always `false`, because the PPK2
   measures current only. An energy number without its basis is not a result.
+- **`distribution.quantiles_at_floor`** names any reported quantile that was
+  served from the distribution grid's 200 nA floor rather than measured. Such a
+  value is an **upper bound**: the true quantile is at or below it. The result
+  carries `W_BELOW_MEASUREMENT_FLOOR` and human output prints `<=`. An empty
+  list is the only thing that makes `p50`/`p90`/`p99`/`p999` a measurement.
+  Expect a non-empty list on any lightly loaded input — an unloaded PPK2
+  measured over 60 s read below the floor 69-71% of the time, so its `p50` is
+  the floor and nothing else. Fall back to `current_ua.mean`,
+  `current_ua.min`, or `charge_uc`, which are computed from samples rather
+  than from the grid.
 - **`capture_sha256`** is `null` for a windowed read (`measure --window`,
   `export --window`), with a `W_PARTIAL_INTEGRITY` warning: only the chunks
   the window touched were checked. Record the `null` and the warning; do not
@@ -128,6 +143,55 @@ Safety rules an agent must follow:
   always `false`. They are Nordic's typical figures, not limits, and
   `mean_ua_typical` (systematic) and `mean_ua_batch_stderr` (statistical) are
   different quantities that must never be added — docs/SPEC.md.
+
+## Deciding whether a measurement can be trusted
+
+The question an agent is actually asked is not "what was the current" but
+"may I report this". Every input to that decision is a field, and none of them
+requires reading prose:
+
+1. **Did the command succeed?** `ok`, and on failure `error.code` /
+   `error.exit_code`. Exit 6 is neither pass nor fail — data is missing — and
+   an incomplete result is never presented as a success.
+2. **Is the window the one that was asked for?** `complete` is true only
+   when the window is gap-free *and* populated. Otherwise read `sample_gaps`,
+   `samples.covered_fraction`, `samples.missing_known` and
+   `samples.unpopulated` for how much of it is real.
+3. **Are the integrals totals or floors?** `charge_is_lower_bound`. When true,
+   `charge_uc` and `energy_uj` are floors, whatever caused it — a gap, an
+   excluded sample, saturation, or a window reaching past the capture.
+4. **Is each reported number a measurement?** A quantile counts as one only
+   when `distribution.quantiles_at_floor` is empty, and `current_ua.max`
+   counts as one only when `saturated_samples` is zero — a pinned ADC code is
+   a ceiling, not a reading.
+5. **Where did the voltage come from?** `voltage_basis`, with
+   `voltage_measured` always `false`. An energy figure without its basis is
+   not a result. `energy_uj: null` on an ampere-mode capture is the correct
+   answer rather than a failure — pass the DUT's real supply voltage with
+   `--assume-voltage-mv` if energy is wanted.
+6. **How big is the error bar, and of what kind?** `uncertainty.mean_ua_typical`
+   is systematic and `uncertainty.mean_ua_batch_stderr` is statistical; they
+   are different quantities and are never added. `uncertainty.guaranteed` is
+   always `false`.
+7. **Was anything lost that the gap table cannot see?** On a capture,
+   `timeline.rate_check`. The device's 6-bit counter cannot describe a loss of
+   64 samples or more, so each capture is also cross-checked against the wall
+   clock, and `deficit` means samples went missing however quiet the gap table
+   is. Note what `ok` does *not* mean: on real 60 s captures that lost 0.43%
+   to 5.1% of their samples to host overflow, `rate_check` stayed `ok`,
+   correctly — the gap table had already accounted for that loss. It is not a
+   claim that a capture is gap-free; `complete` and `sample_gaps` are.
+8. **Was the whole artifact verified?** `capture_sha256`, which is `null` with
+   `W_PARTIAL_INTEGRITY` after a windowed read.
+9. **Did the run finish?** `interruption`, whose `reason` comes from the
+   `interruption_reasons` catalog. `keyboard_interrupt` also covers a SIGTERM
+   from a process manager, so it is not evidence that a human intervened.
+
+Then read every `warnings[].code` against the catalog. A code you do not
+recognize is unknown, not invalid — and not a reason to fail closed.
+
+Persist `capture_id` and `capture_sha256` with whatever you conclude, so the
+conclusion can be audited back to the raw evidence.
 
 ## Context budgets
 

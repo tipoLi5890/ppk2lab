@@ -1,10 +1,10 @@
 # Decimated export views
 
-A PPK2 records at a fixed 100 kS/s. One hour is 360 million samples, about
-19 GB of raw CSV; eight hours is a file most tools will not open. A decimated
-export answers the questions that survive summarising — how much charge, what
-the envelope looked like, where the peaks were — from a file small enough to
-plot.
+A PPK2 records at a fixed 100 kS/s. One hour is 360 million samples, 18.8 GB
+of raw CSV at the byte rate measured below; eight hours is a file most tools
+will not open. A decimated export answers the questions that survive
+summarising — how much charge, what the envelope looked like, where the peaks
+were — from a file small enough to plot.
 
 Decimation is **an export view of a 100 kS/s recording, never a capture
 setting**. The acquisition rate is not configurable, the artifact always holds
@@ -75,6 +75,25 @@ below holds as stated only because such a gap has no width to account for.
 `min_ua`, `max_ua`, `mean_ua` and `charge_uc` are `null` — never `0` — when
 `samples_in_bucket` is zero. Zero would claim the DUT drew nothing during a
 span where nothing was measured.
+
+### The accounting, on a real capture
+
+Demonstrated rather than asserted. A 60 s hardware capture that lost 65,024
+samples to five host-side gaps, exported with `--bucket-ms 100`:
+
+- 600 buckets, one per 10,000 timeline positions — the gaps consumed bucket
+  space instead of shifting later buckets earlier, which is why 60 s still
+  produced exactly 600 of them;
+- **11 buckets reported `complete: 0`**, five gaps having spread across
+  eleven buckets;
+- `missing_in_bucket` summed to **65,024**: the capture's loss, exactly, with
+  nothing rounded off at a bucket edge and nothing double-counted where a gap
+  straddled one;
+- the worst bucket held 4,384 samples with 5,616 missing — 44% populated,
+  and it says so rather than presenting its mean as a full 100 ms.
+
+That last row is the whole argument for the counters. A bucket mean over
+4,384 samples and a bucket mean over 10,000 look identical in a plot.
 
 ### Why min and max, and not just a mean
 
@@ -211,11 +230,14 @@ records rather than from a compiled-in constant — record width depends on the
 values, so a table of averages would be a guess presented as a fact. The
 figure is an estimate and is labelled as one.
 
-As an order of magnitude on the author's machine: raw CSV is around 53 bytes
-per sample and raw JSONL around 111, so one hour of capture is roughly 19 GB
-and 40 GB respectively. A decimated record is larger than a raw one — it
+As an order of magnitude, measured rather than assumed: on a real 60 s
+hardware capture raw CSV came to **52.1 bytes per sample** and a decimated
+record to **130.9 bytes per bucket**; on the simulated demo profile raw JSONL
+came to 110.4 bytes per sample. One hour of capture is therefore about
+18.8 GB of raw CSV and 39.7 GB of raw JSONL — against 4.7 MB for the same
+hour at `--bucket-ms 100`. A decimated record is larger than a raw one — it
 carries nineteen fields instead of fifteen — but there are `N` times fewer of
-them.
+them, and at `--bucket-ms 100` that is `N = 10,000`.
 
 ## What decimation does not do
 

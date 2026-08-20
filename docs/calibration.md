@@ -14,17 +14,55 @@ current_uA = current_A * 1e6
 ```
 
 The expression is dimensionally amperes: the `R` constants are real shunt
-resistances in ohms (verified on hardware — a real device reports
-R0 ≈ 1000.6 Ω, and its S/I correction terms are ~1e-7, i.e. sub-microamp
-offsets in amps). The public API reports microamperes. `VDD_mV` is the
+resistances in ohms. The public API reports microamperes. `VDD_mV` is the
 configured source voltage; `Calibration.convert(...)` uses the metadata VDD
 by default and accepts an override for captures taken at a different
 setting.
 
-A precision known-load cross-check against the official app remains a
-release gate (ROADMAP.md, known-load cross-check); the unit derivation above is
-confirmed by dimensional analysis and open-circuit noise-floor magnitude on
-real hardware.
+The shunts read out of one physical unit (firmware fingerprint
+`HW=49625 IA=59.0 keys=40 ports=2`, macOS host) are:
+
+| Range | Shunt `R[r]` |
+|---|---:|
+| 0 | 1000.6250 Ω |
+| 1 | 101.4608 Ω |
+| 2 | 10.2309 Ω |
+| 3 | 0.9629 Ω |
+| 4 | 0.0559 Ω |
+
+All five user gains on that unit were 1.0. Each shunt is close to a tenth of
+the one below it, except R4 at about a seventeenth of R3 — the same ladder
+the range table at the bottom of this page describes from the outside. It is
+also why the instrument switches shunts at all: 200 nA through R0 develops
+200 uV across it, while the same 200 nA through R4 would develop 11 nV.
+These are one unit's constants, not a specification; each device carries its
+own, and only this one has been read.
+
+## Known-load cross-check
+
+One has been run, on one unit, and it settles less than it appears to. A
+680 kΩ ±5% resistor between VOUT and GND at that unit's existing 3700 mV
+setpoint should draw, as a series circuit through the unit's own R0,
+`3.700 / (680000 + 1000.625) = 5.4332 uA`. Eleven captures read between
+5.5280 and 5.5614 uA — 5.55 uA, +2.1% from nominal. Every sample stayed in
+range 0, with no range switches and no saturated samples.
+
+That confirms there is no gross error: the reading is consistent with the
+load. It **cannot** confirm the instrument's own gain error, because the
+resistor's ±5% tolerance puts the true current anywhere in
+[5.175, 5.719] uA — a window more than twice as wide as the 2.1% deviation
+being checked. **No calibrated reference has been used, and a ±5% resistor
+is not one.** Resolving gain error needs a resistor an order of magnitude
+tighter or a calibrated current source; until that is run, the per-range
+figures at the bottom of this page are Nordic's specification and not this
+project's measurement. A cross-check that can resolve the gain error
+remains a release gate (`ROADMAP.md`).
+
+The same check puts a number on the `voltage_basis` caveat: at this current
+the burden across R0 is 5.44 mV, 0.147% of the 3700 mV setpoint, so the
+resistor saw 3.6946 V. Energy computed from the setpoint is high by that
+much (docs/energy-analysis.md, "Voltage provenance"), and the fraction grows
+in proportion to the current.
 
 ## Calibration provenance
 
@@ -43,10 +81,30 @@ the full offset. Two properties prevent that:
    `W_CALIBRATION_INCOMPLETE`, `W_USER_GAIN`, `W_METADATA`) plus `doctor`
    checks.
 
-The `Calibrated` metadata field is reported but not interpreted: real
-hardware has been observed reporting `Calibrated: 0` while producing
-plausible readings, and the flag's meaning is not hardware-verified. It is
-surfaced as a warning, never as a reason to discard data.
+### `Calibrated: 0` on a device that carries constants
+
+The `Calibrated` metadata field is reported but not interpreted, and the
+one unit measured on hardware is why. It reports **`Calibrated: 0`** while
+carrying a complete set of constants for all five ranges, and it converts:
+the known-load cross-check above and the noise floor in
+docs/energy-analysis.md were both taken on it. What that produces:
+
+- `doctor` returns the `calibrated_flag` check as `warn`, detail `device
+  reports Calibrated: 0`, remediation "absolute accuracy is unconfirmed; the
+  flag's meaning is not hardware-verified". The neighbouring `calibration`
+  check still passes with "all 5 ranges calibrated", because they are. On
+  that unit `doctor` was 11 pass, 1 warn, 1 skip, exit 0;
+- every capture taken from it carries `W_NOT_CALIBRATED`, and its manifest's
+  `calibration` block records `calibrated_flag: false` beside the constants
+  it actually used.
+
+Why the flag reads 0 on a device that carries constants is **unexplained**.
+It is written down rather than explained away: a user will meet the warning
+and needs to know exactly how much it says. It says the device's own flag
+disclaims calibration; it does not say the constants are absent, and it is
+not by itself a reason to discard data. It has been seen on one unit, one
+firmware fingerprint, one host — whether it is common, or particular to this
+unit, is unknown.
 
 A non-unity `UG` (user gain) scales every reading in its range. Because
 ppk2lab can also write user gains, a value left behind by a previous session
@@ -74,7 +132,9 @@ explicitly.
 | 3 | 5 mA - 50 mA | 50 uA | ±10% |
 | 4 | 50 mA - 1000 mA | 1000 uA | ±15% |
 
-(Nordic official specification; see `docs/sources.md`.)
+(Nordic official specification; see `docs/sources.md`. This project has not
+verified either column against a calibrated reference — see "Known-load
+cross-check" above for what has been checked and how far it goes.)
 
 This table is not illustrative. `RANGE_RESOLUTION_UA` and
 `RANGE_TYPICAL_ACCURACY` in `src/ppk2lab/capture/stats.py` are a
@@ -102,6 +162,17 @@ additionally holds the last pre-switch value for a configurable number of
 samples after each range change. The filter is an experimental heuristic:
 its state resets across gaps, and it never replaces the raw series, so users
 can verify measurements or apply their own filtering.
+
+**How long a switch actually takes to settle has not been measured.** The
+default hold, `SpikeFilter(settle_samples=3)`, is a guess — 30 us on the
+10 us grid — and `docs/api-baseline.md` lists it as explicitly not frozen
+for that reason. The hardware session that produced the constants above put
+no load near a range boundary: every capture in it sat 100% in range 0 and
+recorded zero range switches, so it observed no switch to time. Measuring it
+takes a load that steps across a boundary at a known instant; until that has
+been run, do not build a threshold on the filtered series, and read a
+`range_switches` count as the number of chances a capture had to catch a
+transient rather than as a corrected quantity.
 
 ## Simulator constants
 

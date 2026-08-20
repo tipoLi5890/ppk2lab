@@ -19,7 +19,7 @@
 
 - discover and configure one or more PPK2 devices;
 - capture calibrated current and all D0-D7 digital states on one synchronized timeline;
-- decode low-speed UART and SPI traffic (9,600 baud / 10 kHz validated);
+- decode low-speed UART and SPI traffic (9,600 baud and 10 kHz SCLK are the top rate tier);
 - measure charge, energy, peak current, latency, and the distribution (p50/p90/p99) of a window or a decoded event, with a typical per-range error bar;
 - work with hour-scale captures: read a manifest without its samples, read one window, or export a decimated summary;
 - trigger captures from current, digital state, UART content, or SPI transactions;
@@ -138,7 +138,7 @@ These commands are implemented today. Every JSON contract carries `schema_versio
 
 ## Scope and physical limits
 
-PPK2 samples its digital inputs at 100 kS/s. Protocol decoding is therefore intended for low-speed signals. The initial validated targets are:
+PPK2 samples its digital inputs at 100 kS/s. Protocol decoding is therefore intended for low-speed signals. Tier boundaries are samples per bit at that fixed rate — 10, 5, and 2.5 — and nothing else. The top tier covers:
 
 - UART up to 9,600 baud;
 - SPI clock up to 10 kHz;
@@ -147,23 +147,25 @@ PPK2 samples its digital inputs at 100 kS/s. Protocol decoding is therefore inte
 
 This project is not intended to replace a MHz-class logic analyzer. A frame that crosses a missing-sample interval is reported as incomplete or invalid, never as a confident decode.
 
-> [!IMPORTANT]
-> **No figure produced by this project has been compared against a reference instrument.** Every accuracy number here restates Nordic's *typical* per-range specification, and every waveform in the tests comes from the built-in simulator. Uncertainty is reported as `guaranteed: false` for exactly that reason. Validating it against real hardware is what the remaining release gates in [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md) are for.
+Losing samples to the USB host is normal at 100 kS/s, and every capture reports it. On one macOS host, 60-second captures lost 0.43% of their samples with the machine idle and 1.08% with twelve CPU spinners and continuous disk writes — five whole-chunk gaps in each case, not scattered samples. A later 60-second capture on the same host lost 5.1%, so the rate depends on what else the machine is doing rather than on the capture itself.
 
-| Protocol | Initial support level |
+> [!IMPORTANT]
+> **One known load has now been measured; a calibrated reference still has not.** A 680 kΩ ±5% resistor between VOUT and GND, at one unit's existing 3700 mV setpoint, should draw 5.4332 µA through the meter's own 1000.625 Ω shunt; eleven captures measured 5.55 µA (5.5280–5.5614 µA), +2.1% from nominal. The resistor's own tolerance puts the true current anywhere in 5.175–5.719 µA, so that check rules out a gross error and cannot resolve the instrument's own gain error — resolving it needs a resistor an order of magnitude tighter, or a calibrated reference. Every accuracy figure here still restates Nordic's *typical* per-range specification, and uncertainty is reported as `guaranteed: false` for exactly that reason. That session covered one unit, one firmware fingerprint, macOS only, and no MCU fixture, so the UART and SPI tiers below remain samples-per-bit budgets rather than measured error rates. [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md) lists what is still unmeasured.
+
+| Protocol | Rate tier |
 |---|---|
-| UART at 1,200-9,600 baud | Validated target |
-| UART at 19,200 baud | Conditional |
-| UART at 38,400 baud | Experimental |
-| UART at 57,600/115,200 baud | Not claimed as decodable |
-| SPI clock up to 10 kHz | Validated target |
-| SPI at 10-20 kHz | Conditional |
-| SPI above 20 kHz | Experimental or unsupported |
+| UART at 1,200-9,600 baud | validated |
+| UART at 19,200 baud | conditional |
+| UART at 38,400 baud | experimental (needs `--allow-experimental`) |
+| UART at 57,600 baud and above | unsupported — refused |
+| SPI clock up to 10 kHz | validated |
+| SPI at 10-20 kHz | conditional |
+| SPI at 20-40 kHz | experimental; above 40 kHz refused |
 
 ## Hardware safety
 
 - `configure` is a dry run unless `--apply` is given.
-- `capture` never enables DUT power and has no option that would; powering a DUT through the meter is always a separate, explicit `configure --dut-power on --apply`.
+- `capture` never enables DUT power and has no option that would — and neither does an earlier `configure --dut-power on --apply`, because the PPK2 de-energizes VOUT once the host closes the serial port. Measured on one unit: still live at 0 ms of closure, a coin flip at 100-250 ms, off every time from 500 ms on. Powering a DUT through the meter therefore has to happen inside the same open session that captures (`ppk2lab.PPK2` in Python); `configure --dut-power on --apply` warns `W_DUT_POWER_TRANSIENT` rather than implying otherwise.
 - Source voltage is expressed as `voltage_mv`, checked against device capabilities, and never inferred from a DUT name.
 - Mode changes, DUT power, source voltage, and reset operations report the previous and resulting state.
 - On completion or failure, the library attempts to restore the session's starting power state and records whether restoration succeeded.
@@ -235,15 +237,14 @@ See [docs/sources.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/sourc
 
 ## Roadmap
 
-The first stable release is `0.2.0`. What remains open before it is validation rather than implementation, and most of it needs a physical PPK2:
+The first stable release is `0.2.0`. What remains open before it is validation rather than implementation. One hardware session on 2026-08-20 closed the macOS pass on a single unit — firmware fingerprint `HW=49625 IA=59.0 keys=40 ports=2`, macOS on Apple silicon — and most of what is left needs hardware that session did not have:
 
-- an OS and firmware compatibility matrix — Windows, macOS, and Linux against firmware 1.1.0, 1.2.0, and 1.2.4 — keyed on the firmware fingerprint every capture records;
-- a known-load calibration cross-check against the official Power Profiler app;
-- UART and SPI decoder validation on real signals against defined error-rate thresholds;
-- multi-device sessions, hot-unplug recovery, and 8-24 h soak runs;
-- Claude Code and Codex skill installation verified against the current releases;
-- the documentation and examples reproduced from a clean environment;
-- a release rehearsal, a dependency license re-scan at tag time, and the PyPI publish itself.
+- a physical pass on Windows and on Linux, where the OS reports the USB interface numbers macOS does not;
+- a second unit and a second firmware fingerprint, only one of each having been seen;
+- a cross-check that can resolve gain error: a resistor an order of magnitude tighter than ±5%, or a calibrated reference;
+- UART and SPI decoder validation on real signals from an MCU fixture, against defined error-rate thresholds;
+- hot-unplug recovery, an 8-24 h soak run, and a multi-device session — plus a bandwidth sweep and a load that crosses a current-range boundary, which are wanted but do not gate `0.2.0`;
+- Claude Code and Codex skill installation verified against the current releases, the documentation and examples reproduced from a clean environment, a release rehearsal, a dependency license re-scan at tag time, and the PyPI publish itself.
 
 The gates that need hardware have no CI workflow and are not meant to — they need a PPK2 and a fixture MCU attached — so the maintainer runs them on the bench. See [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md) for the exit criteria, the compatibility matrix, and what is deliberately not being built.
 

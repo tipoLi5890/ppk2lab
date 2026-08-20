@@ -10,7 +10,12 @@ from typing import Any
 
 from ..errors import UsageError
 from ..types import SAMPLE_RATE_HZ
-from .feasibility import CONDITIONAL_MIN, EXPERIMENTAL_MIN, VALIDATED_MIN
+from .feasibility import (
+    CONDITIONAL_MIN,
+    EXPERIMENTAL_MIN,
+    VALIDATED_MAX_BAUD,
+    VALIDATED_MAX_SPI_HZ,
+)
 from .spi import SPIDecoder
 from .uart import UARTDecoder
 
@@ -44,7 +49,11 @@ def decoder_capabilities() -> list[dict[str, Any]]:
                 "invert": "bool (default false)",
             },
             "rate_tiers": {
-                "validated_max_baud": int(rate / VALIDATED_MIN),  # 10000 -> 9600 in practice
+                # The grid allows 10,000 baud at 10 samples/bit, but the tier is stated
+                # for 9,600 everywhere else and nothing has read a real signal.
+                # Publishing the grid maximum would let an agent treat 10,000
+                # as validated on the strength of arithmetic alone.
+                "validated_max_baud": VALIDATED_MAX_BAUD,
                 "conditional_max_baud": int(rate / CONDITIONAL_MIN),
                 "experimental_max_baud": int(rate / EXPERIMENTAL_MIN),
                 "note": "UART <= 9600 baud is the validated 0.2.0 target; 19200 is "
@@ -76,7 +85,7 @@ def decoder_capabilities() -> list[dict[str, Any]]:
                 "idle_timeout_samples": "int, optional; transaction grouping without CS",
             },
             "rate_tiers": {
-                "validated_max_hz": int(rate / VALIDATED_MIN),
+                "validated_max_hz": VALIDATED_MAX_SPI_HZ,
                 "conditional_max_hz": int(rate / CONDITIONAL_MIN),
                 "experimental_max_hz": int(rate / EXPERIMENTAL_MIN),
                 "note": "SPI <= 10 kHz SCLK is the validated 0.2.0 target; <= 20 kHz is "

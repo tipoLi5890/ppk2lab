@@ -34,6 +34,11 @@ Every loss of samples is an explicit event:
   published by `capabilities --json` as `gap_reasons`, each entry
   `{code, category, meaning}`; a new reason is a new way samples can be
   lost, not a breaking change.
+- Only `host_overflow` has been seen on hardware so far: in three 60 s
+  captures every gap came from the host's bounded queue dropping whole chunks,
+  and under load those gaps grew larger rather than more numerous
+  (docs/protocol-spec.md). The other reasons are tested against the mock
+  transport, not witnessed.
 
 ### Device state
 
@@ -69,11 +74,14 @@ Every state-changing operation returns:
 device readback (DUT power is in this category — metadata cannot report it).
 
 DUT power is also the one state that does not persist beyond the session. The
-device de-energizes VOUT shortly after the host closes the port — measured at
-under half a second, deterministically off by 500 ms — so a powered
-measurement has to happen inside one open session. Mode and source voltage are
-metadata-backed and survive. This is why the fail-safe on close costs nothing:
-the hardware was going to drop the output anyway.
+device de-energizes VOUT once the host closes the port: measured by varying
+only how long the port stayed closed, the output was still live in 3 of 3
+trials at 0 ms, was a coin flip between 100 and 250 ms, and was off in every
+trial at 500 ms and beyond. A powered measurement therefore has to happen
+inside one open session, and `configure --dut-power on --apply` warns
+`W_DUT_POWER_TRANSIENT` rather than implying otherwise. Mode and source
+voltage are metadata-backed and survive. This is why the fail-safe on close
+costs nothing: the hardware was going to drop the output anyway.
 
 ### Concurrency
 
@@ -93,21 +101,44 @@ the port (and then closes it), and a cancelled `capture()` runs to its
 stopping condition. Use the stream iterator's context manager rather than
 cancelling around a bare `async for`.
 
+Abandoning a stream part-way through its `with` block releases the claim, and
+the same handle captures again immediately — confirmed on hardware. That is
+worth confirming rather than assuming, because the failure the claim guards
+against, two readers splitting 4-byte words between them, raises nothing of
+its own.
+
 Separate devices are independent: two `PPK2` handles on two units share no
-state and may be used from two threads or two processes, one handle each.
+state and may be used from two threads or two processes, one handle each. This
+has not been exercised on hardware: every session so far has had one unit
+attached.
 
 ### Multiple devices
 
 `discover()` returns every attached unit and `--device SERIAL` selects one.
 What the project does **not** provide is a common time base. Each unit
 free-runs its own 100 kS/s clock; nothing synchronizes them, and the only
-shared reference is each capture's `first_sample_utc`, whose accuracy is
-bounded by `anchor_uncertainty_s` — currently a stated assumption about host
-scheduling and clock rate rather than a measurement. Two captures from two
-units can therefore be aligned to within roughly that bound and no better, and
-their sample indexes cannot be compared at all. A two-rail measurement that
-needs sample-accurate alignment is outside what this hardware can support
-through this tool.
+shared reference is each capture's `first_sample_utc`.
+
+How good that reference is has been measured only indirectly, on one unit and
+one host. Across three captures the wall-clock interval between the first and
+last sample anchors fell short of the device's own sample count by a **fixed
+≈ −2.27 ms** — the same at 3 s and at 60 s, so the anchoring error is an offset
+and not a proportional drift, and with it removed the device clock agreed with
+this host to within ~10 ppm. The absolute accuracy of `first_sample_utc`
+against true UTC is a different question and has never been measured; that
+needs an external time reference. What the measurement does establish is the
+scale: the anchoring error is milliseconds, not microseconds.
+
+`anchor_uncertainty_s` is **not** that bound. It reports the span of the first
+delivered block — 0.00016 s in those captures, an order of magnitude smaller
+than the offset above — and is a statement about how late the anchor stamp can
+be relative to the samples it marks, nothing more. Do not substitute it.
+
+Two captures can therefore be put on a common time base at the millisecond
+scale and no better, and their sample indexes cannot be compared at all. A
+two-rail measurement that needs sample-accurate alignment is outside what this
+hardware can support through this tool. Two units have never been run
+together, so even that bound is reasoned from single-unit numbers.
 
 ### Interrupted sessions
 
@@ -119,6 +150,22 @@ is queued, and records the byte count. `doctor` reports it as
 `session_recovery`, and a recovered session raises `W_SESSION_RECOVERED`.
 `PPK2.recover_session()` is the same routine exposed for a caller who needs to
 run it again mid-session; `open()` has already done it once.
+
+Confirmed on hardware in two ways. After a `SIGKILL` mid-capture — where the
+process gets no chance to stop the stream — the next open discarded **17,412
+stale stream bytes** and then read metadata cleanly, with `doctor` reporting
+`session_recovery` as a warning carrying that exact count. After a `SIGTERM`
+the capture was preserved instead: a readable artifact holding 357,888
+samples, exit 6, and no orphan temp file left behind.
+
+One caveat a reader of the interruption catalog will meet: the SIGTERM case is
+recorded as `interruption.reason = "keyboard_interrupt"`. SIGTERM does not
+raise on its own, so the capture runner installs a handler that turns it into
+a `KeyboardInterrupt` — without which a terminated capture would leave a
+half-written temp file and no manifest — and the reason string does not
+distinguish the two. A SIGTERM from a process manager is not an operator at a
+keyboard. This is a known imprecision, not a subtlety: do not read that reason
+as evidence a human interrupted the run.
 
 ## Python API surface (sync)
 
@@ -202,6 +249,14 @@ figure is charge times an assumption. In Ampere Meter mode the assumption is
 not defensible and `energy_uj` is `null` unless the caller supplies the DUT's
 real supply voltage. See docs/energy-analysis.md.
 
+Even in Source Meter mode the setpoint is not the DUT's terminal voltage: the
+current passes through the selected shunt, and that burden is not measured.
+A measured instance — 5.55 µA through a 1000.625 Ω range-0 shunt at a 3700 mV
+setpoint — drops 5.44 mV, so the load saw 3.6946 V, 0.147% low. How
+large the burden gets depends on the range in use and the current through it,
+and nothing in the artifact records it; the tool never corrects for it, and
+`energy_note` says so.
+
 ### Distribution statistics
 
 Window results carry `current_ua.p50/p90/p99/p999` alongside mean/min/max,
@@ -215,11 +270,21 @@ know:
   relative error on top of the instrument's own. That is about a tenth of
   Nordic's typical ±10%, so it never decides whether a quantile is usable.
 - A quantile is clamped into the observed `[min, max]` and is never a value
-  outside what was measured.
+  outside what was measured. The clamp does **not** rescue a quantile that
+  fell in the floor bin, except in the one case where the whole distribution
+  sits below the floor: it is the maximum that pulls a value down, so a window
+  holding anything above the floor leaves the floor-bin quantile at the floor.
 - Readings at or below 200 nA — including zero and negative ones — have no
   bin. They are counted in `distribution.below_grid_samples`, and a quantile
   served from them is reported at the grid floor, which is an **upper bound**,
-  not an estimate.
+  not an estimate. Every affected quantile is named in
+  `distribution.quantiles_at_floor`, the result carries
+  `W_BELOW_MEASUREMENT_FLOOR`, and human output prints the value with a `<=`
+  sign. This is the ordinary case at the bottom of range 0, not an edge case:
+  on an unloaded PPK2 measured over 60 s, 69-71% of samples fell below the
+  floor and `p50` came back as exactly 200 nA. Use the mean, the minimum, or
+  charge in that regime — they are computed from the samples, not from the
+  grid.
 - `state_split` is `null` unless a threshold was supplied. When present it
   carries `threshold_ua` with it, because the split is a function of the
   threshold and is unreadable without it. `runs` counts runs of consecutive
@@ -298,6 +363,18 @@ error bar needs a known-load cross-check against a calibrated reference at
 several points inside each range, on each unit, recorded with its firmware
 fingerprint. Until that exists the project publishes the vendor's typical
 figures and says so; it does not invent a tighter number.
+
+One cross-check has been run, and it is worth stating exactly what it did and
+did not settle. A 680 kΩ ±5% resistor between VOUT and GND at the unit's
+3700 mV setpoint should draw `3.700 / (680000 + 1000.625) = 5.4332 µA` as a series
+circuit through that unit's own R0; eleven captures read 5.5280-5.5614 µA,
+i.e. 5.55 µA, **+2.1%** from nominal. The resistor's own ±5% tolerance puts
+the true current anywhere in `[5.175, 5.719] µA`, which contains both the
+nominal value and the reading. So the check confirms there is **no gross
+error** — and that is all it can do. It cannot resolve the instrument's own
+gain error, and reporting +2.1% as if it were a measured accuracy would be
+exactly the substitution this section exists to refuse. Resolving gain needs a
+resistor an order of magnitude tighter, or a calibrated reference.
 
 ## Exit codes (frozen)
 

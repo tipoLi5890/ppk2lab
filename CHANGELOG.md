@@ -14,13 +14,38 @@ release will be `0.2.0`, cut once every gate in `ROADMAP.md` passes.
 an addition, and the values that change below changed only where they were
 affirmatively wrong — a bug fix, not a change of meaning.
 
+The first full hardware session ran on 2026-08-20: one PPK2, firmware
+fingerprint `HW=49625 IA=59.0 keys=40 ports=2`, macOS on Apple silicon, no
+calibrated reference. (The 2026-08-19 pass recorded under `0.1.0.dev0` covered
+metadata, port probing and one 10 s capture, and no more.) Every figure below
+attributed to hardware comes from that session; nothing here is estimated. What
+the session could not establish — a second unit, a second OS, a real signal
+through either decoder, an accuracy reference — is listed in `ROADMAP.md`.
+
 ### Behaviour changes — read before upgrading a CI job
 
-The release audit found several places where the tool reported a conclusion the
-evidence did not support. Fixing them means results that used to be green can
-now say, correctly, that they cannot be evaluated. Exit code 6 (capture
-incomplete) is the usual new outcome, and every case names its reason.
+The release audit, and then the hardware session, found several places where
+the tool reported a conclusion the evidence did not support. Fixing them means
+results that used to be green can now say, correctly, that they cannot be
+evaluated. Exit code 6 (capture incomplete) is the usual new outcome, and every
+case names its reason.
 
+- **DUT power does not outlive the process that enabled it.** Measured against
+  a 680 kΩ load, varying only how long the serial port stayed closed between
+  enabling power and measuring: at 0 ms the output was still live 3 times out
+  of 3, at 100 ms 1 of 3, at 250 ms 2 of 3, and from 500 ms out to 4 s, 0 of 3
+  every time. The device de-energizes VOUT once the USB host goes away — a
+  fail-safe in the instrument, and the same principle ppk2lab applies on its
+  own side. The consequence is that `configure --dut-power on --apply`
+  **cannot** leave a DUT powered for a later, separate `capture`: the result
+  says `dut_power: true`, and that stops being true about half a second after
+  the command exits. It now warns `W_DUT_POWER_TRANSIENT` instead of making a
+  promise it cannot keep. A powered measurement has to happen inside one open
+  session — `ppk2lab.PPK2` in Python — and should be verified from the current
+  itself, since this hardware cannot report its power state back. This was
+  first mistaken for an intermittent bug in `configure`, which reports exit 0
+  and `applied: true` every time; whether the DUT was still powered a moment
+  later came down to how fast the next process reopened the port.
 - **A window that is not populated is no longer `complete`.** `complete` meant
   "no gap event fell inside this window", so a 10-second window over a 50 ms
   capture returned `complete: true`, `charge_is_lower_bound: false` and no
@@ -32,7 +57,10 @@ incomplete) is the usual new outcome, and every case names its reason.
   `incomplete` with `reason_code: "window_past_capture_end"`, and every
   observation carries `covered_fraction` and `capture_end_sample`. The other
   reason codes are `sample_gaps`, `window_unpopulated`, and
-  `metric_not_computable`.
+  `metric_not_computable`. On hardware this is routine rather than exotic: a
+  suite run against a 60 s capture that lost 1.08% of its samples to the host
+  returned `incomplete` with `reason_code: "sample_gaps"` and
+  `covered_fraction: 0.9892`.
 - **UART frames decoded before a confirmed idle run are tagged `unsynced`
   with `confidence: 0.0`.** A receiver cannot know where a frame starts until
   it has seen a high run longer than any that can occur inside one; at 8N1 that
@@ -71,15 +99,85 @@ incomplete) is the usual new outcome, and every case names its reason.
   `CaptureTooLargeError` subclasses `UsageError` rather than `CaptureFileError`
   — an 8-hour soak artifact is not an invalid file. Catch `Ppk2labError`.
 
+### Measured on hardware (2026-08-20)
+
+Facts about the instrument and the host that no code change here caused, and
+that change how the output should be read. One unit, one host: they are
+measurements of this configuration, not specifications.
+
+- **Sample loss over USB is a property of the host, and it is not small.** Over
+  60 s at 100 kS/s with the host idle: 25,792 samples missing (0.43%) in 5
+  gaps. Under 12 CPU spinners and continuous disk writes: 65,024 (1.08%), also
+  in 5 gaps — under load the gaps got *larger* (up to 23,104 samples), not more
+  numerous. A third 60 s capture later in the same session lost 304,847 (5.1%),
+  so the rate tracks whatever else the machine is doing. Every gap was
+  `host_overflow`: the host's queue dropped whole chunks. In each case
+  `rate_check` stayed `ok` with `unaccounted_samples_estimate` near −230, which
+  is correct — the loss was fully accounted for in the gap table, so the
+  wall-clock witness had nothing to add. That witness exists for the loss the
+  6-bit counter cannot see, which this was not.
+- **The sample clock, against this host.** Across 3 s and 60 s captures the
+  anchoring error is a fixed ≈ −2.27 ms (−2.290 ms at 3 s; −2.253 ms and
+  −2.26 ms at 60 s), not a proportional drift; with it removed the device clock
+  agreed with this host to within ~10 ppm. So `achieved_sample_rate_hz` read
+  100076 Hz from the 3 s capture and 100004 Hz from the 60 s one: a short
+  capture is dominated by the fixed offset and is not a way to measure the
+  sample rate. `anchor_uncertainty_s` reported 0.00016 s, which is the first
+  block's span — what that field documents, and a different quantity from the
+  end-to-end offset. `unaccounted_floor_samples` (10,182 over 3 s, 13,032 over
+  60 s) is still dominated by the assumed `ANCHOR_JITTER_S = 0.05`; one unit on
+  one host is not grounds for narrowing a safety floor, so nothing was
+  tightened.
+- **A unit can report `Calibrated: 0` and still carry calibration.** This one
+  does: the flag is clear while all five ranges hold constants. `doctor` warns
+  (`calibrated_flag`) and conversion proceeds. Unexplained, and recorded rather
+  than explained away.
+- **The shunt drops voltage the DUT never sees.** 5.55 µA through this unit's
+  1000.625 Ω R0 costs 5.44 mV, so a load at a 3700 mV setpoint actually saw
+  3.6946 V — 0.147% low. Source-mode energy is computed from the setpoint, not
+  from what the DUT saw, which is why every result carries `voltage_basis` and
+  `voltage_measured: false`.
+- **Known-load cross-check.** A 680 kΩ ±5% resistor between VOUT and GND at
+  3700 mV read 5.55 µA (5.5280–5.5614 µA over eleven captures) against the
+  5.4332 µA predicted for a series circuit through that same R0 — +2.1%. But
+  ±5% puts the true current anywhere in [5.175, 5.719] µA, so this establishes
+  that there is no gross error and **nothing about the instrument's accuracy**;
+  resolving that needs a resistor an order of magnitude tighter or a calibrated
+  reference. 100% range 0, zero range switches, zero saturated samples.
+- **Interruption and recovery.** SIGTERM mid-capture preserved 357,888 samples
+  in a readable artifact, with `interruption.reason = "keyboard_interrupt"`,
+  exit 6, and no orphan temp file — the reason string is imprecise, since a
+  SIGTERM from a process manager is not an operator's keyboard; known, not
+  fixed. After SIGKILL, the next open discarded 17,412 stale stream bytes and
+  read metadata cleanly, and `doctor` reported `session_recovery` as a warning
+  carrying the exact count.
+- **`doctor` on this unit**: 11 pass, 1 warn (`calibrated_flag`), 1 skip
+  (`stream_rate`, opt-in), exit 0.
+
 ### Added
+
+- **An assertion says when its metric is only a bound.** A quantile served
+  from the distribution grid's floor bounds the true value from above rather
+  than measuring it, so a `p50_current` threshold could pass or fail on the
+  floor itself with nothing in the report to say so. Observations now carry
+  `metric_is_upper_bound`, and the verdict is reported only when it holds for
+  every smaller true value — `p99_current < 1mA` passing and
+  `p99_current > 1mA` failing both do; the two comparisons that would flip
+  become `incomplete` with `reason_code: "metric_at_measurement_floor"`.
 
 - **`ppk2lab inspect CAPTURE.ppk2a`** — reads the manifest only and never
   touches a sample chunk. There was no way to look at a capture without
   materializing every sample, so a file longer than about 250 s returned
-  nothing at all.
+  nothing at all. Measured on a 6,000,000-sample artifact: 0.126 s, no chunk
+  opened.
 - **`--max-samples N|none`** on `decode`, `measure`, `assert`, and `export`,
   with the new `CAPTURE_TOO_LARGE` error (exit 2) replacing a message that told
-  an agent a valid soak capture was corrupt.
+  an agent a valid soak capture was corrupt. On a whole-file load the message
+  scales its units to the size being refused and names the ceiling that was
+  exceeded. The windowed refusal (`--window` together with `--max-samples`)
+  still renders fixed `h`/`GB` units — a 15,000-sample window reads
+  "(0.0 h) ... roughly 0.0 GB of RAM" — and does not name the ceiling; that
+  half of the fix is not done.
 - **Duration unit `h`.** `capture --duration 8h` parses; the 8-24 h soak gate
   was expressible only as `28800s`.
 - **`firmware_fingerprint` in `info --json` and `doctor`.** It reached only the
@@ -102,24 +200,33 @@ incomplete) is the usual new outcome, and every case names its reason.
   change) in the same `{code, category, meaning}` shape as `warning_codes`, so
   one reader handles all three. New warning codes `W_UNACCOUNTED_SAMPLES`,
   `W_WINDOW_UNPOPULATED`, `W_GAP_TABLE_TRUNCATED`, `W_CLIPPED`,
-  `W_MANIFEST_IMPLAUSIBLE`.
+  `W_MANIFEST_IMPLAUSIBLE`, `W_DUT_POWER_TRANSIENT`.
 - **A closable stream.** `with device.stream(...) as events:` is now the
   documented idiom. A named iterator held alive by a stored traceback kept the
   device claimed and the hardware measuring; an iterator created and never
   started leaked the claim permanently. The release is guarded by a weakref
   identity check so a spent iterator cannot release a later stream's claim.
+  Confirmed on hardware: abandoning a stream mid-`with` released the claim and
+  the same handle captured again immediately.
 - **Windowed reads.** `ppk2lab.capture.read_window()` / `Capture.load_window()`,
   `export --window START:END`, and `measure --window` now read only the chunks
-  the window falls in, so peak memory follows the window rather than the file
-  (measured flat at about 10 MB for a 50k-sample window whether the artifact
-  holds 2 M or 16 M samples; the floor is one 1 M-sample chunk, which is
-  CRC-checked whole before it can be sliced). Three deliberate refusals:
-  `capture_sha256` is `null` with a `W_PARTIAL_INTEGRITY` warning, because only
-  the chunks touched were checked; `gaps_truncated` travels with the window;
-  and a window whose start falls inside a gap is refused rather than moved,
-  since moving it would answer a different question. Not offered on `decode`
-  or `assert` — a decoder carries sync state across block boundaries, so a
-  windowed decode is not a slice of a full decode.
+  the window falls in, so peak memory follows the window rather than the file.
+  Measured on a 6,000,000-sample artifact: 10.7 MB peak for a 0.5 s window
+  *and* for a 5 s window — flat, because the floor is one 1,000,000-sample
+  chunk, which is CRC-checked whole before it can be sliced — against 35.7 MB
+  to read the whole file. A window keeps the capture's own time base: one
+  starting at 10 s reports `time_s` from 10.000, not 0.000. Three deliberate
+  refusals: `capture_sha256` is `null` with a `W_PARTIAL_INTEGRITY` warning,
+  because only the chunks touched were checked; `gaps_truncated` travels with
+  the window; and a window whose start falls inside a gap is refused rather
+  than moved, since moving it would answer a different question. Not offered on
+  `decode` or `assert` — a decoder carries sync state across block boundaries,
+  so a windowed decode is not a slice of a full decode.
+- **`estimated_bytes` / `bytes_per_record` / `size_basis` in export results**,
+  measured on a prefix of this capture's own records rather than a constant, so
+  a caller can decide before committing to a multi-gigabyte write. On real
+  capture data that came to 52.1 bytes per raw sample and 130.9 bytes per
+  decimated bucket.
 - **`export --decimate N` / `--bucket-ms M`** — one record per timeline bucket
   with mean, min, max, charge, per-range occupancy and switch count. Min and
   max are what preserve peaks; a bucket mean alone does not. Opt-in only and
@@ -127,13 +234,14 @@ incomplete) is the usual new outcome, and every case names its reason.
   summary can never be mistaken for the series it summarizes. Every bucket
   reports how many of its samples were present, missing, excluded, saturated,
   and how many unknown-size gaps it spans, so a bucket over a gap cannot pass
-  for a full one. `mean_ua` is defined as `charge_uc / (samples × 10 µs)` over
-  present samples, so re-aggregating buckets does not compound error. One hour
-  of capture is 18.6 GB of raw CSV; the format is documented in
+  for a full one. On a 60 s hardware capture, `--bucket-ms 100` produced 600
+  buckets of which 11 were marked `complete: 0`, and `missing_in_bucket` summed
+  to exactly the capture's 65,024 lost samples; the worst bucket held 4,384
+  samples with 5,616 missing. `mean_ua` is defined as
+  `charge_uc / (samples × 10 µs)` over present samples, so re-aggregating
+  buckets does not compound error. One hour of raw CSV is about 18.8 GB at the
+  record size measured above; the decimated format is documented in
   `docs/decimation.md`.
-- **`estimated_bytes` / `bytes_per_record` / `size_basis` in export results**,
-  measured on a prefix of this capture's own records rather than a constant, so
-  a caller can decide before committing to a multi-gigabyte write.
 - **Distribution statistics.** `p50`, `p90`, `p99`, `p999` alongside
   mean/min/max, from a log-spaced histogram (128 bins per decade, ±0.90%
   quantile half-width, published as `distribution.quantile_half_width_fraction`)
@@ -143,6 +251,17 @@ incomplete) is the usual new outcome, and every case names its reason.
   New assertion metrics `p50_current` (alias `median_current`), `p90_current`,
   `p99_current`, `p999_current`: a `max_current` threshold drifts upward with
   capture length because range switches accumulate, and a percentile does not.
+  **A quantile that lands on the grid floor now says so.** The grid is
+  logarithmic and cannot bin a reading at or below zero, which an unloaded
+  input legitimately produces: over 60 s an idle PPK2 measured mean 0.1633 µA,
+  minimum −0.2477 µA, maximum 0.5867 µA (a second run: 0.1769 / −0.3356 /
+  0.6306), with 69–71% of samples below the grid's 200 nA floor — so `p50` came
+  back as exactly 200 nA with nothing to distinguish it from a measurement.
+  Affected quantiles are named in `distribution.quantiles_at_floor`, carry
+  `W_BELOW_MEASUREMENT_FLOOR`, and print with a `<=` sign. The clamp into the
+  observed `[min, max]` was documented as covering this and does not: it
+  rescues a floor-bin quantile only when the whole distribution sits below the
+  floor, because it is the maximum that pulls the value down.
 - **`measure --state-threshold CURRENT`** — duty-cycle decomposition into
   below/above, each with samples, duration, mean, charge and excursion count.
   The threshold is always echoed in the result, because the split is a function
@@ -153,7 +272,10 @@ incomplete) is the usual new outcome, and every case names its reason.
   systematic gain specifications, fully correlated within a range, so combining
   them in quadrature or dividing by √N would be wrong. The resolution term
   matters most exactly where low-power work lives: a 1 µA reading in the
-  bottom range is ±10% of gain plus a 0.2 µA step, so ±30%, not ±10%.
+  bottom range is ±10% of gain plus a 0.2 µA step, so ±30%, not ±10%. On the
+  unloaded unit measured above it goes further still: `mean_ua_typical` came
+  back 0.2177 µA against a 0.17 µA mean — ±123%, an error bar larger than the
+  reading, which is the resolution term doing its job at the bottom of range 0.
   `mean_ua_batch_stderr` is a separate, separately-labelled figure from
   sub-window batches, because 10 µs samples through a shunt-switching front end
   are heavily autocorrelated and σ/√N understates the spread by an order of
@@ -171,32 +293,26 @@ incomplete) is the usual new outcome, and every case names its reason.
   figure is valid, what aliases at a fixed 100 kS/s, and which statistics
   survive it. A 100 kHz ripple moves the reported mean by +31% with no gap and
   no warning; a 99.9 kHz one leaves the mean exact while folding to a 100 Hz
-  beat that corrupts every per-frame energy figure.
-- New FAQ entries, including why a reading can go below zero at very low load.
+  beat that corrupts every per-frame energy figure. Its tables are the
+  point-sampling model, not a measured response; no bandwidth sweep has been
+  run on hardware.
+- New FAQ entries, including why a reading can go below zero at very low load —
+  now also confirmed on hardware, where negative readings at an unloaded input
+  are routine.
 
 ### Fixed
 
+- **`capabilities --json` no longer publishes a validated rate nobody has tried.** The UART tier reported `validated_max_baud: 10000` — the grid's arithmetic maximum at 10 samples per bit — while its own note, all four READMEs, the ROADMAP and every document said 9,600. An agent reading the machine-readable field would have accepted a rate no decoder has ever run at, on real hardware or otherwise.
+- **A terminated capture is no longer recorded as a keyboard interrupt.** SIGTERM now yields `interruption.reason = "terminated"` with the signal number; a process manager, a CI timeout, and a person pressing Ctrl-C are different causes and only one of them is a person.
+- **The windowed `CAPTURE_TOO_LARGE` message matches the whole-file one**, scaling its units and naming the ceiling instead of reporting "0.0 h" and "0.0 GB".
 - **The serial transport drains before closing.** A command byte still in the
   OS write buffer has not reached the device, and closing a tty may discard
   it. Every command the PPK2 answers proves its own delivery through the
   reply — but DUT power has no readback at all, so a write lost this way would
   be reported as applied and never contradicted. (This is a real hole, closed
-  defensively; it is *not* the cause of the `configure` intermittency recorded
-  under Known issues, whose rate it did not change.)
-- **A percentile at the grid floor said so.** Found on real hardware: an
-  unloaded PPK2 reads below the distribution grid's 200 nA floor about 69% of
-  the time (measured over 60 s: mean 0.17 µA, minimum −0.25 µA, maximum
-  0.59 µA), so `p50` came back as exactly 200 nA with nothing to distinguish
-  it from a measurement. The grid is logarithmic and cannot bin a reading at
-  or below zero, which an unloaded input legitimately produces. Affected
-  quantiles are now named in `distribution.quantiles_at_floor`, carry
-  `W_BELOW_MEASUREMENT_FLOOR`, and print with a `<=` sign. The clamp into the
-  observed `[min, max]` was documented as covering this and does not: it
-  rescues a floor-bin quantile only when the whole distribution sits below the
-  floor, because it is the maximum that pulls the value down.
-- **`CAPTURE_TOO_LARGE` described a one-minute capture as "0.0 h" needing
-  "0.0 GB of RAM".** The units now scale to the size being refused, and the
-  message names the ceiling it exceeded.
+  defensively. It is *not* what made `configure --dut-power on --apply` look
+  intermittent — that was the instrument dropping VOUT after the port closed,
+  above — and closing it did not change that rate.)
 - **The wall-clock witness survived neither a read nor a write.** A read/write
   round trip cut the manifest's timeline block from 11 keys to 4, and
   `capture.save()` never wrote it at all, so a 6.79% deficit reloaded as
@@ -205,9 +321,9 @@ incomplete) is the usual new outcome, and every case names its reason.
   key-for-key, on the stored and the in-memory path alike.
 - **A failed export destroyed the previous one.** All three exporters opened
   the destination directly, so a mid-write failure — running out of space is
-  the ordinary case at ~53 bytes per sample for CSV — left a truncated file
-  that read like a complete export, and with `--overwrite` the previous good
-  export was already gone. CSV was the worst of the three: its row-count
+  the ordinary case at CSV's measured 52.1 bytes per sample — left a truncated
+  file that read like a complete export, and with `--overwrite` the previous
+  good export was already gone. CSV was the worst of the three: its row-count
   self-check *deleted* the destination outright. All three now write beside the
   target and move into place.
 - **A failed rename no longer deletes a finished capture.** The temp file is a
@@ -236,7 +352,8 @@ incomplete) is the usual new outcome, and every case names its reason.
   plausible number is what this project exists not to do.
 - **A hot unplug during stream teardown could mask itself.** A failing drain in
   the `finally` replaced the real transport error; it now defers to an
-  exception already in flight and still raises when nothing is.
+  exception already in flight and still raises when nothing is. (Not yet
+  exercised on hardware: no cable has been pulled mid-capture.)
 - **An abandoned async stream kept the hardware measuring.** An `async for`
   over `AsyncPPK2.stream()` left by an exception or by `task.cancel()` held the
   device claim until the event loop finalized the async generator. `stream()`
@@ -258,27 +375,6 @@ incomplete) is the usual new outcome, and every case names its reason.
 - Uncalibrated ranges, unknown source voltages, and captures with no
   calibration raise `CalibrationUnavailableError` instead of a bare
   `ValueError`, which escaped every documented handler.
-
-### Hardware behaviour worth knowing
-
-- **DUT power does not outlive the process that enabled it.** Measured against
-  a 680 kΩ load: with the serial port closed for 0 ms the output is still live,
-  at 100–250 ms it is a coin flip, and from 500 ms on it is off every time. The
-  device de-energizes VOUT once the USB host goes away — a sensible fail-safe
-  in the instrument, and the same principle ppk2lab applies on its own side.
-
-  The consequence is that `configure --dut-power on --apply` **cannot** leave a
-  DUT powered for a later, separate `capture`: the result says
-  `dut_power: true` and that stops being true about half a second after the
-  command exits. `configure --dut-power on --apply` now warns
-  (`W_DUT_POWER_TRANSIENT`) instead of making a promise it cannot keep. A
-  powered measurement has to happen inside one open session — `ppk2lab.PPK2` in
-  Python — and should be verified from the current itself, since this hardware
-  cannot report its power state back.
-
-  This was first mistaken for an intermittent bug in `configure`: it reports
-  exit 0 and `applied: true` every time, and whether the DUT is still powered
-  a moment later came down to how fast the next process reopened the port.
 
 ### Changed
 
@@ -336,64 +432,7 @@ incomplete) is the usual new outcome, and every case names its reason.
 Committed the same day as the `0.1.0.dev0` upload but after it, so none of
 this has ever been on PyPI. It ships for the first time here.
 
-### Fixed (integrity audit of the hardening itself, 2026-08-19)
-
-Auditing the change below against the hardware facts it claims to enforce
-found that parts of it did not hold.
-
-- **A lost byte no longer becomes invented time.** Treating the first
-  counter mismatch as proof of a device-side skip meant a byte-level desync
-  advanced the timeline once per shifted word: a single lost byte inflated a
-  2000-sample stream to 5713 — 3715 phantom samples, 37 ms that never
-  happened. A mismatch is now held until the following samples confirm the
-  framing survived, and the desync verdict always arrives first. Measured
-  phantom samples: 0 at realistic chunk sizes, bounded at 189 for any
-  chunking. Shifted words are discarded instead of being reported as
-  measurements, and unrecoverable bytes are dropped once rather than
-  re-entered word by word.
-- **Stored captures keep their energy.** Artifacts written before voltage
-  provenance existed have no `voltage_basis`; reading them as "unknown"
-  silently voided every source-mode energy figure. The recorded mode now
-  stands in for the missing basis.
-- **An uncalibrated device is no longer reported as starved.** Timeline
-  extent was read from the statistics accumulator, which only advances when
-  samples convert, so a device opened without metadata looked 100% starved
-  and every capture was marked incomplete.
-- **Triggered captures decline the rate check.** Pre-trigger samples are
-  emitted at the fire moment, so wall time covered only the post-trigger
-  window while the timeline covered both — a comparison that could read
-  200 kS/s or hide a 50% loss as healthy. It now reports `not_applicable`.
-- **A failed stream start no longer bricks the handle.** The device was
-  claimed before `start_measuring`, so a transient write error left the
-  claim set and every later command blamed a stream that never began. The
-  claim is also atomic now, and made when the stream is requested rather
-  than when it is first iterated.
-- **An unplugged device is reported as an unplug**, not as a stall: the
-  reader's real error wins over the idle budget even when the queue was full
-  enough to drop its sentinel. The idle budget also measures device silence
-  rather than consumer work.
-- **The in-memory guard cannot be bypassed** by passing an output path, and
-  the read path now refuses to load a capture too large for memory instead
-  of failing after allocating it.
-- `W_STREAM_DESYNC` is actually emitted; gap tables are bounded where they
-  really grow; `charge_is_lower_bound` covers every excluded sample, not
-  only gaps; charge uses compensated summation so sub-microamp samples keep
-  contributing to an hours-long total; measuring N annotations no longer
-  walks the whole capture N times; a terminated capture is preserved instead
-  of left as an unreadable temp file; opening a serial port is bounded.
-
-### Changed
-
-- Agent skills, `docs/agent-interface.md`, and `capabilities --json` now
-  carry the contract they describe: the warning catalog is published so an
-  agent can learn what each `W_*` code means from the tool, and the skills
-  cover `--assume-voltage-mv`, `--max-voltage-mv`, `timeline.rate_check`,
-  and `--in-memory`.
-- Codex install instructions describe what exists (loose skills) rather than
-  a plugin manifest that is not published yet.
-- CI runs every example against the simulated device.
-
-### Added (measurement-integrity hardening, 2026-08-19)
+#### Added
 
 Properties that follow from the PPK2's own design — a 6-bit sample counter,
 fixed 4-byte frames with no sync word, and an instrument that measures
@@ -438,8 +477,51 @@ current but never the DUT's voltage — are now enforced and tested
 - `docs/faq.md` answering the ecosystem's recurring questions, including the
   ones whose honest answer is "the hardware cannot do that".
 
-### Fixed
+#### Fixed
 
+Auditing the hardening above against the hardware facts it claims to enforce
+found that parts of it did not hold.
+
+- **A lost byte no longer becomes invented time.** Treating the first
+  counter mismatch as proof of a device-side skip meant a byte-level desync
+  advanced the timeline once per shifted word: a single lost byte inflated a
+  2000-sample stream to 5713 — 3715 phantom samples, 37 ms that never
+  happened. A mismatch is now held until the following samples confirm the
+  framing survived, and the desync verdict always arrives first. Measured
+  phantom samples: 0 at realistic chunk sizes, bounded at 189 for any
+  chunking. Shifted words are discarded instead of being reported as
+  measurements, and unrecoverable bytes are dropped once rather than
+  re-entered word by word.
+- **Stored captures keep their energy.** Artifacts written before voltage
+  provenance existed have no `voltage_basis`; reading them as "unknown"
+  silently voided every source-mode energy figure. The recorded mode now
+  stands in for the missing basis.
+- **An uncalibrated device is no longer reported as starved.** Timeline
+  extent was read from the statistics accumulator, which only advances when
+  samples convert, so a device opened without metadata looked 100% starved
+  and every capture was marked incomplete.
+- **Triggered captures decline the rate check.** Pre-trigger samples are
+  emitted at the fire moment, so wall time covered only the post-trigger
+  window while the timeline covered both — a comparison that could read
+  200 kS/s or hide a 50% loss as healthy. It now reports `not_applicable`.
+- **A failed stream start no longer bricks the handle.** The device was
+  claimed before `start_measuring`, so a transient write error left the
+  claim set and every later command blamed a stream that never began. The
+  claim is also atomic now, and made when the stream is requested rather
+  than when it is first iterated.
+- **An unplugged device is reported as an unplug**, not as a stall: the
+  reader's real error wins over the idle budget even when the queue was full
+  enough to drop its sentinel. The idle budget also measures device silence
+  rather than consumer work.
+- **The in-memory guard cannot be bypassed** by passing an output path, and
+  the read path now refuses to load a capture too large for memory instead
+  of failing after allocating it.
+- `W_STREAM_DESYNC` is actually emitted; gap tables are bounded where they
+  really grow; `charge_is_lower_bound` covers every excluded sample, not
+  only gaps; charge uses compensated summation so sub-microamp samples keep
+  contributing to an hours-long total; measuring N annotations no longer
+  walks the whole capture N times; a terminated capture is preserved instead
+  of left as an unreadable temp file; opening a serial port is bounded.
 - Statistics dropped an unknown-size gap that sat exactly on a window's
   start boundary, letting the window claim it was complete.
 - `run_capture` never armed the stream stall timeout, so a silent device
@@ -452,10 +534,18 @@ current but never the DUT's voltage — are now enforced and tested
 - `PermissionDenied`/`PortBusy` remediation now names the platform's actual
   fix (another app on Windows/macOS, group membership on Linux).
 
-### Changed
+#### Changed
 
+- Agent skills, `docs/agent-interface.md`, and `capabilities --json` now
+  carry the contract they describe: the warning catalog is published so an
+  agent can learn what each `W_*` code means from the tool, and the skills
+  cover `--assume-voltage-mv`, `--max-voltage-mv`, `timeline.rate_check`,
+  and `--in-memory`.
+- Codex install instructions describe what exists (loose skills) rather than
+  a plugin manifest that is not published yet.
 - The simulator defaults to Source Meter mode, matching what real hardware
-  reported during validation (`mode: 2`).
+  reported during validation (`mode: 2`) — and still does: the unit in the
+  2026-08-20 session was found in `source` mode.
 
 ## [0.1.0.dev0] — 2026-08-19
 

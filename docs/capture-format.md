@@ -26,7 +26,10 @@ Validated by the `capture-manifest` schema (`ppk2lab schema
 capture-manifest`). Key sections:
 
 - `capture_id` (uuid), `created_utc`;
-- `device`: serial number, VID/PID, ports, firmware (if known), `simulated`;
+- `device`: serial number, VID/PID, ports, firmware (if known), `simulated`,
+  and `firmware_fingerprint` — the observable identity (`hw`, `ia`,
+  `metadata_keys`, `metadata_key_count`, `port_count`) that a compatibility
+  claim is keyed on, because the measurement port reports no version string;
 - `configuration`: mode, `source_voltage_mv`, `dut_power`, `sample_rate_hz`
   (100000), digital channels, the requested duration/limit, the trigger
   description for triggered captures, and the energy provenance the meter
@@ -55,7 +58,20 @@ capture-manifest`). Key sections:
   `CAPTURE_FILE_INVALID`. A manifest that carries only the four keys above
   is read, but no wall-clock cross-check exists for it — `rate_check` is
   absent rather than `ok`, and the loss class the counter cannot describe is
-  simply unwitnessed for that artifact;
+  simply unwitnessed for that artifact.
+
+  Two things the block does **not** say. `rate_check: ok` is not a claim that
+  the capture is gap-free: on three real 60 s captures that lost between 0.43%
+  and 5.1% of their samples, `rate_check` read `ok` with
+  `unaccounted_samples_estimate` near −230, which was correct — the gap table
+  already accounted for every one of those samples, so the wall-clock witness
+  had nothing to add. Read `gaps` and `complete` for loss; read `rate_check`
+  only for the loss the counter cannot describe. And
+  `unaccounted_floor_samples` is dominated by an *assumed* per-anchor jitter
+  allowance of 0.05 s rather than by anything measured; on real captures it
+  came to 10,182 samples over 3 s and 13,032 over 60 s. It is a floor below
+  which a shortfall proves nothing, deliberately loose, and one unit on one
+  host is not grounds for narrowing it;
 - `calibration`: provenance for the numbers — `calibrated_flag`,
   `metadata_terminated`, `metadata_warnings`, `missing_ranges`,
   `user_gains`. A capture must carry the reason its readings might be
@@ -82,7 +98,16 @@ capture-manifest`). Key sections:
   `stream_stalled` (the port stayed open but samples stopped arriving),
   `trigger_timeout`, `trigger_never_fired`, and `timeline_compression` (the
   timeline advanced far slower than the wall clock, so loss occurred beyond
-  what the 6-bit counter can report);
+  what the 6-bit counter can report).
+
+  `keyboard_interrupt` is wider than its name: a `SIGTERM` from a process
+  manager is caught deliberately — otherwise a terminated capture would leave
+  a half-written temp file with no manifest — and is recorded under the same
+  reason, with no `detail` distinguishing it from Ctrl-C. Measured on
+  hardware: a SIGTERM mid-capture preserved 357,888 samples in a readable
+  artifact and exited 6, leaving no orphan temp file. The imprecise reason
+  string is a known defect, not a subtlety; do not read `keyboard_interrupt`
+  as evidence that a human was at the bench;
 - `stats`: precomputed summary (window-stats schema) for quick inspection —
   always recomputable from the raw samples;
 - `warnings`: coded notes from the capture run, each `{code, message}` (see
@@ -139,7 +164,11 @@ cap = ppk2lab.Capture.load_window("soak.ppk2a", start_s=3600, end_s=3610)
 Bounds are timeline indexes (`start_index`/`end_index`) or seconds from the
 capture's own first sample (`start_s`/`end_s`). Only the chunks the window
 falls in are read, so peak memory follows the window rather than the file.
-`ppk2lab inspect` reads the manifest alone and touches no chunk at all.
+Measured on a real 6,000,000-sample artifact: peak **10.7 MB** for a 0.5 s
+window *and* for a 5 s window — flat, because the floor is one 1,000,000-sample
+chunk, which is CRC-checked whole before it can be sliced — against 35.7 MB to
+read the same file whole. `ppk2lab inspect` reads the manifest alone and
+touches no chunk at all: 0.126 s on that artifact.
 
 Three properties are part of the contract:
 

@@ -69,6 +69,21 @@ you can account for the difference:
    size is set by the arbitrary phase between the DUT's clock and the sample
    clock. `docs/bandwidth.md` shows the worked case.
 
+## Has any of this been checked against a known current?
+
+Once, on one unit, and only coarsely. A 680 kΩ ±5% resistor across VOUT at
+a 3700 mV setpoint should draw 5.4332 uA through that unit's own 1000.625 Ω
+range-0 shunt; eleven captures read between 5.5280 and 5.5614 uA, +2.1% from
+nominal, all in range 0 with no range switches and nothing saturated.
+
+That rules out a gross error and stops there. The resistor's own ±5%
+tolerance puts the true current anywhere in [5.175, 5.719] uA — more than
+twice as wide as the 2.1% deviation being checked — so the comparison cannot
+resolve the instrument's gain error, and it must not be quoted as if it
+could. **No calibrated reference has been used.** `docs/calibration.md`,
+"Known-load cross-check", has the arithmetic and what a real check would
+take.
+
 ## Why is `energy_uj` null?
 
 Because nothing measured the voltage. Energy is `charge x voltage`, and the
@@ -100,10 +115,14 @@ x = (adc - O[r]) * ((1.8 / 163840) / R[r])
 ```
 
 (`docs/calibration.md`), so any ADC code below the range's stored offset
-`O[r]` produces a negative current by construction. At a few hundred
-nanoamps of sleep current — where the noise is comparable to the signal —
-roughly half the samples reading below zero is the expected shape of a
-correctly calibrated zero, not a fault.
+`O[r]` produces a negative current by construction. Measured on one unit
+with nothing connected to VOUT, 60 s per run: mean 0.1633 uA with a minimum
+of −0.2477 uA, and on a second run mean 0.1769 uA with a minimum of
+−0.3356 uA. Negative samples are routine there. That is the shape of a
+correctly calibrated zero at a load the instrument can barely resolve, not a
+fault. (How large a share of samples went negative was not counted, so no
+figure is quoted for it; what was counted is the share below the 200 nA
+distribution floor — below.)
 
 ppk2lab never clamps or rectifies, and that is deliberate: half-wave
 rectifying symmetric noise inflates the reported mean by roughly the noise
@@ -113,14 +132,16 @@ sign-symmetric for the same reason.
 
 One consequence reaches the percentiles. The distribution grid is
 logarithmic, so it has no bin for zero or for a negative reading, and its
-floor is 200 nA. Measured on an unloaded PPK2 over 60 s — mean 0.17 uA,
-minimum −0.25 uA, maximum 0.59 uA — 69% of samples fall below that floor and
-`p50` comes back as exactly 200 nA. That is an upper bound on the median, not
-a measurement of it, so the result names the affected quantiles in
-`distribution.quantiles_at_floor`, warns with `W_BELOW_MEASUREMENT_FLOOR`, and
-prints them `<=`. Near the noise floor, read the mean, the minimum, or charge
-instead — and note that the typical uncertainty agrees independently: at
-0.17 uA the error bar is ±0.22 uA, larger than the reading.
+floor is 200 nA. In those same two runs 69-71% of samples fell below that
+floor and `p50` came back as exactly 200 nA. That is an upper bound on the
+median, not a measurement of it, so the result names the affected quantiles
+in `distribution.quantiles_at_floor`, warns with
+`W_BELOW_MEASUREMENT_FLOOR`, and prints them `<=`. Near the noise floor,
+read the mean, the minimum, or charge instead — and note that the typical
+uncertainty agrees independently: the same runs reported `mean_ua_typical`
+0.2177 uA against a 0.17 uA mean, an error bar of ±123% around the reading.
+The same unit measuring a 5.55 uA load reported no below-floor samples at
+all, so this is a statement about the regime, not about the device.
 
 What a *large or sustained* negative reading does mean is a wiring question,
 not a calibration one: check that the DUT's return current actually flows
@@ -177,6 +198,34 @@ extreme, so unlike `max` it does not drift upward as the capture gets longer.
 If you need the peak, say over what window and with which filtering, and
 expect it to be repeatable only to within the range's accuracy.
 
+## I lost samples on an idle machine. Is that my fault?
+
+Probably not, and it is worth knowing what a quiet host looks like. Measured
+on one host (macOS on Apple silicon, 10 cores) with nothing else running: a
+60 s capture lost 25,792 samples — **0.43%** — in 5 gaps of 4,864 to 5,648
+samples. Every one was `host_overflow`: the host's bounded stream queue
+dropped whole chunks. That is loss on this side of the USB cable, not the
+instrument failing to sample.
+
+Loading the machine deliberately (12 CPU spinners plus continuous disk
+writes) cost 65,024 samples, 1.08%, in 5 gaps of 9,360 to 23,104. The shape
+of the change is the interesting part: the gaps got **larger, not more
+numerous**. A third 60 s capture later in the same session lost 304,847
+samples (5.1%), so the rate follows whatever else the machine is doing
+rather than being a property of the tool or the unit. One host, one unit —
+observations, not a figure to plan against.
+
+In all of those captures `timeline.rate_check` stayed `ok` with
+`unaccounted_samples_estimate` near −230, and that is the right answer: the
+gap table had already accounted for every missing sample, so the wall-clock
+witness had nothing to add. It exists for the loss the 6-bit counter cannot
+see (below), which this was not.
+
+Nothing here is hidden: the gaps are in the manifest with their positions
+and reasons, `charge_is_lower_bound` is set on any window they touch, and
+`ppk2lab inspect run.ppk2a --json` lists them without loading a sample. The
+only lever measured is host load.
+
 ## My capture says `complete: false`. Is the data useless?
 
 No — it is annotated. The samples that arrived are all there; the gaps are
@@ -205,7 +254,8 @@ did not support them, it now declines to give:
   capture that ends 5 ms after the anchor used to be trimmed to the capture
   end and reported `passed`. It now reports `incomplete` with
   `reason_code: "window_past_capture_end"`; the other codes are
-  `sample_gaps`, `window_unpopulated`, and `metric_not_computable`. Every
+  `sample_gaps`, `window_unpopulated`, `metric_not_computable`, and
+  `metric_at_measurement_floor`. Every
   observation also carries `covered_fraction` and `capture_end_sample`.
 - **An anchor is not stitched across a discontinuity.** `after
   uart("TX_DONE")` no longer matches bytes separated by a gap, an
@@ -230,6 +280,14 @@ however quiet the counter stayed, and the capture is marked incomplete with
 `achieved_sample_rate_hz` and `rate_deficit_ratio` reported. Usual causes:
 a loaded host, an unpowered USB hub, or a busy USB controller.
 
+Read `achieved_sample_rate_hz` with the capture's length in mind. Measured
+on one unit and host, the error in anchoring the first sample to wall time is
+a fixed ≈ −2.27 ms, not a drift, so it dominates a short run: the same device
+reported 100076 Hz over 3 s and 100004 Hz over 60 s. With that fixed offset
+removed, the device clock agreed with the host to within about 10 ppm. A
+short capture is not a way to measure the sample rate: 100076 Hz over 3 s is
+the anchoring offset, not the crystal.
+
 ## Why won't it open my hours-long capture?
 
 Recording an hours-long artifact and reading one whole are different
@@ -248,16 +306,21 @@ ppk2lab measure soak.ppk2a --max-samples none --json   # deliberate whole-file l
 ```
 
 `inspect` answers "was this run any good?" — identity, configuration,
-timeline, sample counts, gaps, warnings — without touching a sample.
-Windowed analysis is the usual answer. `--max-samples none` is the escape
-hatch and it means what it says: budget roughly 8 bytes of RAM per stored
-sample.
+timeline, sample counts, gaps, warnings — without touching a sample. On a
+6,000,000-sample artifact it returned in 0.126 s without opening a chunk,
+where reading the same file whole peaked at 35.7 MB. Windowed analysis is
+the usual answer: a window read peaked at 10.7 MB for a 0.5 s window *and*
+for a 5 s one, because the floor is one 1,000,000-sample chunk, which is
+CRC-checked whole before it can be sliced. `--max-samples none` is the
+escape hatch and it means what it says: budget roughly 8 bytes of RAM per
+stored sample.
 
 Decimation (`export --decimate`, `docs/decimation.md`) solves the *file*
-size, not the memory: one hour of raw CSV is about 19 GB, and the same hour
-at `--bucket-ms 100` is 36,000 rows — but the export still reads the samples
-it summarizes, so it obeys the same ceiling. Pair it with `--window`, or with
-`--max-samples none` if you have the RAM.
+size, not the memory: one hour of raw CSV is 18.8 GB at the 52.1 bytes per
+sample measured on a real capture, and the same hour at `--bucket-ms 100` is
+36,000 rows — but the export still reads the samples it summarizes, so it
+obeys the same ceiling. Pair it with `--window`, or with `--max-samples none`
+if you have the RAM.
 
 ## Can it tell me how long my battery will last?
 
@@ -290,7 +353,11 @@ is a measurement; runtime is a projection.
 Firmware 1.2.0 and newer expose a second (shell) CDC port. ppk2lab picks the
 measurement port by USB interface number where the OS reports one, and
 otherwise probes with the read-only metadata command. On macOS, where no
-interface numbers are exposed at all, the probe is the normal path.
+interface numbers are exposed at all, the probe is the normal path — on the
+one unit measured there, `discover` reported both ports with
+`role: "unknown"` and the probe found the measurement port among them.
+Nothing in the port name identifies it, so do not infer the role from the
+path.
 
 ## `PORT_BUSY` / `PERMISSION_DENIED` — what now?
 
@@ -334,6 +401,11 @@ conditional rates warn, experimental rates need an explicit opt-in, and
 anything beyond is refused. Additional low-speed decoders (bit-banged I2C,
 PWM, 1-Wire) are on the roadmap; MHz-class protocols never will be.
 
+"Validated" there names a tier, not a bench result: the boundaries are
+samples-per-bit arithmetic and generated-waveform tests. No decoder in this
+project has yet read a signal from real hardware, so no decoder error rate
+has been measured at any tier.
+
 ## Does anything here power my DUT without asking?
 
 No. Enabling DUT power, changing the source voltage, changing mode, and
@@ -345,6 +417,53 @@ hard ceiling for a fragile DUT:
 ppk2lab configure --device S --max-voltage-mv 3600 --voltage-mv 3300 --apply
 export PPK2LAB_MAX_VOLTAGE_MV=3600   # or session-wide
 ```
+
+## I powered the DUT with `configure --apply`, so why did my capture read zero?
+
+Because DUT power does not outlive the process that enabled it. Measured on
+one unit, varying only how long the serial port stayed closed between
+enabling power and looking again:
+
+| Port closed for | Still powered on reopening |
+|---|---|
+| 0 ms | 3 of 3 |
+| 100 ms | 1 of 3 |
+| 250 ms | 2 of 3 |
+| 500 ms | 0 of 3 |
+| 1000 ms | 0 of 3 |
+| 4000 ms | 0 of 3 |
+
+The device de-energizes VOUT once the USB host goes away, deterministically
+by half a second. That is a fail-safe in the instrument, not a bug in it.
+Mode and source voltage are metadata-backed and do persist; only the output
+drops.
+
+So this sequence cannot work, however cleanly each command exits:
+
+```bash
+ppk2lab configure --device SERIAL --dut-power on --apply   # warns W_DUT_POWER_TRANSIENT
+ppk2lab capture --device SERIAL --duration 10s --output run.ppk2a
+```
+
+`configure` reports `dut_power: true` truthfully — and it stops being true
+about half a second after the process exits, before `capture` has reopened
+the port. `configure --dut-power on --apply` therefore warns
+`W_DUT_POWER_TRANSIENT` instead of promising something it cannot keep.
+
+A powered measurement has to happen inside **one** open session, which means
+the Python API:
+
+```python
+from ppk2lab import PPK2
+
+with PPK2.open(serial_number="SERIAL") as device:
+    device.set_dut_power(True)          # explicit, and only here
+    result = device.capture(duration_s=10.0)
+```
+
+Verify it from the current itself rather than from the return value: this
+hardware cannot report its power state back, which is also why an
+unpowered DUT in Ampere mode reads near zero instead of raising anything.
 
 ## How do I try it without hardware?
 

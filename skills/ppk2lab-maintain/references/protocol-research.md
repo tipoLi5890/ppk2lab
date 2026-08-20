@@ -11,6 +11,23 @@ A specific open question, ideally from `docs/protocol-spec.md`
 "Unverified items" (e.g. "does firmware 1.2.4 respond to opcode X?",
 "metadata variants on hardware revision Y").
 
+The open questions with the most evidence behind them right now, from the
+one hardware session on record — one unit, fingerprint
+`HW=49625 IA=59.0 keys=40 ports=2`, macOS:
+
+- **Why does metadata report `Calibrated: 0` on a unit whose five ranges
+  all carry constants?** Observed and recorded, not explained. It needs a
+  second unit or a second firmware to say whether the flag means anything.
+- **How long does VOUT stay energized after the host closes the port?** Off
+  in every trial from 500 ms, a coin flip at 100-250 ms, still live at
+  0 ms. Established on one unit; whether the threshold is firmware- or
+  hardware-determined is open.
+- **What is the anchoring offset made of?** A fixed ≈ −2.27 ms independent
+  of capture length, with the device clock inside ~10 ppm of the host once
+  it is removed. The assumed `ANCHOR_JITTER_S` was deliberately left
+  untightened: one unit on one host is not grounds for narrowing a safety
+  floor, and narrowing it would weaken a guarantee rather than a guess.
+
 ## Workflow
 
 1. Write the hypothesis and the exact observation that would confirm or

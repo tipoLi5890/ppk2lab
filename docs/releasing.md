@@ -8,9 +8,12 @@ live in `CONTRIBUTING.md`. Read all three first; nothing here overrides them.
 ## 1. Preconditions
 
 - Every release gate in `ROADMAP.md` ("`0.2.0` release gates") is green,
-  including the hardware compatibility matrix and the hardware gates in the
-  gating audit (OS matrix, firmware matrix, UART/SPI error-rate thresholds,
-  soak tests). These cannot be faked or waived.
+  including the gates that need a bench: a physical pass on Windows, macOS,
+  and Linux (gate 3 — macOS on Apple silicon passed 2026-08-20, the other two
+  are open), the UART 9600 / SPI 10 kHz error-rate thresholds on the fixture
+  (gate 4), and the multi-device, hot-unplug and soak columns of the hardware
+  compatibility matrix. These cannot be faked or waived, and `--simulate`
+  cannot close any of them.
 - The `ppk2lab-maintain` release-gating audit
   (`skills/ppk2lab-maintain/references/release-gating.md`) ends with
   **"ready to tag: yes"**, no blockers. On "no", fix the blockers and
@@ -45,9 +48,10 @@ Reproduce the README quickstart commands with `--simulate` /
 `decode`), per `ROADMAP.md` gate 2. Then deactivate and remove the temp venv.
 
 Re-run the dependency license scan and confirm `THIRD_PARTY_NOTICES.md`
-(create it on the first release, update it otherwise) matches the current
-dependency set against the MIT/BSD/Apache-2.0 allowlist — `ROADMAP.md` gate
-6 and gating-audit gate 7.
+matches the current dependency set against the MIT/BSD/Apache-2.0 allowlist,
+each row verified from installed metadata — `ROADMAP.md` gate 6 and
+gating-audit gate 6. The only runtime dependency is `pyserial`; the `dev`
+extra is the rest of the audited set.
 
 If anything here fails, stop, fix it, and re-run the gating audit before
 continuing.
@@ -65,7 +69,8 @@ continuing.
    add a CHANGELOG migration note per the compatibility policy in
    `ROADMAP.md` — do not bump either silently.
 4. Confirm version sync: `ppk2lab --version` (rehearsal venv) ==
-   `_version.py` == the new CHANGELOG heading (gating-audit gate 4).
+   `_version.py` == the new CHANGELOG heading — the gating audit's
+   preconditions check the same three.
 5. Commit locally. Still not a release action.
 
 ## 4. Tag and publish — requires explicit maintainer authorization
@@ -95,8 +100,9 @@ required reviewer, so every upload needs a manual approval click.
 3. Create the GitHub release from the tag
    (`gh release create v0.2.0 --notes-from-tag`). Publishing the release
    triggers `release.yml`, which verifies the tag matches
-   `src/ppk2lab/_version.py`, builds, `twine check`s, and — after the
-   `pypi` environment approval — uploads to PyPI.
+   `src/ppk2lab/_version.py`, builds, `twine check`s, asserts the wheel it is
+   about to upload carries `py.typed` and `License-Expression: MIT`, and —
+   after the `pypi` environment approval — uploads to PyPI.
 4. Verify: `pipx install ppk2lab` on a machine with no prior `-e`
    checkout, then `ppk2lab --version`.
 
@@ -107,5 +113,6 @@ required reviewer, so every upload needs a manual approval click.
    `--simulate`, confirming it matches the rehearsal build.
 2. Open a new `## [Unreleased]` section at the top of `CHANGELOG.md` for
    the next cycle.
-3. Update `ROADMAP.md`: remove the work items this release closed, and
-   fill in the hardware compatibility matrix rows it validated.
+3. Update `ROADMAP.md`: remove the work items this release closed, and fill
+   in the compatibility-matrix cells it validated — one row per firmware
+   fingerprint actually attached, never a row for a configuration nobody ran.

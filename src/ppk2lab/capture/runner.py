@@ -314,8 +314,13 @@ def run_capture(
 
     # SIGTERM does not raise, so without this a terminated capture leaves a
     # half-written temp file with no manifest — the whole recording lost
-    # rather than preserved as incomplete.
+    # rather than preserved as incomplete. The signal is recorded because a
+    # process manager killing a CI capture and an operator pressing Ctrl-C are
+    # different causes, and only one of them is a person.
+    terminated_by: list[int] = []
+
     def _on_terminate(signum: int, _frame: Any) -> None:
+        terminated_by.append(signum)
         raise KeyboardInterrupt(f"signal {signum}")
 
     previous_handler: Any = None
@@ -365,8 +370,16 @@ def run_capture(
                     reached_target = True
                     break
     except KeyboardInterrupt:
-        interruption = {"reason": "keyboard_interrupt"}
-        warnings.append(warn(W_INTERRUPTED, "capture interrupted; partial data preserved"))
+        if terminated_by:
+            interruption = {
+                "reason": "terminated",
+                "detail": f"signal {terminated_by[0]}",
+            }
+            detail = "capture terminated by signal; partial data preserved"
+        else:
+            interruption = {"reason": "keyboard_interrupt"}
+            detail = "capture interrupted; partial data preserved"
+        warnings.append(warn(W_INTERRUPTED, detail))
     except StreamStalledError as exc:
         interruption = {"reason": "stream_stalled", "detail": exc.message}
         warnings.append(

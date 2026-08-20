@@ -243,6 +243,7 @@ GAP_CATEGORY: dict[str, str] = {
 #: What ended the capture, for each interruption reason.
 INTERRUPTION_CATEGORY: dict[str, str] = {
     "keyboard_interrupt": "operator",
+    "terminated": "host",
     "transport_error": "transport",
     "stream_stalled": "device",
     "trigger_timeout": "trigger",
@@ -279,6 +280,10 @@ GAP_REASONS: dict[str, str] = {
 #: and same reasoning as :data:`GAP_REASONS`.
 INTERRUPTION_REASONS: dict[str, str] = {
     "keyboard_interrupt": "The operator interrupted the capture; partial data was preserved.",
+    "terminated": (
+        "The process was sent a termination signal — a process manager, a CI timeout, or a "
+        "shutdown rather than a person at a keyboard. Partial data was preserved."
+    ),
     "transport_error": "The serial transport failed (USB disconnect or I/O error).",
     "stream_stalled": "The device kept its serial port open but stopped streaming samples.",
     "trigger_timeout": "The trigger had not fired within --trigger-timeout, so the run aborted.",

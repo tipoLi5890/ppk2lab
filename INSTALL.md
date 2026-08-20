@@ -74,6 +74,11 @@ No driver is needed; the device appears as `/dev/cu.usbmodem*`. If the port
 seems missing, check `System Information > USB` for the device and try
 another cable.
 
+`discover` shows both ports as `role: unknown` here, because macOS reports no
+USB interface numbers for this device. That is expected, not a failure: the
+measurement port is the one the read-only metadata probe answers on. Nothing
+in the port name identifies it, so do not infer the role from the path.
+
 ### Windows
 
 Windows 10+ binds the built-in CDC driver automatically; the device appears
@@ -86,16 +91,23 @@ official Power Profiler app (it holds the port exclusively).
 ppk2lab doctor --json
 ```
 
-runs read-only checks (Python and pyserial versions, enumeration and device
-selection, port open, interrupted-session recovery, device metadata, firmware
-fingerprint, calibration) and prints machine-readable remediation for each
-failure. `ppk2lab doctor --stream-check 1s` optionally starts a one-second
-measurement to verify the 100 kS/s stream rate; it never touches DUT power.
+runs thirteen read-only checks (Python, `ppk2lab` and pyserial versions,
+enumeration, device selection, port open, interrupted-session recovery, device
+metadata, firmware fingerprint, the `Calibrated` flag, user gains, calibration
+constants, and stream rate) and prints machine-readable remediation for each
+failure. The stream-rate check is skipped unless you ask for it:
+`ppk2lab doctor --stream-check 1s` starts a one-second measurement to verify
+the 100 kS/s rate, and it never touches DUT power.
 
 `doctor` exits with the exit code of the first failing check, so
 `ppk2lab doctor --json || exit 1` is a working pre-flight. Checks that report
 `warn` or `skip` stay non-blocking, and `ppk2lab --simulate doctor` always
 exits 0.
+
+After a capture process is killed, the next open drains whatever the device
+was still streaming and `doctor` reports `session_recovery` as a warning
+naming the byte count — 17,412 stale bytes after one SIGKILL mid-capture.
+That is recovery working, not a fault.
 
 Common failures:
 
@@ -106,6 +118,9 @@ Common failures:
 | `PERMISSION_DENIED` | Linux group membership | see udev/group instructions above |
 | `METADATA_INVALID` | firmware/parse mismatch | retry; file a compatibility report |
 | `CAPTURE_TOO_LARGE` | a long capture will not fit in RAM (the file is intact) | `ppk2lab inspect FILE.ppk2a`, `measure --window START:END`, or raise `--max-samples` |
+| both ports show `role: unknown` (macOS) | the OS reports no USB interface numbers to classify them by | not an error; the measurement port is found by a read-only metadata probe. `--port PATH` pins one explicitly |
+| `doctor` warns `calibrated_flag`: `device reports Calibrated: 0` | seen on a working unit whose five ranges all carry constants; unexplained | not blocking — conversion runs and the flag travels into every capture. Send the firmware fingerprint in a compatibility report |
+| a capture reads near zero, with `W_DUT_POWER_UNKNOWN` | the DUT is not powered through the meter, and DUT power does not survive the command that enabled it | enable power and capture inside one open session (`ppk2lab.PPK2`); see `docs/cli-reference.md` |
 
 ## Claude Code plugin
 

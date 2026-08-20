@@ -9,9 +9,12 @@ describes observable behavior only.
 
 - USB CDC ACM; Nordic VID `0x1915`, PPK2 PID `0xC00A`.
 - Firmware 1.2.0+ exposes a second (shell) CDC interface. The measurement
-  port is classified by the lowest USB interface number; when the OS does
-  not expose interface numbers and more than one candidate exists, ppk2lab
-  refuses to guess and asks for an explicit `--port`.
+  port is classified by the lowest USB interface number; when the OS does not
+  expose interface numbers and more than one candidate exists, discovery
+  leaves every role `unknown` rather than guessing, and `PPK2.open()`
+  identifies the measurement port by trying each candidate with the read-only
+  metadata probe (stop + drain + `0x19`). Only when no candidate answers does
+  it fail and ask for an explicit `--port`.
 - Line coding 115200 8N1 by default (the official app's setting). Actual
   throughput (~400 kB/s of sample data) is USB-bound, not UART-bound; the
   baud rate is overridable for behavior testing.
@@ -105,34 +108,126 @@ Host requirements:
   implausibility limit — so an over-range load cannot be caught by any test
   on the converted current. It has to be caught at the ADC code.
 
-## Hardware observations (2026-08-19, one PPK2 on macOS)
+## Hardware observations
+
+Everything below was measured on **one** PPK2 on macOS, in sessions on
+2026-08-19 and 2026-08-20. Every row of a compatibility claim is keyed on the
+firmware fingerprint it was seen under; this one is
+`HW=49625 IA=59.0 keys=40 ports=2`. One unit on one OS is not a matrix — see
+"Unverified items" for what that leaves open.
+
+### Enumeration and port roles
 
 - macOS pyserial exposes no USB interface numbers (`location` is identical
-  for both CDC ports), so port roles cannot be classified passively; the
-  measurement port is identified by a read-only metadata probe (stop +
-  drain + 0x19), which the driver now performs automatically.
-- A device left measuring by an interrupted session keeps streaming (or
-  leaves a large stale buffer in the OS driver); opening therefore always
-  sends stop and drains input before the metadata query.
-- Observed metadata on real hardware: `Calibrated: 0`, R0 ≈ 1000.625 Ω,
-  values printed with 20 decimal places, `HW: 49625`, `IA: 59`, field order
-  differs from older examples (VDD/HW/mode appear before S/I families) —
-  the order-tolerant parser handles all of this.
+  for both CDC ports), so both ports enumerate as `role: unknown` and roles
+  cannot be classified passively. The measurement port was identified by the
+  read-only metadata probe, which the driver performs automatically.
+- VID `0x1915`, PID `0xC00A`, two CDC ports, as documented above.
+
+### Metadata reply
+
+- The reply carried **40 keys**, exactly the families listed under "Metadata
+  reply" above (`Calibrated`, five each of R/GS/GI/O/S/I/UG, `VDD`, `HW`,
+  `mode`, `IA`), with values printed to 20 decimal places and a field order
+  that differs from older examples (VDD/HW/mode appear before the S/I
+  families) — which the order-tolerant parser handles.
+- Shunt resistances on this unit: R0 1000.6250, R1 101.4608, R2 10.2309,
+  R3 0.9629, R4 0.0559 Ω. All five user gains read 1.0.
+- **`Calibrated: 0`, while all five ranges carry complete constants.** The
+  flag's meaning is not hardware-verified, so ppk2lab converts and warns
+  (`doctor` reports `calibrated_flag` as a warning; `W_NOT_CALIBRATED`).
+  Recorded as observed, not explained.
 - The calibration expression is dimensionally amperes (R constants are real
   shunt ohms); the API multiplies by 1e6 to report microamperes
   (docs/calibration.md).
-- Sustained streaming at 100 kS/s: 1 s and 2 s captures completed with zero
-  counter gaps.
+
+### Interrupted sessions
+
+- A device left measuring by an interrupted session keeps streaming (or
+  leaves a large stale buffer in the OS driver); opening therefore always
+  sends stop and drains input before the metadata query.
+- Measured: after a `SIGKILL` mid-capture, the next open discarded **17,412
+  stale stream bytes** and then read metadata cleanly. `doctor` reported
+  `session_recovery` as a warning carrying that exact count.
+
+### Sustained streaming at 100 kS/s
+
+Two 60 s captures, differing only in what else the host was doing:
+
+| host state | missing samples | share | gaps | gap sizes (samples) |
+|---|---|---|---|---|
+| idle | 25,792 | 0.43% | 5 | 4864, 5008, 5136, 5136, 5648 |
+| 12 CPU spinners + continuous disk writes | 65,024 | 1.08% | 5 | 9360, 10288, 10960, 11312, 23104 |
+
+- **Every gap was `host_overflow`** — the host's bounded queue dropped whole
+  chunks. Under load the gaps grew *larger* rather than more numerous. A
+  third 60 s capture later in the same session lost 304,847 samples (5.1%),
+  so the rate follows whatever else the machine is doing and no figure here
+  is a specification.
+- No `counter_skip`, `usb_stall` or `stream_desync` gap has appeared in any
+  recorded hardware session. Those paths are exercised only by the mock
+  transport, so their handling is tested but not witnessed.
+- In all three captures `timeline.rate_check` stayed `ok`, with
+  `unaccounted_samples_estimate` near −230. That is the correct answer, not a
+  miss: the gap table already accounted for every lost sample, so the
+  wall-clock witness had nothing to add. It exists for the loss class the
+  6-bit counter cannot see, which this was not — so `rate_check: ok` is never
+  a claim that a capture is gap-free.
+
+### Sample clock against the host clock
+
+Three captures, varying only length:
+
+| capture | device time | wall measured | difference |
+|---|---|---|---|
+| 3 s | 3.000000 s | 2.997710 s | −2.290 ms |
+| 60 s | 60.000000 s | 59.997747 s | −2.253 ms |
+| 60 s, under load | 60.000000 s | 59.997400 s | −2.26 ms |
+
+- The anchoring error is a **fixed ≈ −2.27 ms**, the same at 3 s and at 60 s,
+  so it is an offset and not a proportional drift. With it removed the device
+  clock agreed with this host to within ~10 ppm.
+- Consequently `achieved_sample_rate_hz` read 100076 Hz over 3 s and
+  100004 Hz over 60 s: on a short capture that field is dominated by the fixed
+  offset, so a short capture is not a way to measure the sample rate.
+
+### DUT power does not outlive the host connection
+
+Varying only how long the serial port stayed closed between enabling DUT
+power and reopening to check it:
+
+| port closed for | powered on reopening |
+|---|---|
+| 0 ms | 3/3 |
+| 100 ms | 1/3 |
+| 250 ms | 2/3 |
+| 500 ms | 0/3 |
+| 1000 ms | 0/3 |
+| 4000 ms | 0/3 |
+
+The device de-energizes VOUT once the USB host goes away — off in every trial
+from 500 ms on. This is a fail-safe in the instrument, not something the host
+asked for. Mode and source voltage are metadata-backed and do persist; only
+the output drops. `configure --dut-power on --apply` therefore warns
+`W_DUT_POWER_TRANSIENT`, and a powered measurement has to happen inside one
+open session.
 
 ## Unverified items (tracked for the hardware matrix)
 
 - Behavior of every legacy opcode on firmware 1.2.4.
 - Byte order of the float in the user-gain command `0x25` (little-endian
-  assumed pending hardware confirmation).
+  assumed pending hardware confirmation; every gain observed so far read 1.0,
+  so nothing has yet depended on it).
 - Measurement-interface identification fields on Windows and Linux (macOS
   requires the metadata probe; other platforms may expose interface
-  numbers).
-- Full metadata field variants across hardware revisions and firmware
-  versions.
-- Counter behavior across long USB stalls.
-- Precision known-load calibration cross-check against the official app.
+  numbers). Nothing here has been run on Windows or Linux hardware.
+- Metadata field variants across hardware revisions and firmware versions:
+  one fingerprint is recorded, which is a single row rather than a matrix.
+- Counter behavior across long USB stalls, and across a hot unplug — the
+  cable has never been pulled mid-capture.
+- Precision known-load calibration cross-check against a calibrated
+  reference. A ±5% resistor check has been run and the reading is consistent
+  with the load, which rules out a gross error and nothing more: the
+  resistor's own tolerance is not small enough to resolve the instrument's
+  gain error. That needs a resistor an order of magnitude tighter, or a
+  calibrated reference (docs/SPEC.md, "Measurement uncertainty").

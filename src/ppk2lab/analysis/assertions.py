@@ -290,6 +290,27 @@ def _matches_in(values: list[int], pattern: list[int]) -> int:
     )
 
 
+#: Result field -> the name `WindowStats.quantiles_at_floor` reports it under.
+_QUANTILE_FIELDS = {"p50_ua": "p50", "p90_ua": "p90", "p99_ua": "p99", "p999_ua": "p999"}
+
+
+def _quantile_name(metric_field: str) -> str | None:
+    return _QUANTILE_FIELDS.get(metric_field)
+
+
+def _verdict_survives_a_lower_truth(op: str, passed: bool) -> bool:
+    """Would this verdict hold for every true value at or below the observed one?
+
+    A quantile served from the grid floor is an upper bound. ``observed <
+    threshold`` passing therefore still holds for any smaller truth, and
+    ``observed > threshold`` failing still holds. The other two combinations
+    would flip, and are not conclusions about the DUT.
+    """
+    if op in ("<", "<="):
+        return passed
+    return not passed
+
+
 def _find_event_windows(
     capture: Capture,
     rule: AssertionRule,
@@ -457,8 +478,26 @@ def evaluate_assertion(
             any_incomplete = True
         else:
             passed = _compare(observed, rule.op, rule.value)
-            observation["status"] = "passed" if passed else "failed"
-            all_passed = all_passed and passed
+            at_floor = _quantile_name(rule.metric) in stats.quantiles_at_floor
+            if at_floor:
+                observation["metric_is_upper_bound"] = True
+            if at_floor and not _verdict_survives_a_lower_truth(rule.op, passed):
+                # The distribution grid has no bin below its floor, so this
+                # quantile bounds the true value from above rather than
+                # measuring it. A verdict that would change for any smaller
+                # true value is a verdict about the floor, not about the DUT.
+                observation["status"] = "incomplete"
+                observation["reason_code"] = "metric_at_measurement_floor"
+                observation["reason"] = (
+                    f"{rule.metric_name} was served from the distribution grid's floor: the "
+                    "true value is at or below the reported one, and this comparison would "
+                    "come out differently for a smaller one. Compare the mean, the minimum, "
+                    "or charge in this regime"
+                )
+                any_incomplete = True
+            else:
+                observation["status"] = "passed" if passed else "failed"
+                all_passed = all_passed and passed
         outcome.observations.append(observation)
 
     if any_incomplete:

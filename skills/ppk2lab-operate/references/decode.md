@@ -4,18 +4,23 @@
 
 D0-D7 sample at a fixed 100 kS/s (~50 kHz bandwidth): pulses < ~10 us can
 be missed, edges quantize to 10 us. This is a low-speed analyzer. Rate
-tiers are enforced by the tool; get current numbers from
-`ppk2lab capabilities --json` (`decoders[].rate_tiers`). Summary: UART
-≤ 9600 validated / 19200 conditional / 38400 experimental (needs
-`--allow-experimental`) / ≥ 57600 refused; SPI ≤ 10 kHz validated /
-≤ 20 kHz conditional / ≤ 40 kHz experimental / above refused. Refuse
-politely beyond that — suggest a MHz-class analyzer.
+tiers are enforced by the tool; read the current limits from
+`ppk2lab capabilities --json` (`decoders[].rate_tiers`, which carries its
+own `note`) rather than from memory. The tiers are ratios of samples to bit
+or clock period at that fixed rate, so beyond the top tier refuse politely
+and suggest a MHz-class analyzer.
 
-The same entry publishes `sync_policy` and `gap_policy` per decoder: read
-them before explaining a decoded result, because they are the two rules
-that decide what counts as data. `decode` has no `--window` — a decoder
-carries sync state across block boundaries — so a long artifact needs
-`--max-samples` (see capture.md).
+**"Validated" is a support tier, not a measured error rate.** No decoder in
+this project has been run against a real signal: there is no MCU fixture,
+so no UART or SPI error rate has been measured on hardware, and the tiers
+are a sampling-ratio policy rather than a result. Say that when a decode is
+being offered as evidence.
+
+The same entry publishes `sync_policy` and `gap_policy` per decoder — the
+two rules that decide what counts as data. Read both before explaining a
+decoded result. `decode` has no
+`--window` — a decoder carries sync state across block boundaries — so a
+long artifact needs `--max-samples` (see capture.md).
 
 ## UART
 
@@ -43,7 +48,10 @@ ppk2lab decode run.ppk2a --uart D0 --baud 9600 --output uart.jsonl --json
   "sample_gap"`, spanning the missing samples. Before this a gap that fell
   between two frames was invisible in decoded output. Expect one extra
   `error` annotation per gap, and expect `measure --group-by kind` to list
-  them under `error`.
+  them under `error`. Budget for several: a 60 s capture on an idle host
+  measured 5 gaps (capture.md), and each one costs a resync as well as an
+  annotation — after a gap the decoder is `unsynced` again until it sees a
+  whole frame time of idle.
 - Searching for a byte pattern: use `ppk2lab.decoders.uart.uart_runs()`,
   which splits the clean byte stream at every discontinuity and returns
   `(data, end_samples)` per run. `uart_bytes()` is its concatenation. A
@@ -96,3 +104,8 @@ ppk2lab measure run.ppk2a --annotations spi.jsonl --group-by transaction --json
 
 Always report: counts, error counts, confidence tier, annotations path, and
 which regions were unrecoverable due to gaps.
+
+Done when: every reported byte or word came from an annotation with an
+empty `errors` list, the unsynced and errored regions are described as
+line activity rather than data, and the report says the decoders carry no
+measured error rate from real hardware.

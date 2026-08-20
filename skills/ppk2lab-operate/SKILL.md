@@ -44,11 +44,27 @@ The CLI is self-describing. Prefer querying it over any static text
 3. `capture` never touches DUT power, and neither does
    `doctor --stream-check` — both only start and stop the sample stream.
    A capture that reads near zero usually means the DUT was never powered
-   through the meter: say so, don't switch power on to "check".
-4. Never pass `--overwrite` without the user confirming replacement.
-5. `observed_after: false` means "requested, not confirmed by the device" —
+   through the meter (point 4 is why): say so, don't switch power on to
+   "check".
+4. **DUT power does not outlive the command that enabled it.** The
+   instrument de-energizes VOUT once the USB host goes away. Measured on
+   hardware, varying only how long the serial port stayed closed: still on
+   in 3 of 3 trials at 0 ms, 1 of 3 at 100 ms, 2 of 3 at 250 ms, and 0 of 3
+   at 500 ms and beyond. Deterministically off by half a second.
+
+   So `configure --dut-power on --apply` cannot power a DUT for a later,
+   separate `capture`. It exits 0, reports `applied: true`, and warns
+   `W_DUT_POWER_TRANSIENT` — and the power is gone before the next process
+   opens the port. **This failure is silent and its output looks fine:**
+   the capture succeeds, reads near zero, and near zero is a plausible
+   sleep current. A powered measurement has to happen inside one open
+   session (`ppk2lab.PPK2` in Python), and the measured current is the only
+   verification available, because this hardware cannot report its power
+   state back.
+5. Never pass `--overwrite` without the user confirming replacement.
+6. `observed_after: false` means "requested, not confirmed by the device" —
    say so. DUT power has no readback at all, so it is always unconfirmed.
-6. A session restores the power state it found when it closes, falling back
+7. A session restores the power state it found when it closes, falling back
    to OFF with a recorded warning if the starting state was unknown. Relay
    those restoration warnings.
 
@@ -67,9 +83,28 @@ field, not a judgement call — work down the list before quoting a number.
 3. **`covered_fraction`** is how much of the window you asked about
    actually holds samples. 0.067 means you are describing 6.7% of the
    question.
-4. **The coded warnings name which of those it was.** The ones that decide
+4. **A quantile can be a bound rather than a measurement.** The
+   distribution grid is logarithmic and starts at 200 nA, so it cannot bin
+   a reading at or below zero — which an unloaded input legitimately
+   produces. Measured on an idle PPK2 over 60 s: 69-71% of samples fell
+   below the floor and `p50` came back as exactly 200 nA, the floor
+   itself. `distribution.quantiles_at_floor` names which quantiles are
+   affected and `W_BELOW_MEASUREMENT_FLOOR` fires. Asked "what is the
+   sleep current", answer with the mean, the minimum, or charge — never
+   with a percentile that bottomed out.
+5. **Sample loss is ordinary, not a fault.** Measured on an otherwise idle
+   macOS host: a 60 s capture lost 25,792 samples (0.43%) in 5 gaps, every
+   one `host_overflow`. With 12 CPU spinners and continuous disk writes the
+   same run lost 1.08% — the gaps got *larger*, not more numerous — and a
+   third run in the same session lost 5.1%. Expect gaps; read
+   `covered_fraction` and `charge_is_lower_bound` before quoting an
+   integral, and report the loss instead of treating it as a device fault.
+   `gap_reasons` in `capabilities --json` says where each loss happened.
+6. **The coded warnings name which of those it was.** The ones that decide
    trust:
    - `W_SAMPLE_GAPS` — samples were lost; `sample_gaps` locates each one.
+   - `W_BELOW_MEASUREMENT_FLOOR` — a reported quantile is served from the
+     grid floor (point 4); it bounds the value from above.
    - `W_WINDOW_UNPOPULATED` — the window extends past the capture's data.
    - `W_CLIPPED` — samples sat on the ADC's full-scale code. The amplitude
      was **pinned, not measured**: the peak is a floor and a flat top is an
@@ -84,19 +119,40 @@ field, not a judgement call — work down the list before quoting a number.
      touched, so `capture_sha256` is `null` instead of claimed.
    - `W_MANIFEST_IMPLAUSIBLE` — a stored manifest states something the
      capture cannot support. It is reported as stored, not corrected.
-5. **The wall clock is the only witness** to a loss of exactly k × 64
+7. **The wall clock is the only witness** to a loss of exactly k × 64
    samples, which the device's 6-bit counter cannot express.
    `timeline.rate_check: "deficit"` reports the coarse case (more than 10%
    short, over at least 2 s); `W_UNACCOUNTED_SAMPLES` reports the finer
    one. Either way, durations and integrals understate reality by more
-   than the gap table shows.
-6. **`energy_uj: null` is an answer, not an error.** The meter never
+   than the gap table shows. When the gap table already accounts for the
+   loss the witness has nothing to add and `rate_check` stays `ok` — that
+   is the expected result, not a missed detection.
+8. **`energy_uj: null` is an answer, not an error.** The meter never
    measures the DUT's voltage. Never present energy without its
    `voltage_basis`.
-7. **Exit code 6 means "cannot be evaluated"** — neither pass nor fail.
+9. **Exit code 6 means "cannot be evaluated"** — neither pass nor fail.
    Rerun the capture; never round it to success.
-8. **Traceability**: quote `capture_id` and `capture_sha256` with every
-   number, so a conclusion stays attached to the evidence it came from.
+10. **Traceability**: quote `capture_id` and `capture_sha256` with every
+    number, so a conclusion stays attached to the evidence it came from.
+    On a windowed read `capture_sha256` is `null` by design
+    (`W_PARTIAL_INTEGRITY`) — quote `capture_id` and say why.
+
+## What has been checked on hardware
+
+One physical session exists: one PPK2, one firmware fingerprint, macOS
+only. It covered discovery, calibration, capture, loss accounting,
+interruption and recovery, the artifact commands, and DUT-power lifetime —
+every hardware figure in this skill and its references comes from it. The
+handful of figures labelled "demo profile" come from `--simulate` and are
+not measurements of anything.
+
+It did **not** cover: any calibrated reference (the cross-check load was a
+±5% resistor, which can show the absence of a gross error and nothing
+finer), Windows or Linux, a second unit, UART or SPI on real signals (there
+is no MCU fixture, so there is no measured decoder error rate), hot unplug,
+multi-device sessions, a load at a range boundary, or any run longer than
+60 s. When a conclusion rests on one of those, say that the project has not
+measured it.
 
 ## Task → reference map
 

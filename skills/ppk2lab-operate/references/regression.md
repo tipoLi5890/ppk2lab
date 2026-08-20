@@ -22,6 +22,18 @@ longer run. A percentile describes a fraction of the distribution and does
 not drift. Use `max_current` only when the rule genuinely is "no sample may
 ever exceed this".
 
+**A low `p50_current` rule needs checking against `measure` first.** Below
+the 200 nA distribution floor a quantile is a bound rather than a
+measurement (analysis.md), and on hardware with nothing drawing current
+`p50` came back as exactly the floor. An assertion observation carries the
+observed value, `covered_fraction` and `capture_end_sample` — it does
+**not** carry `distribution.quantiles_at_floor` or
+`W_BELOW_MEASUREMENT_FLOOR`, so a floor-served quantile passes a
+sleep-current rule with nothing in the report to say so. Run
+`ppk2lab measure CAPTURE --json` on a representative baseline, confirm
+`quantiles_at_floor` is empty at the current the rule targets, and assert
+on `avg_current` or `charge` instead when it is not.
+
 Derive thresholds from a measured baseline plus margin (e.g. baseline mean
 + 20%), never from datasheet hopes. Version the rules in a `rules.json`
 (array of DSL strings or rule objects) next to the firmware. A rule object
@@ -52,9 +64,19 @@ An `incomplete` outcome names why, per observation, in `reason_code`:
 | `window_past_capture_end` | the window as written runs past the end of the capture | capture longer, or shorten `within` — the window is *not* trimmed to fit |
 | `window_unpopulated` | the window's positions hold neither a sample nor a recorded gap | same as above; check `covered_fraction` |
 | `metric_not_computable` | the metric is `null` — usually `energy` with no defensible voltage | pass `--assume-voltage-mv`, or assert on `charge` |
+| `metric_at_measurement_floor` | a quantile threshold the grid could only bound from above; the verdict would flip for a smaller true value | assert on the mean, the minimum, or charge at this current |
 
 Every observation also carries `covered_fraction` and `capture_end_sample`,
 so a report can say exactly how much of the asked-about window existed.
+
+**Expect `incomplete` to happen on healthy hardware.** Ordinary host-queue
+loss is enough: a capture with about 1% missing returned `incomplete` with
+`reason_code: sample_gaps` and `covered_fraction: 0.9892`, and 0.43% loss
+over 60 s was the *idle* rate on the host measured (capture.md). A CI gate
+therefore needs an exit-6 policy decided in advance — retry the capture a
+bounded number of times, or record the run as not evaluated. Both are
+honest. Widening the rule until the gap stops mattering is not: the verdict
+genuinely is unknown from that artifact.
 
 ## Anchors are not matched across a discontinuity
 

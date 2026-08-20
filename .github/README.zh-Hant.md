@@ -21,7 +21,7 @@
 
 - 探索並設定一台或多台 PPK2 裝置；
 - 在同一條同步時間軸上擷取校正後電流與全部 D0-D7 數位狀態；
-- 解碼低速 UART 與 SPI 流量（已驗證 9,600 baud / 10 kHz）；
+- 解碼低速 UART 與 SPI 流量（9,600 baud 與 10 kHz SCLK 是最高的速率分級）；
 - 為一段視窗或一個解碼事件量測電量、能量、峰值電流、延遲與分布（p50/p90/p99），並附上各 range 的典型誤差範圍；
 - 處理小時等級的擷取檔：只讀 manifest 而不載入樣本、只讀單一視窗，或匯出降取樣摘要；
 - 以電流、數位狀態、UART 內容或 SPI transaction 觸發擷取；
@@ -140,7 +140,7 @@ ppk2lab assert capture.ppk2a \
 
 ## 範圍與物理限制
 
-PPK2 的數位輸入以 100 kS/s 取樣，協定解碼因此僅適用低速訊號。初期驗證目標：
+PPK2 的數位輸入以 100 kS/s 取樣，協定解碼因此僅適用低速訊號。分級的界線只取決於每個 bit 在這個固定取樣率下能拿到幾個樣本——10、5 與 2.5——除此之外沒有別的依據。最高一級涵蓋：
 
 - UART 最高 9,600 baud；
 - SPI 時脈最高 10 kHz；
@@ -149,23 +149,25 @@ PPK2 的數位輸入以 100 kS/s 取樣，協定解碼因此僅適用低速訊�
 
 本專案無意取代 MHz 等級的邏輯分析儀。跨越樣本缺口的 frame 一律回報為不完整或無效，絕不宣稱為可信的解碼結果。
 
-> [!IMPORTANT]
-> **本專案產出的任何數值，都尚未與參考儀器比對過。** 這裡的每一個準確度數字都只是重述 Nordic 公布的各量程「典型值」規格，測試中的每一段波形都來自內建模擬器。不確定度一律標記為 `guaranteed: false`，原因正在於此。用實機驗證它，正是 [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md) 中剩下那些發布關卡的用途。
+在 100 kS/s 之下，樣本被 USB 主機丟掉是常態，而每一次擷取都會回報。在某一台 macOS 主機上，60 秒的擷取在機器閒置時遺失 0.43% 的樣本，在同時跑 12 個 CPU 燒機程序與持續磁碟寫入時遺失 1.08%——兩者都是五個整段 chunk 的缺口，而不是零散樣本。同一台主機稍後的另一次 60 秒擷取遺失了 5.1%，可見遺失率取決於機器當下還在做什麼，而不是擷取本身。
 
-| 協定 | 初期支援等級 |
+> [!IMPORTANT]
+> **已經量過一個已知負載；但仍未與校準過的參考儀器比對。** 在某一台裝置既有的 3700 mV 設定點下，於 VOUT 與 GND 之間接上 680 kΩ ±5% 電阻，經過量測器自身 1000.625 Ω 分流電阻的串聯電路應為 5.4332 µA；十一次擷取量到 5.55 µA（5.5280–5.5614 µA），比標稱值高 +2.1%。但電阻本身的容差讓真值可能落在 5.175–5.719 µA 之間，因此這項檢查只能排除嚴重誤差，**無法**解析儀器自身的增益誤差——要解析它，需要精度高一個數量級的電阻，或一台校準過的參考儀器。這裡的每一個準確度數字仍然只是重述 Nordic 公布的各量程「典型值」規格，不確定度一律標記為 `guaranteed: false`，原因正在於此。那次量測只涵蓋一台裝置、一個韌體指紋、僅 macOS，且沒有 MCU 治具，因此下方的 UART 與 SPI 分級仍是「每 bit 幾個樣本」的預算，而不是量測出來的錯誤率。仍未量測的項目請見 [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md)。
+
+| 協定 | 速率分級 |
 |---|---|
-| UART 1,200-9,600 baud | 驗證目標 |
-| UART 19,200 baud | 條件式支援 |
-| UART 38,400 baud | 實驗性 |
-| UART 57,600/115,200 baud | 不宣稱可解碼 |
-| SPI 時脈 10 kHz 以下 | 驗證目標 |
-| SPI 10-20 kHz | 條件式支援 |
-| SPI 20 kHz 以上 | 實驗性或不支援 |
+| UART 1,200-9,600 baud | validated |
+| UART 19,200 baud | conditional |
+| UART 38,400 baud | experimental（需 `--allow-experimental`） |
+| UART 57,600 baud 以上 | unsupported——直接拒絕 |
+| SPI 時脈 10 kHz 以下 | validated |
+| SPI 10-20 kHz | conditional |
+| SPI 20-40 kHz | experimental；40 kHz 以上直接拒絕 |
 
 ## 硬體安全
 
 - 未加 `--apply` 時，`configure` 一律是 dry run。
-- `capture` 絕不會開啟 DUT 電源，也沒有任何選項可以讓它這麼做；要讓 DUT 透過量測器供電，永遠是獨立且明確的 `configure --dut-power on --apply`。
+- `capture` 絕不會開啟 DUT 電源，也沒有任何選項可以讓它這麼做——先執行 `configure --dut-power on --apply` 同樣沒有用，因為主機一關閉序列埠，PPK2 就會讓 VOUT 斷電。在一台裝置上量到的結果是：關閉 0 ms 時仍然通電，100-250 ms 時是擲硬幣，從 500 ms 起每次都已斷電。因此要讓 DUT 透過量測器供電，必須和擷取在同一個開啟中的 session 內完成（Python 中的 `ppk2lab.PPK2`）；`configure --dut-power on --apply` 會發出 `W_DUT_POWER_TRANSIENT` 警告，而不是做出它守不住的承諾。
 - 輸出電壓一律以 `voltage_mv` 表示、對照裝置能力驗證，絕不從 DUT 名稱推測。
 - 模式切換、DUT 電源、輸出電壓與 reset 操作都會回報前後狀態。
 - 結束或失敗時，程式庫會嘗試還原 session 開始時的電源狀態，並記錄還原是否成功。
@@ -237,15 +239,14 @@ Nordic Semiconductor、Power Profiler Kit 與 PPK2 可能是 Nordic Semiconducto
 
 ## 路線圖
 
-第一個穩定版是 `0.2.0`。在那之前仍待完成的是驗證而非實作，而且大多需要實體 PPK2：
+第一個穩定版是 `0.2.0`。在那之前仍待完成的是驗證而非實作。2026-08-20 的一次硬體測試在單一裝置上完成了 macOS 這一關——韌體指紋 `HW=49625 IA=59.0 keys=40 ports=2`，Apple silicon 上的 macOS——其餘大多需要那次測試沒有的硬體：
 
-- 涵蓋 Windows、macOS 與 Linux，對照韌體 1.1.0、1.2.0 與 1.2.4 的作業系統與韌體相容性矩陣，並以每次擷取都會記錄的韌體指紋（fingerprint）作為索引；
-- 使用已知負載，對照官方 Power Profiler app 進行校正交叉驗證；
-- 以真實訊號對照既定的錯誤率門檻，驗證 UART 與 SPI 解碼器；
-- 多裝置 session、拔除後復原，以及 8-24 小時的長時間穩定性測試（soak test）；
-- 對照目前版本驗證 Claude Code 與 Codex 的 skill 安裝流程；
-- 從乾淨環境重現文件與範例；
-- 發布演練、標記版本時重新執行相依套件授權掃描，以及 PyPI 發布本身。
+- 在 Windows 與 Linux 上各跑一次實機測試，那裡的作業系統會提供 macOS 不提供的 USB interface 編號；
+- 第二台裝置與第二個韌體指紋，目前兩者都各只見過一個；
+- 一個能解析增益誤差的交叉驗證：精度比 ±5% 高一個數量級的電阻，或一台校準過的參考儀器；
+- 以 MCU 治具產生的真實訊號，對照既定的錯誤率門檻驗證 UART 與 SPI 解碼器；
+- 拔除後復原、8-24 小時的長時間穩定性測試（soak test）與多裝置 session——另有頻寬掃描與一個會跨越電流量程邊界的負載，兩者仍未量測，但不作為 `0.2.0` 的發布條件；
+- 對照目前版本驗證 Claude Code 與 Codex 的 skill 安裝流程、從乾淨環境重現文件與範例、發布演練、標記版本時重新執行相依套件授權掃描，以及 PyPI 發布本身。
 
 需要硬體的關卡沒有、也不打算有 CI workflow——它們需要接上 PPK2 與治具 MCU——因此由維護者在實機上執行。完成準則、相容性矩陣，以及刻意不做的項目請見 [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md)。
 

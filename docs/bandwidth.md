@@ -228,6 +228,21 @@ is the most common way to get a confidently wrong number out of this
 instrument, and nothing in the artifact records which wiring was used. If it
 matters, record it alongside the capture yourself — the artifact cannot.
 
+## The one hardware figure this page can offer: the noise floor at DC
+
+A hardware session has since run on one unit, and it measured this signal
+path only at DC. With nothing connected to VOUT, 60 s of capture read mean
+0.1633 uA, minimum −0.2477 uA, maximum 0.5867 uA; a second 60 s run read
+0.1769 / −0.3356 / 0.6306. Every sample sat in range 0 and no range switch
+occurred.
+
+That is the floor any ripple measurement stands on — an excursion of a few
+hundred nanoamps in range 0 is the sensor's own noise, whatever frequency
+you attribute it to. It is **not** an answer to the question this page
+asks. A static input says nothing about what the front end does between
+sample instants, and no ripple of any frequency was applied to that unit.
+The tables above remain the point-sampling model.
+
 ## What this project has not measured
 
 **No -3 dB bandwidth figure is stated here, because none has been

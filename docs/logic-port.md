@@ -36,8 +36,10 @@ one sample period are unrecoverable. Consequences:
 
 ## Analysis primitives
 
-The three helpers below live in `ppk2lab.logic`, which `docs/api-baseline.md`
-lists as not frozen: they may change without a `SCHEMA_VERSION` bump. The
+`ppk2lab.logic` is an internal module, with two exceptions:
+`docs/api-baseline.md` lists `edges` and `pulses` in section 4b, so those two
+are frozen with the rest of the public surface. `iter_transitions` is not
+listed and may change without a `SCHEMA_VERSION` bump. The
 `export --format vcd` output is a frozen file format and does not move.
 
 - `iter_transitions(events)` — state changes; the first sample (and the
@@ -55,7 +57,10 @@ lists as not frozen: they may change without a `SCHEMA_VERSION` bump. The
 ## Diagnosing wiring
 
 Suggested checks (the `ppk2lab-operate` skill routes to the same ones in
-`references/diagnostics.md`):
+`references/diagnostics.md`). They are reasoned from the sampling model and
+exercised in tests against generated waveforms: this project has not applied
+a known digital signal to D0-D7 on hardware, because the hardware session
+behind the rest of these docs had no MCU fixture attached.
 
 1. `ppk2lab capture --duration 1s` and export VCD; a floating channel shows
    noise or a constant level regardless of DUT activity.

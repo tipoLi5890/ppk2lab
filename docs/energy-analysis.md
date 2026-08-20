@@ -151,15 +151,25 @@ matters for three reasons a consumer can feel:
   are still binned but counted separately in `above_grid_samples`, because a
   reading there is on the far side of the shunt the hardware was using.
 
-  Measured on an unloaded PPK2 over 60 s: mean 0.17 uA, minimum −0.25 uA,
-  maximum 0.59 uA, and **69% of samples below the floor**. `p50` comes back
-  as exactly 200 nA — the floor — while the true median is somewhere under
-  it. So the result names the affected quantiles in
-  `distribution.quantiles_at_floor`, emits `W_BELOW_MEASUREMENT_FLOOR`, and
-  prints them with a `<=` sign. **In this regime use the mean, the minimum,
-  or charge**; the quantiles have run out of resolution, and the typical
-  uncertainty says so independently — at 0.17 uA the error bar is ±0.22 uA,
-  larger than the reading.
+  Measured on real hardware, one unit, nothing connected to VOUT, 60 s per
+  run: mean 0.1633 uA, minimum −0.2477 uA, maximum 0.5867 uA; a second run
+  0.1769 / −0.3356 / 0.6306. **69-71% of samples fell below the floor**, so
+  `p50` came back as exactly 200 nA — the floor — while the true median is
+  somewhere under it. Every sample was in range 0 and no range switch
+  occurred, so this is the sensor's own noise, not a switching artefact. The
+  result names the affected quantiles in `distribution.quantiles_at_floor`,
+  emits `W_BELOW_MEASUREMENT_FLOOR`, and prints them with a `<=` sign. **In
+  this regime use the mean, the minimum, or charge**; the quantiles have run
+  out of resolution, and the typical uncertainty says so independently — the
+  same runs reported `mean_ua_typical` 0.2177 uA against a 0.17 uA mean,
+  ±123%, the resolution term of the uncertainty model doing its job at the
+  bottom of range 0.
+
+  The negative control matters as much as the finding. The same unit
+  measuring a 680 kΩ resistor at 5.55 uA (docs/calibration.md, "Known-load
+  cross-check") reported `below_grid_samples: 0` and an empty
+  `quantiles_at_floor`: 5.55 uA is 28 times the floor, and the warning stays
+  silent. The flag marks a regime, not a device.
 
 Reported quantiles are clamped into the observed `[min, max]`, so the grid
 never produces a value larger than anything measured. That clamp rescues a
@@ -286,6 +296,7 @@ an unevaluable one carries a `reason_code`:
 | `window_past_capture_end` | extends past the last sample the capture holds |
 | `window_unpopulated` | holds positions carrying neither a sample nor a recorded gap (a triggered capture starts mid-stream) |
 | `metric_not_computable` | is fine, but the metric is `null` (missing calibration, or energy with no defensible voltage) |
+| `metric_at_measurement_floor` | is fine, but the metric is a quantile the grid could only bound from above, and the verdict would flip for a smaller true value |
 
 ### Anchors are not stitched together
 

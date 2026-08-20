@@ -1,7 +1,9 @@
 """Protocol-rate feasibility against the fixed 100 kS/s capture grid.
 
-Support tiers (frozen for 0.2.0, hardware-validated thresholds tracked in
-ROADMAP.md):
+Support tiers (frozen for 0.2.0). The thresholds are sample-count ratios
+against the fixed capture grid, not measured error rates: no decoder in this
+project has yet read a signal from real hardware. "Validated" names the tier's
+intent, and promoting one needs fixture data (see ROADMAP.md).
 
 - ``validated``     >= 10 samples per bit/cycle (UART <= 9600 baud, SPI <= 10 kHz)
 - ``conditional``   >= 5 samples  (UART 19200, SPI <= 20 kHz) — warning attached
@@ -35,6 +37,13 @@ TIER_CONFIDENCE = {
 }
 
 VALIDATED_MIN = 10.0
+#: The rate each tier is *stated* for, which is what documentation, the
+#: ROADMAP table and `capabilities --json` all quote. The grid would allow
+#: slightly more at the same samples-per-bit ratio (10,000 baud rather than
+#: 9,600), but no decoder has read a real signal, so publishing the arithmetic
+#: maximum would invite an agent to treat a rate nobody has tried as validated.
+VALIDATED_MAX_BAUD = 9600
+VALIDATED_MAX_SPI_HZ = 10_000
 CONDITIONAL_MIN = 5.0
 EXPERIMENTAL_MIN = 2.5
 

@@ -42,9 +42,12 @@ absent device. Version sync: `ppk2lab --version` == the value in
    `ppk2lab` invocation in `docs/`, the READMEs, `examples/` and `skills/`
    against the real parser, so a flag that exists only in prose fails the
    suite.
-3. **At least one physical test pass on Windows, macOS, and Linux.**
+3. **At least one physical test pass on Windows, macOS, and Linux.** macOS
+   (Apple silicon) passed on 2026-08-20; Windows and Linux are open.
 4. **UART 9600 and SPI 10 kHz error rates** meet the pre-defined thresholds
-   on the hardware fixture.
+   on the hardware fixture. "Validated" in the decoder tier table names the
+   tier's intent, not a measured rate — confirming the validated tier is
+   part of this gate, not an input to it.
 5. **Provenance.** No source copied from other projects, no unlicensed
    firmware binaries; every fixture self-generated with its method
    recorded.
@@ -63,6 +66,34 @@ absent device. Version sync: `ppk2lab --version` == the value in
 Gates 3 and 4, and the hardware half of gate 8, cannot be faked and cannot
 be closed from a simulated run: `--simulate` exercises the toolchain, not
 the instrument. Report them PENDING, and say which matrix cells are empty.
+
+## What the first hardware session did and did not close
+
+One physical session exists — one PPK2, one firmware fingerprint
+(`HW=49625 IA=59.0 keys=40 ports=2`), macOS on Apple silicon. It covered
+discovery, metadata and calibration, capture and loss accounting,
+interruption and recovery, the `0.2.0` artifact commands, and DUT-power
+lifetime. Treat it as one cell of gate 3 and nothing more:
+
+- **Gate 3 stays PENDING.** macOS (Apple silicon) is recorded as passed for
+  that fingerprint; Windows, Linux and macOS (Intel) have no pass at all,
+  so the gate as written is not met.
+- **Gate 4 stays PENDING** and is not close: there is no MCU fixture, so no
+  UART or SPI error rate has been measured on real signals at all.
+- **The hardware half of gate 8 stays PENDING**, as do multi-device, hot
+  unplug, and the 8-24 h soak — the longest capture in the session was
+  60 s.
+- **Absolute accuracy remains unverified.** The one known-load check used a
+  ±5% resistor: it rules out a gross error and cannot resolve the
+  instrument's gain error. Never let it be recorded as a calibration
+  cross-check.
+
+The compatibility matrix is keyed on the firmware fingerprint, because the
+measurement port reports no version string — one row per fingerprint
+actually attached, and no row for a configuration nobody ran. Audit it that
+way: an empty cell is the correct record of an unrun configuration, not a
+hole to fill, and an observation that cannot be tied to a fingerprint is
+unattributed rather than assignable to a row.
 
 Output: a gate-by-gate table (gate, evidence, PASS/FAIL/PENDING) ending
 with "ready to tag: yes/no (blockers: …)". Never mark a gate passed on

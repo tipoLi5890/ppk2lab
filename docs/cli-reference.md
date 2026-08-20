@@ -71,9 +71,17 @@ ppk2lab doctor [--device SERIAL] [--stream-check 1s] [--json]
 ```
 
 Checks Python, pyserial, enumeration, device selection, device open,
-metadata, the firmware fingerprint, and calibration. `--stream-check` opts
-into a short measurement (start/stop only — never DUT power) verifying the
-100 kS/s rate and gap-free streaming.
+interrupted-session recovery, metadata, the firmware fingerprint, the
+`Calibrated` flag, user gains, and calibration constants. `--stream-check`
+opts into a short measurement (start/stop only — never DUT power) verifying
+the 100 kS/s rate. It reports gaps but can only `warn` about them: sample loss
+over USB happens on an idle host — 0.43% over 60 s in the one session measured
+— so a gap is information about the host, not a failed check.
+
+`session_recovery` warns, rather than passing quietly, when the previous
+session left the device streaming; it names the exact number of stale stream
+bytes discarded at open. On real hardware after a `SIGKILL` mid-capture that
+was 17,412 bytes.
 
 **`doctor` exits nonzero when a check fails**, so `ppk2lab doctor --json ||
 exit` works as a pre-flight gate. Every check carries its own `exit_code`
@@ -114,11 +122,12 @@ readback status. Out-of-range voltage exits 8
 (`VOLTAGE_OUT_OF_RANGE`) before any byte reaches the device.
 
 **DUT power does not outlive this command.** The device de-energizes VOUT
-once the host closes the serial port — measured at under half a second on
-real hardware — so `--dut-power on --apply` cannot leave a DUT powered for a
-later `capture`, which would then measure an unpowered board. The command
-warns (`W_DUT_POWER_TRANSIENT`) rather than implying otherwise. Mode and
-source voltage are metadata-backed and do persist.
+once the host closes the serial port — measured off in every trial once the
+port had been closed for 500 ms, and already a coin flip at 100-250 ms — so
+`--dut-power on --apply` cannot leave a DUT powered for a later `capture`,
+which would then measure an unpowered board. The command warns
+(`W_DUT_POWER_TRANSIENT`) rather than implying otherwise. Mode and source
+voltage are metadata-backed and do persist.
 
 To take a powered measurement, hold one open session and do both there:
 
@@ -151,7 +160,11 @@ confirms that is intended.
 The result also carries a `timeline` block cross-checking the sample
 timeline against the wall clock; a capture that advanced far slower than
 100 kS/s lost samples the 6-bit counter could not report and is marked
-incomplete (exit 6).
+incomplete (exit 6). `timeline.rate_check: ok` is **not** a claim that the
+capture is gap-free: three real 60 s captures that lost between 0.43% and
+5.1% of their samples to host overflow all reported `ok`, correctly — the gap
+table had already accounted for that loss, so the wall-clock witness had
+nothing to add. Read `complete` and the gap list for loss.
 
 Trigger specs: `current>10mA`, `current<5uA`, `digital D3 rising`,
 `digital mask=0x0f value=0x05`, `uart D0 9600 "BOOT"`, `spi 0x9f,0x00`
@@ -239,8 +252,10 @@ The window block also carries:
 - `distribution.quantiles_at_floor` names any reported quantile served from
   the grid floor rather than measured — it bounds the true value from above.
   When it is non-empty the result carries `W_BELOW_MEASUREMENT_FLOOR` and the
-  human output marks the value `<=`. Expect it on a lightly loaded input: an
-  unloaded PPK2 reads below the 200 nA floor about 69% of the time.
+  human output marks the value `<=` (`p50 <=200 nA`). Expect it on a lightly
+  loaded input: over 60 s with nothing drawing current, 69-71% of samples read
+  below the 200 nA floor, so `p50` was the floor and not a measurement. Use
+  the mean, the minimum, or charge in that regime.
 - `current_ua.p50/p90/p99/p999` alongside mean/min/max, plus a `distribution`
   block naming the log-spaced grid they came from (`bins_per_decade`,
   `grid_min_ua`, `grid_max_ua`, `quantile_half_width_fraction`, and the
@@ -306,6 +321,7 @@ and — when it could not be evaluated — a `reason_code`:
 | `window_past_capture_end` | the window ends after the capture does |
 | `window_unpopulated` | the window is not fully populated with samples |
 | `metric_not_computable` | missing calibration, or an unknown source voltage |
+| `metric_at_measurement_floor` | the metric is a quantile served from the distribution grid's floor, and this comparison would come out differently for a smaller true value |
 
 An anchor is never matched across a discontinuity. A `uart("TX_DONE")`
 pattern spanning a gap, an unsynchronized frame, or a frame error is not
@@ -338,9 +354,9 @@ inline gap records. Exports are derived views; the artifact remains the
 evidence.
 
 All three formats are written to a temp file beside `--output` and moved into
-place, so an export that fails part-way — running out of space is the
-ordinary case at raw CSV's tens of bytes per sample — leaves any previous
-file at that path untouched.
+place, so an export that fails part-way — running out of space is the ordinary
+case at raw CSV's 52.1 bytes per sample, measured on a real capture — leaves
+any previous file at that path untouched.
 
 ### `--window START:END` — export a slice
 
@@ -382,10 +398,14 @@ carries `bucket_samples`, `bucket_ms` and `buckets`. VCD is refused: it
 carries only the digital lines, where a bucket has no meaning. Format details
 in docs/decimation.md.
 
-One hour of capture is roughly 19 GB of raw CSV, which is what this exists
-for. Note what it does *not* do: decimation shrinks the output, not the read.
-The capture is still materialized, so `--max-samples` still applies —
-combine it with `--window` to bound both.
+One hour of capture is 360 million samples; at the 52.1 bytes per sample
+measured on a real capture that is about 18.8 GB of raw CSV, which is what
+this exists for. A decimated record measured 130.9 bytes on the same data, so
+one-second buckets turn that hour into roughly 470 kB.
+
+Note what it does *not* do: decimation shrinks the output, not the read. The
+capture is still materialized, so `--max-samples` still applies — combine it
+with `--window` to bound both.
 
 ### Size before writing
 
@@ -411,5 +431,12 @@ ppk2lab measure soak.ppk2a --max-samples 50000000
 
 Exceeding the ceiling exits 2 with `CAPTURE_TOO_LARGE` — a distinct code
 from `CAPTURE_FILE_INVALID`, because an 8-hour soak artifact is intact and
-needs no repair. Use `ppk2lab inspect` to read such a file's manifest
-without loading anything.
+needs no repair. On a whole-file load the message names the sample count, the
+span in units that suit it (`s`, `min` or `h`), the RAM the load would need,
+and the ceiling it exceeded, so the caller can decide between raising the
+ceiling and reading a window. The refusal on a `--window` load is less
+informative: it reports the count and then fixed `h` and `GB` units — a
+15,000-sample window reads `(0.0 h)` and `roughly 0.0 GB of RAM` — and does
+not name the ceiling. Branch on the `CAPTURE_TOO_LARGE` code, not on the
+message. Use `ppk2lab inspect` to read such a file's manifest without loading
+anything.

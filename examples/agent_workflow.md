@@ -42,21 +42,48 @@ Rules for the agent:
 
 ```bash
 ppk2lab configure --device <serial> --mode source --voltage-mv 3300 --json
-# review the projected state, then apply deliberately. --dut-power on belongs
-# here only when the user asked for it; nothing enables it for you:
-ppk2lab configure --device <serial> --mode source --voltage-mv 3300 --dut-power on --apply --json
+# review the projected state, then apply deliberately:
+ppk2lab configure --device <serial> --mode source --voltage-mv 3300 --apply --json
 ```
 
 The result records `requested`, `before`, `after`, and whether the after
 state was actually read back (`observed_after`). DUT power cannot be read
 back from metadata; the result says so instead of pretending.
 
-`--dut-power on` belongs in the command line only when the user asked for it.
 Nothing turns DUT power on for you: `configure` without `--apply` is a dry run,
 `capture` never touches power, and `doctor --stream-check` only starts and
 stops the sample stream. When the session closes, the library restores the
 power state it found, falling back to OFF with a recorded warning if the
 starting state was unknown.
+
+### DUT power does not survive the command that enabled it
+
+Mode and source voltage are metadata-backed and persist across processes.
+VOUT does not: the instrument de-energizes it once the USB host goes away.
+Measured by varying only how long the port stayed closed — still on in 3 of 3
+trials at 0 ms, 1 of 3 at 100 ms, 2 of 3 at 250 ms, and 0 of 3 at 500 ms and
+beyond. Deterministically off by half a second.
+
+So `configure --dut-power on --apply` followed by a separate `capture` does
+not produce a powered measurement, and it fails silently: `configure` exits 0
+with `applied: true` and warns `W_DUT_POWER_TRANSIENT`, then the capture reads
+near zero — which is exactly what a good sleep-current result looks like. A
+powered measurement has to stay inside one open session:
+
+```python
+from ppk2lab import PPK2, Mode
+
+with PPK2.open(serial_number="<serial>") as dev:   # or simulate=True
+    dev.set_mode(Mode.SOURCE)
+    dev.set_source_voltage_mv(3300)
+    dev.set_dut_power(True)                        # only on explicit request
+    result = dev.capture(duration_s=5.0, output="run.ppk2a")
+print(result.stats.mean_ua, result.complete)
+```
+
+This hardware cannot report its power state back, so the measured current is
+the only verification there is: a plausible non-zero draw is the evidence that
+power was on, and nothing else is.
 
 ## 3. Capture (measurement; never enables DUT power)
 
@@ -68,6 +95,13 @@ Check `result.complete`. If false, the capture has gaps or was interrupted;
 `result.stats.sample_gaps` lists every loss with its timeline index. Exit
 code 6 signals an incomplete capture. Durations accept `us`, `ms`, `s`,
 `min` and `h`, so a soak run is `--duration 8h`.
+
+Expect some loss. Measured over 60 s on an otherwise idle macOS host: 25,792
+samples missing (0.43%) in 5 gaps, every one `host_overflow`. Under CPU and
+disk load the same run lost 1.08%, with gaps that were larger rather than more
+numerous, and a third run in that session lost 5.1%. Gaps are marked, counted
+and located; report them instead of treating them as a device fault, and check
+`gap_reasons` in `capabilities --json` when the reason is not `host_overflow`.
 
 Triggered capture:
 
@@ -129,10 +163,18 @@ Before reporting any figure, read these fields:
 | `complete` | gap-free **and** populated; a window past the capture's data is `false` |
 | `charge_is_lower_bound` | samples were excluded — gap, unpopulated span, clipping, or a wall-clock deficit |
 | `covered_fraction` | how much of the requested window actually holds samples |
+| `distribution.quantiles_at_floor` / `W_BELOW_MEASUREMENT_FLOOR` | the named percentiles came from the 200 nA grid floor; they bound the value, they do not measure it |
 | `saturated_samples` / `W_CLIPPED` | the reading was pinned at full scale, not measured; `max` is a floor |
 | `W_UNACCOUNTED_SAMPLES` | wall time witnesses loss the gap table cannot localize |
 | `timeline.rate_check` | `deficit` means loss beyond what the 6-bit counter can express |
 | `voltage_basis` / `energy_uj: null` | the meter never measures the DUT's voltage |
+
+Asked "what is the sleep current" on a near-idle DUT, answer with the mean,
+the minimum, or charge. Measured on hardware with nothing drawing current,
+69-71% of samples over 60 s fell below the grid floor and `p50` came back as
+exactly 200 nA — the floor, not a reading. `assert` compares the number
+without that flag attached, so check `measure --json` before writing a
+percentile rule at that level.
 
 ## 7. Assert for regression testing
 
@@ -174,3 +216,14 @@ Every error carries a stable `code` and a `remediation` string:
 ```
 
 The agent should act on `remediation`, not on parsing the human message.
+
+## 9. Say what has not been measured
+
+The hardware figures above come from one session: one PPK2, one firmware
+fingerprint, macOS. Not covered by it — a calibrated reference (the one
+known-load check used a ±5% resistor, which rules out a gross error and
+nothing finer), Windows or Linux, a second unit, UART or SPI on real signals
+(there is no MCU fixture, so no decoder error rate has been measured), hot
+unplug, multi-device sessions, a load at a range boundary, and any run longer
+than 60 s. When a conclusion depends on one of those, report it as unmeasured
+rather than assumed.

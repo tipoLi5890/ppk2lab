@@ -16,7 +16,7 @@ from ppk2lab.decoders.base import decode_capture
 from ppk2lab.decoders.spi import SPIDecoder
 from ppk2lab.decoders.uart import UARTDecoder, uart_runs
 from ppk2lab.errors import UsageError
-from ppk2lab.testing.profiles import ArrayProfile, StepProfile
+from ppk2lab.testing.profiles import ArrayProfile, ConstantProfile, StepProfile
 from ppk2lab.testing.signals import merge_logic, spi_wave, uart_wave
 
 from .conftest import capture_of, wave_capture
@@ -340,3 +340,70 @@ def test_rule_json_refuses_uncomparable_input(bad):
     """
     with pytest.raises(UsageError):
         AssertionRule.from_json(bad)
+
+
+# ---------------------------------------------------------------------------
+# A quantile served from the grid floor is a bound, not a measurement
+
+
+def floor_capture():
+    """A distribution straddling the 200 nA grid floor, gap-free.
+
+    This is the shape a lightly loaded input really has — measured on hardware
+    at 69% of samples below the floor with the peaks above it. It matters that
+    the maximum is above the floor: when the *whole* distribution sits below,
+    the [min, max] clamp pulls the quantile down to the observed maximum and it
+    becomes a real measurement again. Only a straddling distribution leaves the
+    quantile sitting on the floor itself.
+    """
+    return capture_of(StepProfile([(1400, 0.05, 0), (600, 0.5, 0)]), samples=2000)
+
+
+@pytest.mark.parametrize(
+    ("rule_text", "status"),
+    [
+        # The observed value bounds the truth from above, so a verdict that
+        # holds for every smaller value is still a verdict about the DUT.
+        ("p50_current < 1uA", "passed"),
+        ("p50_current <= 1uA", "passed"),
+        ("p50_current > 1uA", "failed"),
+        ("p50_current >= 1uA", "failed"),
+        # These two would flip for a smaller truth, so they decide nothing.
+        ("p50_current < 100nA", "incomplete"),
+        ("p50_current > 100nA", "incomplete"),
+    ],
+)
+def test_a_floor_served_quantile_only_decides_what_a_bound_can(rule_text, status):
+    outcome = evaluate_assertion(floor_capture(), parse_rule(rule_text))
+    observation = outcome.observations[0]
+    assert observation["status"] == status
+    assert observation["metric_is_upper_bound"] is True
+    if status == "incomplete":
+        assert observation["reason_code"] == "metric_at_measurement_floor"
+
+
+def test_a_metric_clear_of_the_floor_is_not_flagged():
+    """False-alarm guard: the ordinary case must not gain a caveat."""
+    capture = capture_of(ConstantProfile(1000.0), samples=2000)
+    for rule_text in ("p50_current < 2mA", "mean_current < 2mA", "max_current > 1uA"):
+        observation = evaluate_assertion(capture, parse_rule(rule_text)).observations[0]
+        assert observation["status"] == "passed"
+        assert "metric_is_upper_bound" not in observation
+
+
+def test_a_non_quantile_metric_is_never_treated_as_a_bound():
+    """Only the quantiles come off the grid; the mean is summed directly."""
+    observation = evaluate_assertion(
+        floor_capture(), parse_rule("mean_current < 1uA")
+    ).observations[0]
+    assert observation["status"] == "passed"
+    assert "metric_is_upper_bound" not in observation
+
+
+def test_a_distribution_wholly_below_the_floor_measures_again():
+    """When nothing is above the floor, the clamp pulls the quantile to the
+    observed maximum, which is a measurement rather than a grid artefact."""
+    capture = capture_of(ConstantProfile(0.05), samples=2000)
+    observation = evaluate_assertion(capture, parse_rule("p50_current < 100nA")).observations[0]
+    assert observation["observed"] == pytest.approx(0.05, rel=0.2)
+    assert observation["status"] == "passed"

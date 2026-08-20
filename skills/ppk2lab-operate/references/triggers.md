@@ -34,9 +34,11 @@ trigger description for reproducibility.
 - Less than `pre` existed before the fire → window starts at the first
   available sample; manifest `start_index` shows the truth.
 - Gaps reset hold counts and content-decoder state — a trigger cannot fire
-  on missing data. UART/SPI content triggers inherit the decoder rate
-  tiers (see `ppk2lab capabilities --json`), including
-  `--allow-experimental` gating.
+  on missing data, and gaps are routine: 5 in a 60 s capture on an idle
+  host (capture.md). A long `--trigger-hold` on a busy host can therefore
+  be reset repeatedly before it ever completes. UART/SPI content triggers
+  inherit the decoder rate tiers (see `ppk2lab capabilities --json`),
+  including `--allow-experimental` gating.
 - **A content trigger only fires on evidence that was actually on the
   wire.** A UART pattern cannot fire before the decoder has seen a
   confirmed idle run — at stream start, after a gap, and after a break, the
@@ -50,3 +52,14 @@ trigger description for reproducibility.
   UART content trigger to ignore whatever was mid-transmission when the
   capture began. Give the DUT a quiet moment before the event you want, or
   trigger on something else and search the decode afterwards.
+
+A content trigger runs the same decoders as `decode`, and those have never
+been fed a real signal — there is no MCU fixture, so no content trigger has
+a measured hardware result (decode.md). A trigger that does not fire is
+therefore ambiguous between "the DUT did not send it" and "the decode of
+this signal is not what was assumed"; capture untriggered and decode
+offline to tell them apart.
+
+Done when: the result reports `trigger.fired` and, if it fired,
+`fire_index` and the window actually recorded — and a trigger that did not
+fire is reported as "not observed", never as "did not happen".

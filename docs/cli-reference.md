@@ -113,6 +113,25 @@ state. With `--apply`, each change reports requested/before/after and
 readback status. Out-of-range voltage exits 8
 (`VOLTAGE_OUT_OF_RANGE`) before any byte reaches the device.
 
+**DUT power does not outlive this command.** The device de-energizes VOUT
+once the host closes the serial port — measured at under half a second on
+real hardware — so `--dut-power on --apply` cannot leave a DUT powered for a
+later `capture`, which would then measure an unpowered board. The command
+warns (`W_DUT_POWER_TRANSIENT`) rather than implying otherwise. Mode and
+source voltage are metadata-backed and do persist.
+
+To take a powered measurement, hold one open session and do both there:
+
+```python
+with ppk2lab.PPK2.open(serial_number="...") as dev:
+    dev.set_dut_power(True)              # explicit, never implicit
+    result = dev.capture(duration_s=5.0)
+# the session restores the starting power state on close
+```
+
+Verify from the current itself; this hardware cannot report its power state
+back, which is why every such change carries `observed_after: false`.
+
 ## capture — measurement (never enables DUT power)
 
 ```bash

@@ -259,24 +259,26 @@ incomplete) is the usual new outcome, and every case names its reason.
   calibration raise `CalibrationUnavailableError` instead of a bare
   `ValueError`, which escaped every documented handler.
 
-### Known issues
+### Hardware behaviour worth knowing
 
-- **`configure --dut-power on --apply` does not reliably reach the hardware.**
-  Measured on real hardware against a 680 kΩ load: the CLI reports `exit 0`,
-  `applied: true`, and an after-state of `dut_power: true`, yet a capture
-  immediately afterwards shows the DUT unpowered in roughly a third to a half
-  of attempts, in clusters rather than at random. The same operation through
-  the Python API in one process was reliable 11 times out of 11. The capture
-  side is not implicated — driving `configure` from the CLI and the capture
-  from the library reproduces it. It is not a toggle, not an idle timeout, and
-  not the write-buffer race fixed above, whose repair left the rate unchanged.
-  Root cause not identified; recorded rather than guessed at.
+- **DUT power does not outlive the process that enabled it.** Measured against
+  a 680 kΩ load: with the serial port closed for 0 ms the output is still live,
+  at 100–250 ms it is a coin flip, and from 500 ms on it is off every time. The
+  device de-energizes VOUT once the USB host goes away — a sensible fail-safe
+  in the instrument, and the same principle ppk2lab applies on its own side.
 
-  This is only visible at all because DUT power is the one state the PPK2
-  cannot report back, so the result already carries `observed_after: false`
-  and `W_STATE_UNVERIFIED` — the honesty of that contract is what made the
-  gap detectable. Until it is understood: drive powered sequences through the
-  Python API, or verify with a short capture after enabling power.
+  The consequence is that `configure --dut-power on --apply` **cannot** leave a
+  DUT powered for a later, separate `capture`: the result says
+  `dut_power: true` and that stops being true about half a second after the
+  command exits. `configure --dut-power on --apply` now warns
+  (`W_DUT_POWER_TRANSIENT`) instead of making a promise it cannot keep. A
+  powered measurement has to happen inside one open session — `ppk2lab.PPK2` in
+  Python — and should be verified from the current itself, since this hardware
+  cannot report its power state back.
+
+  This was first mistaken for an intermittent bug in `configure`: it reports
+  exit 0 and `applied: true` every time, and whether the DUT is still powered
+  a moment later came down to how fast the next process reopened the port.
 
 ### Changed
 

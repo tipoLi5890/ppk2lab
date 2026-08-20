@@ -68,6 +68,13 @@ Every state-changing operation returns:
 `observed_after=false` means the "after" state is the requested state, not a
 device readback (DUT power is in this category — metadata cannot report it).
 
+DUT power is also the one state that does not persist beyond the session. The
+device de-energizes VOUT shortly after the host closes the port — measured at
+under half a second, deterministically off by 500 ms — so a powered
+measurement has to happen inside one open session. Mode and source voltage are
+metadata-backed and survive. This is why the fail-safe on close costs nothing:
+the hardware was going to drop the output anyway.
+
 ### Concurrency
 
 One `PPK2` handle owns one serial port and is **not** safe to use from two

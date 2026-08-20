@@ -666,3 +666,24 @@ def test_window_and_annotations_are_refused_rather_than_one_ignored(flow, capsys
     assert code == 2
     assert payload["error"]["code"] == "INVALID_ARGUMENT"
     assert "cannot be combined" in payload["error"]["message"]
+
+
+def test_enabling_dut_power_says_it_will_not_outlive_the_command(capsys):
+    """The device drops VOUT once the host closes the port.
+
+    Measured on hardware at under half a second, so `configure --dut-power on
+    --apply` cannot leave a DUT powered for a later `capture`. The result
+    reports `dut_power: true`, which stops being true moments after the
+    process exits — the warning is what keeps that from being a false promise.
+    """
+    code, payload = run_json(
+        capsys, "--simulate", "--json", "configure", "--dut-power", "on", "--apply"
+    )
+    assert code == 0
+    assert "W_DUT_POWER_TRANSIENT" in {w["code"] for w in payload["warnings"]}
+
+    # A dry run changed nothing, and turning power off has nothing to lose.
+    _, dry = run_json(capsys, "--simulate", "--json", "configure", "--dut-power", "on")
+    assert "W_DUT_POWER_TRANSIENT" not in {w["code"] for w in dry["warnings"]}
+    _, off = run_json(capsys, "--simulate", "--json", "configure", "--dut-power", "off", "--apply")
+    assert "W_DUT_POWER_TRANSIENT" not in {w["code"] for w in off["warnings"]}

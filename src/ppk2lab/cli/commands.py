@@ -43,6 +43,7 @@ from ..diagnostics import (
     W_DECODER_RATE,
     W_DEVICE_NOT_FOUND,
     W_DRY_RUN,
+    W_DUT_POWER_TRANSIENT,
     W_GAP_TABLE_TRUNCATED,
     W_GENERIC,
     W_INTERRUPTED,
@@ -680,6 +681,22 @@ def cmd_configure(args: Any) -> Outcome:
         if args.dut_power is not None:
             changes.append(device.set_dut_power(args.dut_power == "on", dry_run=dry_run))
         warnings: list[Diagnostic | str] = []
+        if args.dut_power == "on" and not dry_run:
+            # The device de-energizes VOUT once the host closes the port —
+            # measured at under half a second — so this command cannot leave a
+            # DUT powered for a later, separate one. Saying so is the whole
+            # point: the result reports dut_power true, and that stops being
+            # true moments after the process exits.
+            warnings.append(
+                warn(
+                    W_DUT_POWER_TRANSIENT,
+                    "DUT power is enabled now, but the device drops VOUT shortly after this "
+                    "command closes the port, so a later `capture` would measure an "
+                    "unpowered DUT. Take a powered measurement inside one open session "
+                    "(ppk2lab.PPK2 in Python), and verify it from the current itself — "
+                    "this hardware cannot report its power state back",
+                )
+            )
         if dry_run:
             warnings.append(
                 warn(

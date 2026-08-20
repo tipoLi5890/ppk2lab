@@ -68,6 +68,9 @@ W_STATE_UNVERIFIED = "W_STATE_UNVERIFIED"
 W_DRY_RUN = "W_DRY_RUN"
 #: A previous session had left the device streaming; stale data was discarded.
 W_SESSION_RECOVERED = "W_SESSION_RECOVERED"
+#: DUT power was enabled but will not outlive this process: the device
+#: de-energizes VOUT shortly after the host closes the port.
+W_DUT_POWER_TRANSIENT = "W_DUT_POWER_TRANSIENT"
 
 # -- analysis ----------------------------------------------------------------
 #: A decoder is running outside its validated rate tier.
@@ -163,6 +166,13 @@ WARNING_CATALOG: dict[str, str] = {
     W_SESSION_RECOVERED: (
         "A previous session had left the device streaming; stale data was discarded."
     ),
+    W_DUT_POWER_TRANSIENT: (
+        "DUT power was enabled, but the device de-energizes VOUT shortly after the host "
+        "closes the serial port — measured at under half a second on real hardware. A "
+        "separate command that runs later will therefore measure an unpowered DUT. Take "
+        "a powered measurement inside one open session (the Python API), not across two "
+        "CLI invocations."
+    ),
     W_DEVICE_NOT_FOUND: "No device matched the discovery filter.",
     W_DECODER_RATE: "A decoder is running outside its validated rate tier.",
     W_TRIGGER: "A trigger never fired.",
@@ -204,6 +214,7 @@ WARNING_CATEGORY: dict[str, str] = {
     W_STATE_UNVERIFIED: "device state",
     W_DRY_RUN: "device state",
     W_SESSION_RECOVERED: "device state",
+    W_DUT_POWER_TRANSIENT: "device state",
     W_DECODER_RATE: "analysis",
     W_TRIGGER: "analysis",
     W_DECIMATED: "analysis",

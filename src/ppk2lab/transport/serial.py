@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import sys
 import threading
@@ -76,8 +77,21 @@ class SerialTransport(Transport):
         self._serial = outcome
         self._timeout = 0.1
 
+    def flush(self) -> None:
+        if self._serial is None:
+            return
+        # pyserial's flush is tcdrain: it blocks until the kernel has handed
+        # every queued byte to the device.
+        with contextlib.suppress(Exception):
+            self._serial.flush()
+
     def close(self) -> None:
         if self._serial is not None:
+            # Drain first. Closing a tty may discard queued output, and a
+            # state-changing command lost that way is reported as applied
+            # while the hardware never sees it — measured intermittently on
+            # real hardware, where two of six DUT-power commands vanished.
+            self.flush()
             try:
                 self._serial.close()
             finally:

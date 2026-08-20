@@ -162,6 +162,7 @@ class _FakeSerial:
         self.closed = False
         self._data = bytearray(b"\x01\x02\x03\x04")
         self.timeout_assignments = 0
+        self.flushed_before_close = False
 
     def __setattr__(self, name, value):
         if name == "timeout" and "timeout_assignments" in self.__dict__:
@@ -179,6 +180,9 @@ class _FakeSerial:
 
     def write(self, data):
         return len(data)
+
+    def flush(self):
+        self.flushed_before_close = not self.closed
 
     def close(self):
         self.closed = True
@@ -292,3 +296,30 @@ def test_simulator_rejects_an_impossible_chunk_size_with_a_typed_error():
         SimulatedPPK2(metadata_chunk_bytes=0)
     assert isinstance(excinfo.value, Ppk2labError)
     assert excinfo.value.code == "INVALID_ARGUMENT"
+
+
+def test_close_drains_the_write_buffer_first(monkeypatch):
+    """A command byte still in the OS buffer has not reached the device.
+
+    Closing a tty may discard queued output. Every command the PPK2 answers
+    proves its own delivery through the reply, but DUT power has no readback
+    at all, so a write lost at close would be reported as applied and never
+    contradicted by anything.
+    """
+    _install_fake_serial(monkeypatch)
+    transport = SerialTransport("/dev/fake")
+    transport.open()
+    handle = transport._serial
+    transport.write(b"\x0d\x01")
+    transport.close()
+    assert handle.flushed_before_close is True
+
+
+def test_flush_on_a_closed_transport_is_a_no_op(monkeypatch):
+    """Cleanup runs on paths where the port is already gone."""
+    _install_fake_serial(monkeypatch)
+    transport = SerialTransport("/dev/fake")
+    transport.flush()  # never opened
+    transport.open()
+    transport.close()
+    transport.flush()  # already closed

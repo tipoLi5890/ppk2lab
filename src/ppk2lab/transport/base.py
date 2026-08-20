@@ -16,6 +16,17 @@ class Transport(abc.ABC):
     def close(self) -> None:
         """Close the channel; idempotent."""
 
+    def flush(self) -> None:
+        """Block until everything written has actually left the host.
+
+        A command byte sitting in the OS write buffer has not reached the
+        device, and closing the port can discard it. That is invisible for
+        every command the PPK2 answers — the reply proves delivery — but DUT
+        power has no readback at all, so nothing else would ever surface a
+        lost write. Default is a no-op for transports that cannot buffer.
+        """
+        return None
+
     @abc.abstractmethod
     def write(self, data: bytes) -> None:
         """Write all of ``data`` to the device."""

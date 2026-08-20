@@ -176,6 +176,13 @@ incomplete) is the usual new outcome, and every case names its reason.
 
 ### Fixed
 
+- **The serial transport drains before closing.** A command byte still in the
+  OS write buffer has not reached the device, and closing a tty may discard
+  it. Every command the PPK2 answers proves its own delivery through the
+  reply — but DUT power has no readback at all, so a write lost this way would
+  be reported as applied and never contradicted. (This is a real hole, closed
+  defensively; it is *not* the cause of the `configure` intermittency recorded
+  under Known issues, whose rate it did not change.)
 - **A percentile at the grid floor said so.** Found on real hardware: an
   unloaded PPK2 reads below the distribution grid's 200 nA floor about 69% of
   the time (measured over 60 s: mean 0.17 µA, minimum −0.25 µA, maximum
@@ -251,6 +258,25 @@ incomplete) is the usual new outcome, and every case names its reason.
 - Uncalibrated ranges, unknown source voltages, and captures with no
   calibration raise `CalibrationUnavailableError` instead of a bare
   `ValueError`, which escaped every documented handler.
+
+### Known issues
+
+- **`configure --dut-power on --apply` does not reliably reach the hardware.**
+  Measured on real hardware against a 680 kΩ load: the CLI reports `exit 0`,
+  `applied: true`, and an after-state of `dut_power: true`, yet a capture
+  immediately afterwards shows the DUT unpowered in roughly a third to a half
+  of attempts, in clusters rather than at random. The same operation through
+  the Python API in one process was reliable 11 times out of 11. The capture
+  side is not implicated — driving `configure` from the CLI and the capture
+  from the library reproduces it. It is not a toggle, not an idle timeout, and
+  not the write-buffer race fixed above, whose repair left the rate unchanged.
+  Root cause not identified; recorded rather than guessed at.
+
+  This is only visible at all because DUT power is the one state the PPK2
+  cannot report back, so the result already carries `observed_after: false`
+  and `W_STATE_UNVERIFIED` — the honesty of that contract is what made the
+  gap detectable. Until it is understood: drive powered sequences through the
+  Python API, or verify with a short capture after enabling power.
 
 ### Changed
 

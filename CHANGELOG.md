@@ -176,6 +176,20 @@ incomplete) is the usual new outcome, and every case names its reason.
 
 ### Fixed
 
+- **A percentile at the grid floor said so.** Found on real hardware: an
+  unloaded PPK2 reads below the distribution grid's 200 nA floor about 69% of
+  the time (measured over 60 s: mean 0.17 µA, minimum −0.25 µA, maximum
+  0.59 µA), so `p50` came back as exactly 200 nA with nothing to distinguish
+  it from a measurement. The grid is logarithmic and cannot bin a reading at
+  or below zero, which an unloaded input legitimately produces. Affected
+  quantiles are now named in `distribution.quantiles_at_floor`, carry
+  `W_BELOW_MEASUREMENT_FLOOR`, and print with a `<=` sign. The clamp into the
+  observed `[min, max]` was documented as covering this and does not: it
+  rescues a floor-bin quantile only when the whole distribution sits below the
+  floor, because it is the maximum that pulls the value down.
+- **`CAPTURE_TOO_LARGE` described a one-minute capture as "0.0 h" needing
+  "0.0 GB of RAM".** The units now scale to the size being refused, and the
+  message names the ceiling it exceeded.
 - **The wall-clock witness survived neither a read nor a write.** A read/write
   round trip cut the manifest's timeline block from 11 keys to 4, and
   `capture.save()` never wrote it at all, so a 6.79% deficit reloaded as

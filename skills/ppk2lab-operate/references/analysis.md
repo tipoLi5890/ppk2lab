@@ -26,6 +26,11 @@ they differ by orders of magnitude on the same capture:
 
 - **mean** answers *how long will the battery last* — it is charge over
   time, the only figure that integrates correctly.
+- **Check `distribution.quantiles_at_floor` before quoting a percentile.**
+  Below 200 nA the log grid has no bin, so a quantile listed there is the
+  floor, not a measurement, and `W_BELOW_MEASUREMENT_FLOOR` says so. On a
+  near-idle input most samples land below the floor; report the mean, the
+  minimum, or charge instead of a percentile that bottomed out.
 - **p50** (`median_current`) answers *what is my sleep current* — the value
   the DUT actually sits at.
 - **p90 / p99 / p999** answer *how bad do the bursts get* without resting on

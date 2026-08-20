@@ -588,10 +588,22 @@ def read_capture(
     with ArtifactReader(path) as reader:
         stored = reader.stored_count
         if max_samples is not None and stored > max_samples:
-            hours = stored / reader.sample_rate_hz / 3600
+            # Fixed h/GB formatting rendered a one-minute capture as
+            # "0.0 h ... 0.0 GB of RAM", which reads as a refusal for no
+            # reason. Scale both to the size actually being refused.
+            seconds = stored / reader.sample_rate_hz
+            span = (
+                f"{seconds / 3600:.1f} h"
+                if seconds >= 3600
+                else f"{seconds / 60:.1f} min"
+                if seconds >= 60
+                else f"{seconds:.1f} s"
+            )
+            need = stored * 8
+            memory = f"{need / 1e9:.1f} GB" if need >= 1e9 else f"{need / 1e6:.0f} MB"
             raise CaptureTooLargeError(
-                f"capture holds {stored:,} samples ({hours:.1f} h); loading it whole would "
-                f"need roughly {stored * 8 / 1e9:.1f} GB of RAM"
+                f"capture holds {stored:,} samples ({span}); loading it whole would "
+                f"need roughly {memory} of RAM, above the {max_samples:,}-sample ceiling"
             )
         meta = reader.read_meta()
         stored_warnings = _stored_warnings(reader)

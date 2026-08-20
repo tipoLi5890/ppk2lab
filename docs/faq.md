@@ -111,6 +111,17 @@ amplitude, which on a sub-microamp measurement is the entire quantity you
 were trying to measure. The plausibility filter bounds magnitude only and is
 sign-symmetric for the same reason.
 
+One consequence reaches the percentiles. The distribution grid is
+logarithmic, so it has no bin for zero or for a negative reading, and its
+floor is 200 nA. Measured on an unloaded PPK2 over 60 s — mean 0.17 uA,
+minimum −0.25 uA, maximum 0.59 uA — 69% of samples fall below that floor and
+`p50` comes back as exactly 200 nA. That is an upper bound on the median, not
+a measurement of it, so the result names the affected quantiles in
+`distribution.quantiles_at_floor`, warns with `W_BELOW_MEASUREMENT_FLOOR`, and
+prints them `<=`. Near the noise floor, read the mean, the minimum, or charge
+instead — and note that the typical uncertainty agrees independently: at
+0.17 uA the error bar is ±0.22 uA, larger than the reading.
+
 What a *large or sustained* negative reading does mean is a wiring question,
 not a calibration one: check that the DUT's return current actually flows
 through the meter, and re-read `voltage_basis` and `energy_note` in the

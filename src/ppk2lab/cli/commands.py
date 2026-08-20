@@ -209,10 +209,14 @@ def _fmt_stats(stats: dict[str, Any]) -> str:
             f"min {format_si(current['min'], 'A')}, max {format_si(current['max'], 'A')}"
         )
         if current.get("p50") is not None:
-            lines.append(
-                f"  distribution: p50 {format_si(current['p50'], 'A')}, "
-                f"p90 {format_si(current['p90'], 'A')}, p99 {format_si(current['p99'], 'A')}"
-            )
+            # A quantile served from the grid floor bounds the true value from
+            # above; the sign says so rather than letting it read as measured.
+            at_floor = set((stats.get("distribution") or {}).get("quantiles_at_floor") or ())
+            parts = [
+                f"{name} {'<=' if name in at_floor else ''}{format_si(current[name], 'A')}"
+                for name in ("p50", "p90", "p99")
+            ]
+            lines.append("  distribution: " + ", ".join(parts))
     if stats.get("charge_uc") is not None:
         charge = format_with_uncertainty(stats["charge_uc"], uncertainty.get("charge_uc_typical"))
         lines.append(f"  charge: {charge} uC")

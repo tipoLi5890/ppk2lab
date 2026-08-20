@@ -55,6 +55,9 @@ W_CALIBRATION_INCOMPLETE = "W_CALIBRATION_INCOMPLETE"
 W_USER_GAIN = "W_USER_GAIN"
 #: Device metadata could not be fully parsed.
 W_METADATA = "W_METADATA"
+#: A reported quantile sits at the distribution grid floor: it bounds the
+#: true value from above rather than measuring it.
+W_BELOW_MEASUREMENT_FLOOR = "W_BELOW_MEASUREMENT_FLOOR"
 
 # -- device state ------------------------------------------------------------
 #: DUT power state is unknown or off; readings may legitimately be near zero.
@@ -145,6 +148,13 @@ WARNING_CATALOG: dict[str, str] = {
     ),
     W_USER_GAIN: "A non-unity user gain scales every reading in the affected ranges.",
     W_METADATA: "Device metadata could not be fully parsed.",
+    W_BELOW_MEASUREMENT_FLOOR: (
+        "Enough samples fell below the distribution grid's floor that a reported quantile "
+        "is served from the floor itself. The grid starts at the finest step the most "
+        "sensitive range can resolve and is logarithmic, so it cannot represent a reading "
+        "at or below zero — and an unloaded input legitimately produces those. The affected "
+        "quantiles bound the true value from above; they do not measure it."
+    ),
     W_DUT_POWER_UNKNOWN: (
         "DUT power state is unknown or off; readings may legitimately be near zero."
     ),
@@ -189,6 +199,7 @@ WARNING_CATEGORY: dict[str, str] = {
     W_CALIBRATION_INCOMPLETE: "measurement trust",
     W_USER_GAIN: "measurement trust",
     W_METADATA: "measurement trust",
+    W_BELOW_MEASUREMENT_FLOOR: "measurement trust",
     W_DUT_POWER_UNKNOWN: "device state",
     W_STATE_UNVERIFIED: "device state",
     W_DRY_RUN: "device state",

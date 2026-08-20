@@ -217,6 +217,11 @@ instead.
 
 The window block also carries:
 
+- `distribution.quantiles_at_floor` names any reported quantile served from
+  the grid floor rather than measured — it bounds the true value from above.
+  When it is non-empty the result carries `W_BELOW_MEASUREMENT_FLOOR` and the
+  human output marks the value `<=`. Expect it on a lightly loaded input: an
+  unloaded PPK2 reads below the 200 nA floor about 69% of the time.
 - `current_ua.p50/p90/p99/p999` alongside mean/min/max, plus a `distribution`
   block naming the log-spaced grid they came from (`bins_per_decade`,
   `grid_min_ua`, `grid_max_ua`, `quantile_half_width_fraction`, and the

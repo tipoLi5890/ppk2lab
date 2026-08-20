@@ -142,16 +142,31 @@ matters for three reasons a consumer can feel:
   error, about a tenth of the instrument's own typical ±10%, and it is
   published as `distribution.quantile_half_width_fraction` rather than left
   for you to guess.
-- **The grid has a floor.** Below 200 nA — the instrument's own range 0
-  resolution — there is no bin. Those samples are counted in
+- **The grid has a floor, and the sub-microamp regime runs into it.** Below
+  200 nA — the instrument's own range 0 resolution — there is no bin, and a
+  logarithm has nothing to say about a reading at or below zero, which an
+  unloaded input legitimately produces. Those samples are counted in
   `distribution.below_grid_samples`, and a quantile served from them is
-  reported at the floor or at the observed minimum, whichever is lower. It is
-  an upper bound, not an estimate. Readings above 1 A are still binned but
-  are counted separately in `above_grid_samples`, because a reading there is
-  on the far side of the shunt the hardware was using.
+  reported at the floor: an upper bound, not an estimate. Readings above 1 A
+  are still binned but counted separately in `above_grid_samples`, because a
+  reading there is on the far side of the shunt the hardware was using.
 
-Reported quantiles are always clamped into the observed `[min, max]`: the
-grid never produces a value that was not measured.
+  Measured on an unloaded PPK2 over 60 s: mean 0.17 uA, minimum −0.25 uA,
+  maximum 0.59 uA, and **69% of samples below the floor**. `p50` comes back
+  as exactly 200 nA — the floor — while the true median is somewhere under
+  it. So the result names the affected quantiles in
+  `distribution.quantiles_at_floor`, emits `W_BELOW_MEASUREMENT_FLOOR`, and
+  prints them with a `<=` sign. **In this regime use the mean, the minimum,
+  or charge**; the quantiles have run out of resolution, and the typical
+  uncertainty says so independently — at 0.17 uA the error bar is ±0.22 uA,
+  larger than the reading.
+
+Reported quantiles are clamped into the observed `[min, max]`, so the grid
+never produces a value larger than anything measured. That clamp rescues a
+floor-bin quantile only when the *whole* distribution sits below 200 nA, since
+it is the maximum that pulls the value down. A distribution straddling the
+floor — the ordinary noisy case above — gets no help from it, which is why
+the affected quantiles are named explicitly instead.
 
 ## Duty-cycle decomposition
 

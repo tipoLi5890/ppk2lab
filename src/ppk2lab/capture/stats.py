@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from ..diagnostics import (
+    W_BELOW_MEASUREMENT_FLOOR,
     W_CLIPPED,
     W_GAP_TABLE_TRUNCATED,
     W_UNACCOUNTED_SAMPLES,
@@ -292,10 +293,16 @@ def _quantile_from_bins(
 
     ``bins[0]`` holds everything at or below the grid floor — zero, negative
     readings, and anything under the instrument's own 200 nA resolution — so a
-    quantile landing there is an upper bound, not an estimate. Clamping the
-    result into the observed [min, max] is what makes that honest in the
-    common case: a DUT whose whole sleep current sits under 200 nA reports its
-    own measured minimum rather than the grid floor.
+    quantile landing there is an upper bound, not an estimate.
+
+    The [min, max] clamp recovers that only when the whole distribution lies
+    below the floor: the observed maximum is then under 200 nA and pulls the
+    value down to it. A distribution that *straddles* the floor gets no such
+    help, and that is the ordinary case for a lightly loaded input — measured
+    on an unloaded PPK2, 69% of samples read below 200 nA while the peaks read
+    above it, so the quantile is reported as the floor exactly. Which quantiles
+    that affects is published as ``quantiles_at_floor`` and warned about, since
+    the number alone cannot say whether it was measured or bounded.
     """
     if total <= 0:
         return None
@@ -492,6 +499,22 @@ class WindowStats:
                     "table hit its ceiling, so individual missing spans cannot all be located",
                 )
             )
+        at_floor = self.quantiles_at_floor
+        if at_floor:
+            share = self.below_grid_samples / self.valid_samples
+            out.append(
+                warn(
+                    W_BELOW_MEASUREMENT_FLOOR,
+                    f"{share:.1%} of samples read at or below the {QUANTILE_MIN_UA} uA grid "
+                    f"floor, so {', '.join(at_floor)} "
+                    f"{'reports' if len(at_floor) == 1 else 'report'} the floor rather than a "
+                    "measured value: the true quantile is at or below it. The grid is "
+                    "logarithmic and starts at the finest step the most sensitive range "
+                    "resolves, so readings at or below zero — which an unloaded input "
+                    "legitimately produces — have "
+                    "no bin. Use the mean, the minimum, or charge for this regime",
+                )
+            )
         if self.saturated_samples:
             detail = ", ".join(
                 f"range {r}: {n:,}" for r, n in enumerate(self.saturated_per_range) if n
@@ -521,6 +544,30 @@ class WindowStats:
                 )
             )
         return out
+
+    #: The quantiles ``to_json`` publishes, with the level each one reports.
+    QUANTILE_LEVELS: ClassVar[tuple[tuple[str, float], ...]] = (
+        ("p50", 0.5),
+        ("p90", 0.9),
+        ("p99", 0.99),
+        ("p999", 0.999),
+    )
+
+    @property
+    def quantiles_at_floor(self) -> list[str]:
+        """Reported quantiles served from the grid floor rather than measured.
+
+        A quantile is at the floor when its rank falls inside the below-floor
+        bin, so the same rank arithmetic as :func:`_quantile_from_bins` decides
+        it — the two cannot disagree about which numbers are bounds.
+        """
+        if not self.valid_samples or not self.below_grid_samples:
+            return []
+        return [
+            name
+            for name, q in self.QUANTILE_LEVELS
+            if max(1, math.ceil(q * self.valid_samples)) <= self.below_grid_samples
+        ]
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -556,6 +603,7 @@ class WindowStats:
                 "quantile_half_width_fraction": QUANTILE_HALF_WIDTH_FRACTION,
                 "below_grid_samples": self.below_grid_samples,
                 "above_grid_samples": self.above_grid_samples,
+                "quantiles_at_floor": self.quantiles_at_floor,
             },
             "state_split": None if self.state_split is None else self.state_split.to_json(),
             "uncertainty": None if self.uncertainty is None else self.uncertainty.to_json(),

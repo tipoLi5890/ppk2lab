@@ -161,6 +161,9 @@ _WINDOW_STATS = _obj(
                 "quantile_half_width_fraction": {"type": "number"},
                 "below_grid_samples": {"type": "integer"},
                 "above_grid_samples": {"type": "integer"},
+                # Reported quantiles served from the grid floor: they bound the
+                # true value from above rather than measuring it.
+                "quantiles_at_floor": {"type": "array", "items": {"type": "string"}},
             }
         ),
         # Null unless a state threshold was asked for: the split is a function

@@ -2,7 +2,9 @@
 
 import asyncio
 import contextlib
+import gc
 import itertools
+import time
 
 import pytest
 
@@ -93,15 +95,51 @@ def test_async_with_releases_the_device_when_the_body_raises():
 
 def test_bare_async_for_releases_the_device_when_the_body_raises():
     """The plain `async for` form is frozen public surface, so abandoning it
-    must not leave the device claimed and the PPK2 measuring while the event
-    loop waits to finalize a generator."""
+    must give the device back — once nothing is holding the iterator.
+
+    That qualifier is the whole test. `AsyncStreamIterator` is deliberately a
+    plain object rather than an async generator, so Python calls nothing when
+    the loop is abandoned; what returns the claim is `StreamIterator.__del__`.
+    Whether that runs depends on what still references the iterator, and an
+    abandoned `async for` can leave it reachable from the frame that ran the
+    loop — which is exactly what `_require_no_active_stream` warns about when
+    it says a named iterator held alive by a stored traceback keeps the device
+    claimed.
+
+    So the loop runs in a frame of its own, and the release is waited for
+    rather than sampled at one instant. Two measured facts on Linux CI say
+    why the wait is the honest assertion — both are properties of CPython's
+    finalization, not of this library's contract:
+
+    * the abandoned frame, its exception and its traceback form a cycle, so
+      dropping the last reference needs a collection, and one `gc.collect()`
+      is not guaranteed to be the collection that runs `__del__`; and
+    * a collection runs on whichever thread allocated into a full generation,
+      so `StreamIterator.__del__` was seen running on an `asyncio.to_thread`
+      worker while this frame read the state — reading it mid-release.
+
+    Sampled once, the assertion failed on 6-14% of runs across 3.11, 3.13 and
+    3.14 alike; it is not a version quirk.
+    """
 
     async def scenario():
         adev = await _open()
         async with adev:
-            with pytest.raises(RuntimeError):
-                async for _event in adev.stream(sample_limit=1_000_000):
-                    raise RuntimeError("consumer failed")
+
+            async def abandon():
+                with pytest.raises(RuntimeError):
+                    async for _event in adev.stream(sample_limit=1_000_000):
+                        raise RuntimeError("consumer failed")
+
+            await abandon()
+            deadline = time.monotonic() + 5.0
+            while True:
+                gc.collect()
+                released = not adev.device._stream_active and not adev.state.measuring
+                if released or time.monotonic() >= deadline:
+                    break
+                # Yield: the release may be in flight on another thread.
+                await asyncio.sleep(0.01)
             return adev.device._stream_active, adev.state.measuring
 
     assert asyncio.run(scenario()) == (False, False)

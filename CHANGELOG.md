@@ -8,6 +8,102 @@ project uses semantic versioning once released.
 
 Nothing yet.
 
+## [0.4.0] — 2026-08-21
+
+A minor release that adds a second shipped package and no new behaviour to the
+existing one. `SCHEMA_VERSION` stays `"1"` and the capture `format_version`
+stays `1`: nothing was removed, renamed, or given a new meaning, and every
+`0.3.0` reader still reads a `0.4.0` result.
+
+### Added
+
+- **A second importable top-level package, `ppk2lab_web`.** `pip install
+  ppk2lab` now installs `ppk2lab/` and `ppk2lab_web/`, where the second holds
+  a built browser console — roughly 360 kB of JavaScript and CSS — and one
+  accessor, `static_dir()`, which returns the directory holding it or raises
+  `FileNotFoundError` naming how to rebuild it.
+
+  **There is no way to run it in this release.** No `web` extra, no
+  `ppk2lab-web` script, no subcommand: the CLI still has exactly thirteen
+  commands. The HTTP/WebSocket server that will own the one open `PPK2`
+  session is not written. What ships is the frontend, finished, waiting for
+  it. `docs/webui.md` says what is there and what it cannot do; `ROADMAP.md`
+  tracks what is left.
+
+  The console is a viewer first: opening it changes nothing, controls that
+  change hardware state are hidden until unlocked, and every change goes
+  through a dry-run preview. Applying a configuration change while VOUT is
+  energised drops the output before the settings move, because changing the
+  source voltage under load changes what the DUT receives.
+
+- `py.typed` for `ppk2lab_web`, which the distribution's `Typing :: Typed`
+  classifier had been promising for it without shipping it.
+
+- Frontend sources in `webui/` (React, TypeScript, Vite; 29 unit tests over
+  the decimator, the distribution grid and the chart geometry). They are **not**
+  part of the distribution — neither the wheel nor the sdist carries them —
+  because rebuilding the bundle needs a Node toolchain an sdist cannot supply.
+
+### Fixed
+
+- **A stream gave the device back before it had stopped using it.** The
+  teardown in `PPK2.stream()` cleared the claim first and only then stopped the
+  reader, stopped the measurement and drained the port. `_require_no_active_stream`
+  is what keeps a second reader off a handle, so for the length of that
+  teardown — up to the two-second reader join — the handle read as idle while
+  it was still working. A `stream()` started in that window was admitted, called
+  `start_measuring()`, and was then stopped again by the outgoing stream's own
+  `stop_measuring()`, or had the head of its 4-byte framing eaten by the
+  outgoing drain. Neither leaves a trace in the resulting capture. The claim is
+  now released last, from a `finally` of its own, so a handle reads as free only
+  once the port is quiet. A second `stream()` during a teardown now raises
+  `UsageError` where it used to be admitted and silently spoiled.
+
+  This is not new in `0.4.0`; it has been there since `0.2.0`. What found it was
+  CI: `StreamIterator.__del__` runs this teardown, and a collection runs on
+  whichever thread filled a generation, so on Linux runners it was recorded
+  running on an `asyncio.to_thread` worker while another thread read the handle
+  as idle.
+
+- **`THIRD_PARTY_NOTICES.md` said something that was no longer true.** It
+  claimed no third-party source code was vendored into the repository, while
+  the committed bundle compiles React, react-dom and scheduler into a file that
+  ships in every wheel. The audit now covers both scopes, and the build keeps
+  the upstream MIT notices inside the shipped bundle instead of letting the
+  minifier strip them.
+
+- **`.claude-plugin/plugin.json` was still `0.2.0.dev0`.** Release gate 7
+  requires it to match the package version and it was missed at both `0.2.0`
+  and `0.3.0`; the release workflow now fails on a mismatch rather than
+  trusting a checklist step.
+
+- `tests/test_api_baseline.py` filtered documented names by a `ppk2lab.`
+  prefix, so any entry for the second package would have been skipped
+  silently while the test still reported green.
+
+- Package data for `ppk2lab_web` used a single-level glob. Anything the
+  bundler placed in a subdirectory would have been dropped from the wheel with
+  every test passing.
+
+- Eight documents referred readers to "the Unreleased CHANGELOG entry" for the
+  artifact-writer loss fix, which shipped in `0.3.0`.
+
+- `AGENTS.md` still told agents the project was local-only, which stopped being
+  true when the repository was published.
+
+### Changed
+
+- CI and the release workflow rebuild the frontend and fail if the committed
+  bundle differs from its sources. Nothing at install time rebuilds it, so a
+  stale console would otherwise have reached PyPI with every other check green.
+- `ROADMAP.md` is shorter and now covers the console: its "explicitly not
+  adopted" line previously ruled out GUI work outright, which this release
+  contradicts. What it rules out now is a second source of measurement logic.
+- `SECURITY.md` records that the shipped console assets request fonts from
+  Google Fonts — the only outbound request anything in this project makes.
+- `docs/releasing.md` and the maintainer skill cover the frontend build and the
+  npm side of the license scan.
+
 ## [0.3.0] — 2026-08-20
 
 A minor rather than a patch release: it adds a subcommand, two capture flags,

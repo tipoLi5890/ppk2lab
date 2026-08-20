@@ -14,9 +14,9 @@ working *on* this repository. (For using the `ppk2lab` CLI as an agent, see
 
 ## Hard constraints
 
-- Never create a GitHub repository, add a remote, push, or publish a package
-  without explicit user authorization. The project is local-only until the
-  user says otherwise.
+- Publish only through `.github/workflows/release.yml` (GitHub Release →
+  `pypi` environment → trusted publishing). Never upload by any other path,
+  and never create a release or a tag without an explicit user request.
 - Never copy, translate, or incorporate source code from other projects.
   PPK2 behavior comes from Nordic official materials (`docs/sources.md`).
 - Never add code that enables DUT power, changes voltage, or resets

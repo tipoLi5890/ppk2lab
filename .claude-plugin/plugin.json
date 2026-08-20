@@ -1,6 +1,6 @@
 {
   "name": "ppk2lab",
-  "version": "0.2.0.dev0",
+  "version": "0.4.0",
   "description": "Skills for controlling, capturing, decoding, and testing Nordic PPK2 hardware safely through the ppk2lab CLI. Installing this plugin never enables DUT power, changes voltage, or starts a capture.",
   "author": {
     "name": "ppk2lab contributors",

@@ -42,7 +42,7 @@ ppk2lab --version
 ppk2lab doctor --json
 ```
 
-`0.3.0` 是目前的版本、`0.2.0` 是第一個穩定版本，因此直接 `pip install ppk2lab` 就能安裝。它刻意標示為 experimental：工具鏈在無硬體的情況下經過大量測試，讓量測保持誠實的那些性質是被強制執行而非假設的——但它背後的**硬體驗證仍然是部分的**。一台機器、只有 macOS，而且還沒有任何解碼器讀過真實訊號。[路線圖](#roadmap)說明它涵蓋了什麼、又沒有涵蓋什麼；在你信任任何一個數字之前，請先讀它。
+`0.4.0` 是目前的版本、`0.2.0` 是第一個穩定版本，因此直接 `pip install ppk2lab` 就能安裝。它刻意標示為 experimental：工具鏈在無硬體的情況下經過大量測試，讓量測保持誠實的那些性質是被強制執行而非假設的——但它背後的**硬體驗證仍然是部分的**。一台機器、只有 macOS，而且還沒有任何解碼器讀過真實訊號。[路線圖](#路線圖)說明它涵蓋了什麼、又沒有涵蓋什麼；在你信任任何一個數字之前，請先讀它。
 
 從開發用原始碼執行：
 
@@ -241,14 +241,16 @@ Nordic Semiconductor、Power Profiler Kit 與 PPK2 可能是 Nordic Semiconducto
 
 ## 路線圖
 
-`0.3.0` 已發布。仍待完成的是驗證而非實作，而分清楚哪個是哪個很重要。2026-08-20 的一次硬體測試在單一裝置上把工具從頭跑到尾——韌體指紋 `HW=49625 IA=59.0 keys=40 ports=2`，Apple silicon 上的 macOS——涵蓋裝置探索、metadata、100 kS/s 校正後擷取、中斷復原，以及所有離線指令。以下這些**尚未**驗證，而且各自都需要那次測試沒有的硬體：
+`0.4.0` 已發布。仍待完成的是驗證而非實作，而分清楚哪個是哪個很重要。2026-08-20 的一次硬體測試在單一裝置上把工具從頭跑到尾——韌體指紋 `HW=49625 IA=59.0 keys=40 ports=2`，Apple silicon 上的 macOS——涵蓋裝置探索、metadata、100 kS/s 校正後擷取、中斷復原，以及所有離線指令。以下這些**尚未**驗證，而且各自都需要那次測試沒有的硬體：
 
 - 在 Windows 與 Linux 上各跑一次實機測試，那裡的作業系統會提供 macOS 不提供的 USB interface 編號；
 - 第二台裝置與第二個韌體指紋，目前兩者都各只見過一個；
 - 一個能解析增益誤差的交叉驗證：精度比 ±5% 高一個數量級的電阻，或一台校準過的參考儀器；
 - 以 MCU 治具產生的真實訊號，對照既定的錯誤率門檻驗證 UART 與 SPI 解碼器；
 - 拔除後復原、8-24 小時的長時間穩定性測試（soak test）與多裝置 session——另有頻寬掃描與一個會跨越電流量程邊界的負載，兩者仍未量測，但不作為 `0.2.0` 的發布條件；
-- 對照目前版本驗證 Claude Code 與 Codex 的 skill 安裝流程、從乾淨環境重現文件與範例、發布演練、標記版本時重新執行相依套件授權掃描，以及 PyPI 發布本身。
+- 對照目前版本驗證 Claude Code 與 Codex 的 skill 安裝流程，以及從乾淨環境重現文件與範例。
+
+`0.4.0` 新增的東西裡有一項已經完成、但還不能用：wheel 現在帶著一個建置好的瀏覽器 console（位於 `ppk2lab_web`），以及**沒有任何東西可以服務它**。沒有可安裝的 extra，也沒有可執行的指令——擁有 PPK2 session 的伺服器是下一階段的工作。[docs/webui.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/webui.md) 說明裡面有什麼、以及它現在還做不到什麼。
 
 解碼器的支援層級是以「設計時針對的速率」命名的，不是實測錯誤率——目前還沒有任何實測。需要硬體的驗證沒有、也不打算有 CI workflow，因此由維護者在實機上執行，並隨著涵蓋的機器與平台增加逐步填上相容性矩陣。該矩陣以及刻意不做的項目請見 [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md)。
 
@@ -273,6 +275,7 @@ Nordic Semiconductor、Power Profiler Kit 與 PPK2 可能是 Nordic Semiconducto
 | [docs/energy-analysis.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/energy-analysis.md) | 電量、能量、峰值電流與延遲的定義 |
 | [docs/agent-interface.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/agent-interface.md) | JSON、工具、狀態變更操作與 context 預算 |
 | [docs/sources.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/sources.md) | Nordic 官方文件與儲存庫參考 |
+| [docs/webui.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/webui.md) | 瀏覽器 console：0.4.0 出貨了什麼，以及什麼還沒有伺服器 |
 | [SECURITY.md](https://github.com/tipoLi5890/ppk2lab/blob/main/SECURITY.md) | 硬體、USB、檔案與不可信輸入的安全模型 |
 
 ## 聯絡方式

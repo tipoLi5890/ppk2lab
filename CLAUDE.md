@@ -10,7 +10,7 @@ contracts that must not drift.
   package, Python import, and CLI executable.
 - License: MIT (`LICENSE`), covering this repository's original material
   only; trademark and firmware boundaries are in `NOTICE.md`.
-- Versioning: `0.3.0` is the current release; `0.2.0` was the project's
+- Versioning: `0.4.0` is the current release; `0.2.0` was the project's
   first stable version. Stable numbering covers the machine-readable
   contracts, not the hardware validation, which is partial and tracked in
   `ROADMAP.md`. Semantic versioning applies from `0.2.0` onward, so a
@@ -34,8 +34,13 @@ contracts that must not drift.
 - Published: public GitHub repository with CI (Linux/macOS/Windows ×
   Python 3.11-3.14) and a PyPI development preview released through the
   trusted-publishing workflow.
+- `0.4.0` adds a second shipped package, `ppk2lab_web`: a built browser
+  console (React sources in `webui/`, build committed to
+  `src/ppk2lab_web/static/`) and **nothing that serves it**. No `web` extra,
+  no console script, no subcommand — the server that owns the one open
+  session is the next piece of work. `docs/webui.md` says what is there.
 - Still open: hardware validation gates — see `ROADMAP.md`. They did not
-  gate `0.2.0` and do not gate `0.3.0`; what has and has not been validated
+  gate `0.2.0` and do not gate `0.4.0`; what has and has not been validated
   is stated there and in the README.
 - The frozen public surface is `docs/api-baseline.md`; data model and
   stability policy are `docs/SPEC.md`.
@@ -87,6 +92,11 @@ contracts that must not drift.
 - Machine-readable contracts (CLI JSON, schemas, exit codes, capture
   format) are frozen by `docs/api-baseline.md`; changes follow the
   stability policy in `docs/SPEC.md` plus a CHANGELOG entry.
+- The browser console documents itself in two places and neither duplicates
+  the other: `docs/webui.md` is for someone using or evaluating it,
+  `webui/README.md` is for someone changing the frontend. The console's four
+  message catalogues (`webui/src/i18n/`) are kept in step by TypeScript at
+  build time, not by a documentation rule.
 - Retain this acknowledgment near the end of the README:
   `This project is developed with assistance from Claude Code and OpenAI Codex.`
 
@@ -97,6 +107,13 @@ pytest                                   # no hardware required
 ruff check src tests && ruff format --check src tests
 mypy
 ppk2lab --simulate doctor --json         # CLI smoke test
+```
+
+Touching `webui/` adds one more loop, and the build has to be committed with
+the change — CI fails if the shipped bundle and its sources disagree:
+
+```bash
+cd webui && npm run typecheck && npm test && npm run build
 ```
 
 ## Before making changes

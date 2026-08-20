@@ -11,7 +11,41 @@ on:
     types: [published]
 
 jobs:
+  webui-consistency:
+    # The committed bundle in src/ppk2lab_web/static/ is what ships. Nothing at
+    # install time rebuilds it, and this workflow builds its own dist/ — so if
+    # the bundle is stale, a release goes out with every other check green.
+    name: frontend build is in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: webui/.nvmrc
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: webui
+      - name: Type check and tests
+        run: npm run typecheck && npm test
+        working-directory: webui
+      - name: Rebuild
+        run: npm run build
+        working-directory: webui
+      - name: The committed build must match its sources
+        # --porcelain also catches a deleted or newly created file, which a
+        # plain `git diff --exit-code` would miss.
+        run: |
+          if [ -n "$(git status --porcelain -- src/ppk2lab_web/static)" ]; then
+            echo "::error::src/ppk2lab_web/static is out of date; run 'cd webui && npm run build' and commit the result"
+            git status --porcelain -- src/ppk2lab_web/static
+            git diff -- src/ppk2lab_web/static | head -80
+            exit 1
+          fi
+
   build:
+    needs: webui-consistency
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +58,12 @@ jobs:
           TAG="${{ github.event.release.tag_name }}"
           echo "package=$PKG_VERSION tag=$TAG"
           test "v$PKG_VERSION" = "$TAG" || { echo "::error::tag $TAG does not match package version $PKG_VERSION"; exit 1; }
+          # Gate 7 requires the plugin manifest to carry the package version.
+          # It was missed at 0.2.0 and again at 0.3.0, so it is checked here
+          # rather than trusted to a checklist step.
+          PLUGIN_VERSION=$(python -c "import json,pathlib; print(json.loads(pathlib.Path('.claude-plugin/plugin.json').read_text())['version'])")
+          echo "plugin=$PLUGIN_VERSION"
+          test "$PLUGIN_VERSION" = "$PKG_VERSION" || { echo "::error::.claude-plugin/plugin.json is $PLUGIN_VERSION, package is $PKG_VERSION"; exit 1; }
       - run: pip install build
       - run: python -m build
       - name: Check metadata
@@ -41,6 +81,11 @@ jobs:
           wheel = glob.glob('dist/*.whl')[0]
           names = zipfile.ZipFile(wheel).namelist()
           assert 'ppk2lab/py.typed' in names, 'PEP 561 marker missing from ' + wheel
+          assert 'ppk2lab_web/py.typed' in names, 'PEP 561 marker missing for ppk2lab_web'
+          # A console missing its bundle is broken, and an upload cannot be undone.
+          for asset in ('index.html', 'app.js', 'app.css'):
+              path = 'ppk2lab_web/static/' + asset
+              assert path in names, 'wheel omits ' + path
           info = [n for n in names if n.endswith('.dist-info/METADATA')][0]
           meta = zipfile.ZipFile(wheel).read(info).decode()
           assert 'License-Expression: MIT' in meta, 'wheel does not declare License-Expression: MIT'

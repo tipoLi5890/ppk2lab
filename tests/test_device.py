@@ -5,6 +5,7 @@ import gc
 
 import pytest
 
+from ppk2lab import device as device_module
 from ppk2lab.errors import TransportError, UsageError, VoltageRangeError
 from ppk2lab.protocol.samples import SampleBlock
 from ppk2lab.types import DeviceState, GapEvent, Mode, VoltageBasis
@@ -227,6 +228,44 @@ def test_closing_a_spent_iterator_does_not_release_a_newer_stream():
         device.capture(sample_limit=100)
     current.close()
     assert device._stream_active is False
+    device.close()
+
+
+def test_the_claim_is_given_back_only_after_the_stop_and_the_drain(monkeypatch):
+    """The claim is what `_require_no_active_stream` checks, so the handle
+    must not read as idle until it really is.
+
+    Released first, the teardown left a window as long as the reader join in
+    which a second stream was admitted, called `start_measuring()`, and was
+    then stopped again by the outgoing stream's own `stop_measuring()` — or
+    had the head of its framing eaten by the drain. Nothing in the resulting
+    capture would have said so.
+    """
+    device = open_simulated()
+    order: list[tuple[str, bool]] = []
+
+    real_stop_measuring = device.stop_measuring
+
+    def watched_stop_measuring() -> None:
+        order.append(("stop_measuring", device._stream_active))
+        real_stop_measuring()
+
+    real_drain = device_module._drain_input
+
+    def watched_drain(*args, **kwargs):
+        order.append(("drain", device._stream_active))
+        return real_drain(*args, **kwargs)
+
+    monkeypatch.setattr(device, "stop_measuring", watched_stop_measuring)
+    monkeypatch.setattr(device_module, "_drain_input", watched_drain)
+
+    stream = device.stream(sample_limit=200)
+    next(stream)
+    stream.close()
+    order.append(("after_close", device._stream_active))
+
+    # True while the teardown runs, False only once it is over.
+    assert order == [("stop_measuring", True), ("drain", True), ("after_close", False)]
     device.close()
 
 

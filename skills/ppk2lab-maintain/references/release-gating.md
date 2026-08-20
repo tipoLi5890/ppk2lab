@@ -1,11 +1,11 @@
 # Release gating (read-only audit)
 
 Never tag, push, or publish — report readiness; the maintainer acts. The
-authoritative gate list is `ROADMAP.md` ("`0.2.0` release gates"); the
+authoritative gate list is `ROADMAP.md` ("Release gates"); the
 procedure the maintainer follows afterwards is `docs/releasing.md`.
 
-Version policy: `0.2.0` is released and is the first stable version. Stable
-numbering covers the machine-readable contracts, not the hardware validation
+Version policy: `0.2.0` was the first stable version; `0.4.0` is the current
+release. Stable numbering covers the machine-readable contracts, not the hardware validation
 — that is partial, and the gates below record what is outstanding. Report a
 gate honestly whether or not a release has already shipped past it; the
 purpose of this audit is to keep the README and `ROADMAP.md` matching
@@ -51,9 +51,18 @@ absent device. Version sync: `ppk2lab --version` == the value in
    part of this gate, not an input to it.
 5. **Provenance.** No source copied from other projects, no unlicensed
    firmware binaries; every fixture self-generated with its method
-   recorded.
+   recorded. Third-party code that arrives as a declared dependency is not
+   "copied" in this sense, including the npm packages compiled into
+   `ppk2lab_web/static/app.js` — those are gate 6's subject, not this one.
+   What this gate is about is implementation taken from another project and
+   presented as this one's: PPK2 behaviour comes from Nordic's official
+   materials (`docs/sources.md`), never from reading another implementation.
 6. **Licenses.** Dependencies against the MIT/BSD/Apache-2.0 allowlist
    (`THIRD_PARTY_NOTICES.md`), each row verified from installed metadata.
+   Two scopes since `0.4.0`: the Python dependencies **and** the npm packages
+   compiled into `ppk2lab_web/static/app.js`, which appear in no Python
+   metadata. Their notices must survive minification — check with
+   `grep -c "@license" src/ppk2lab_web/static/app.js`.
 7. **Skills and plugins.** Each `skills/*/SKILL.md` has valid frontmatter
    and its references resolve; the `version` in `.claude-plugin/plugin.json`
    matches the package version; installation and representative prompts
@@ -73,8 +82,8 @@ the instrument. Report them PENDING, and say which matrix cells are empty.
 One physical session exists — one PPK2, one firmware fingerprint
 (`HW=49625 IA=59.0 keys=40 ports=2`), macOS on Apple silicon. It covered
 discovery, metadata and calibration, capture and loss accounting,
-interruption and recovery, the `0.2.0` artifact commands, and DUT-power
-lifetime. Treat it as one cell of gate 3 and nothing more:
+interruption and recovery, the offline commands on the resulting artifacts,
+and DUT-power lifetime. Treat it as one cell of gate 3 and nothing more:
 
 - **Gate 3 stays PENDING.** macOS (Apple silicon) is recorded as passed for
   that fingerprint; Windows, Linux and macOS (Intel) have no pass at all,

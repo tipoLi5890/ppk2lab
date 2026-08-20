@@ -100,7 +100,7 @@ field, not a judgement call — work down the list before quoting a number.
    more numerous. Both facts were the signature of a bug in this project:
    the artifact writer compressed each 10-second chunk on the sample thread,
    so a 60 s capture lost one gap per chunk boundary and load only made each
-   stall longer. Fixed in Unreleased; captures on that same host are now
+   stall longer. Fixed in `0.3.0`; captures on that same host are now
    gap-free. Still read `covered_fraction` and `charge_is_lower_bound`
    before quoting an integral, still report loss rather than calling it a
    device fault — but a gappy capture is now worth investigating rather than

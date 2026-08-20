@@ -1,6 +1,6 @@
 # Public data model, states, API, and schema contracts
 
-Status: frozen since `0.2.0`; `0.3.0` is the current release and adds to that
+Status: frozen since `0.2.0`; `0.4.0` is the current release and adds to that
 surface without changing it. Changes follow the stability policy at the end of
 this file. `SCHEMA_VERSION` is `"1"` and is independent of the package
 version.
@@ -92,7 +92,10 @@ threads at once. The stream claim is the only part that is synchronized, and
 it exists to refuse a second reader rather than to allow one: the 4-byte
 sample words carry no sync word, so two readers taking turns on one port
 would split words between them and neither would notice. A second `stream()`
-on a handle that already has one open is refused with `UsageError`.
+on a handle that already has one open is refused with `UsageError`, and the
+claim is held until that stream's teardown is over — the reader stopped, the
+measurement stopped, the port drained — not merely until it stops yielding. A
+handle that reads as free is one whose port is quiet.
 
 `AsyncPPK2` does not change this. It runs each blocking call on a worker
 thread through `asyncio.to_thread`, so concurrency is between an awaiting

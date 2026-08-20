@@ -781,29 +781,43 @@ class PPK2:
             # caller's own error — is what the caller has to see. Read it
             # before any nested handler below can clear it.
             in_flight = sys.exception()
-            self._stream_active = False
-            session.stop()
+            # The claim is given back last, from a finally of its own. It is
+            # what keeps a second stream off this handle, and the handle is
+            # not free until the measurement has stopped and the port has
+            # been drained. Clearing it first left a window — up to the
+            # reader join below — in which stream() was admitted, called
+            # start_measuring(), and was then silently stopped again by the
+            # stop_measuring() here, or had the head of its framing eaten by
+            # the drain. The window is not theoretical: this block is run by
+            # StreamIterator.__del__, and a collection runs on whichever
+            # thread filled a generation, so on Linux CI it was recorded
+            # running on an asyncio worker while another thread read the
+            # handle as idle.
             try:
-                self.stop_measuring()
-            except Exception:
-                self._update_state(measuring=False)
-            # Bytes already in flight when the stop command lands would
-            # otherwise be parsed as the head of the next session on this
-            # handle, silently shifting its framing.
-            try:
-                self.stale_bytes_after_stop = _drain_input(
-                    self.transport, max_seconds=0.5, quiet_reads=2
-                )
-            except Exception:
-                # A dead handle drains nothing, and "nothing" is not zero
-                # verified-quiet bytes: record the drain as not performed
-                # rather than leaving the previous stream's count standing.
-                # The failure is only reportable when the stream ended
-                # cleanly — during an unwind it would replace the real cause
-                # with a symptom.
-                self.stale_bytes_after_stop = None
-                if in_flight is None:
-                    raise
+                session.stop()
+                try:
+                    self.stop_measuring()
+                except Exception:
+                    self._update_state(measuring=False)
+                # Bytes already in flight when the stop command lands would
+                # otherwise be parsed as the head of the next session on this
+                # handle, silently shifting its framing.
+                try:
+                    self.stale_bytes_after_stop = _drain_input(
+                        self.transport, max_seconds=0.5, quiet_reads=2
+                    )
+                except Exception:
+                    # A dead handle drains nothing, and "nothing" is not zero
+                    # verified-quiet bytes: record the drain as not performed
+                    # rather than leaving the previous stream's count standing.
+                    # The failure is only reportable when the stream ended
+                    # cleanly — during an unwind it would replace the real cause
+                    # with a symptom.
+                    self.stale_bytes_after_stop = None
+                    if in_flight is None:
+                        raise
+            finally:
+                self._stream_active = False
 
     def capture(self, **kwargs: Any):
         """Capture to a :class:`~ppk2lab.capture.model.Capture`; see

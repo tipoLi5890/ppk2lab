@@ -2,7 +2,9 @@
 
 This document describes the threat model and hardening rules for ppk2lab
 across four surfaces: hardware control, USB/serial input, capture files, and
-untrusted analysis input.
+untrusted analysis input. A fifth — the browser console shipped in the wheel —
+has no server yet, and what that does and does not mean is recorded at the
+end.
 
 ## Hardware safety (protecting the DUT and operator)
 
@@ -56,6 +58,19 @@ Data arriving from the serial port is treated as untrusted:
 - Data loss can never produce a false success: assertion windows that
   overlap gaps return status `incomplete` (exit 6), and decoders emit
   zero-confidence error annotations rather than fabricated data.
+
+## Shipped web console assets
+
+The wheel contains a built browser console under `ppk2lab_web/static/`. It has
+no server in `0.4.0`, so it adds no listener and no new runtime attack surface
+— nothing in the package serves it, and nothing runs it.
+
+One property is worth recording before that changes: its `index.html` loads
+IBM Plex from Google Fonts, so opening the console makes an outbound request to
+`fonts.googleapis.com` and `fonts.gstatic.com`. Every other part of this
+project talks to a USB serial port and to nothing else. On an isolated bench or
+an air-gapped workstation the fonts simply fail to load and the console falls
+back to system faces; it does not otherwise depend on the network.
 
 ## Reporting a vulnerability
 

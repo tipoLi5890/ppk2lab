@@ -106,7 +106,7 @@ them straight back as `result.user_tags`, so a script that just tagged a run
 does not reopen the file to read them, and `inspect --json` returns the same
 map later. Nothing interprets a tag; values stay the strings that went in.
 
-Loss is always reported, and since the Unreleased fix it is no longer the
+Loss is always reported, and since the `0.3.0` fix it is no longer the
 normal outcome: through `0.2.0` a 60 s capture lost 5 `host_overflow` gaps
 because the artifact writer compressed each 10-second chunk on the sample
 thread, and captures on that same host are now gap-free. Gaps are marked,

@@ -50,6 +50,42 @@ jobs:
             python "$example" --simulate > /dev/null
           done
 
+  webui:
+    # src/ppk2lab_web/static/ is a build artifact that is committed and shipped.
+    # Nothing at install time rebuilds it, so without this job a stale bundle
+    # reaches PyPI with pytest, ruff and mypy all green.
+    name: frontend (typecheck, tests, build in sync)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: webui/.nvmrc
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: webui
+      - name: Type check
+        run: npm run typecheck
+        working-directory: webui
+      - name: Unit tests
+        run: npm test
+        working-directory: webui
+      - name: Rebuild
+        run: npm run build
+        working-directory: webui
+      - name: The committed build must match its sources
+        # --porcelain rather than `git diff --exit-code`: it also catches a
+        # file the bundler deleted or newly created, which a diff would miss.
+        run: |
+          if [ -n "$(git status --porcelain -- src/ppk2lab_web/static)" ]; then
+            echo "::error::src/ppk2lab_web/static is out of date; run 'cd webui && npm run build' and commit the result"
+            git status --porcelain -- src/ppk2lab_web/static
+            git diff --stat -- src/ppk2lab_web/static
+            exit 1
+          fi
+
   build:
     name: build sdist/wheel + fresh-venv smoke
     runs-on: ubuntu-latest
@@ -66,6 +102,17 @@ jobs:
           /tmp/fresh/bin/pip install dist/*.whl
           /tmp/fresh/bin/ppk2lab --version
           PPK2LAB_SIMULATE=1 /tmp/fresh/bin/ppk2lab doctor --json > /dev/null
+      - name: Installed wheel carries the web console
+        run: |
+          python -c "
+          import glob, zipfile
+          wheel = glob.glob('dist/*.whl')[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          for asset in ('index.html', 'app.js', 'app.css'):
+              path = 'ppk2lab_web/static/' + asset
+              assert path in names, 'wheel omits ' + path
+          assert 'ppk2lab_web/py.typed' in names, 'PEP 561 marker missing for ppk2lab_web'
+          "
       - name: Installed wheel is typed and correctly licensed
         # These have to be checked against the installed package, not the
         # source tree: py.typed exists in src/ whether or not packaging puts

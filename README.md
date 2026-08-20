@@ -40,7 +40,7 @@ ppk2lab --version
 ppk2lab doctor --json
 ```
 
-`0.3.0` is the current release and `0.2.0` was the first stable one, so a plain `pip install ppk2lab` resolves it. It is labelled experimental on purpose: the toolchain is heavily tested without hardware, and the properties that keep a measurement honest are enforced rather than assumed — but the hardware validation behind it is partial. One unit, macOS only, and no decoder has yet read a real signal. [Roadmap](#roadmap) says exactly what that covers and what it does not; read it before you trust a number.
+`0.4.0` is the current release and `0.2.0` was the first stable one, so a plain `pip install ppk2lab` resolves it. It is labelled experimental on purpose: the toolchain is heavily tested without hardware, and the properties that keep a measurement honest are enforced rather than assumed — but the hardware validation behind it is partial. One unit, macOS only, and no decoder has yet read a real signal. [Roadmap](#roadmap) says exactly what that covers and what it does not; read it before you trust a number.
 
 Run from a development checkout:
 
@@ -239,7 +239,7 @@ See [docs/sources.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/sourc
 
 ## Roadmap
 
-`0.3.0` is released. What is still open is validation rather than implementation, and it is worth knowing which is which. One hardware session on 2026-08-20 ran the tool end to end on a single unit — firmware fingerprint `HW=49625 IA=59.0 keys=40 ports=2`, macOS on Apple silicon — covering discovery, metadata, calibrated capture at 100 kS/s, interruption recovery, and every offline command. These are **not** validated, and each needs hardware that session did not have:
+`0.4.0` is released. What is still open is validation rather than implementation, and it is worth knowing which is which. One hardware session on 2026-08-20 ran the tool end to end on a single unit — firmware fingerprint `HW=49625 IA=59.0 keys=40 ports=2`, macOS on Apple silicon — covering discovery, metadata, calibrated capture at 100 kS/s, interruption recovery, and every offline command. These are **not** validated, and each needs hardware that session did not have:
 
 - a physical pass on Windows and on Linux, where the OS reports the USB interface numbers macOS does not;
 - a second unit and a second firmware fingerprint, only one of each having been seen;
@@ -247,6 +247,8 @@ See [docs/sources.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/sourc
 - UART and SPI decoder validation on real signals from an MCU fixture, against defined error-rate thresholds;
 - hot-unplug recovery, an 8-24 h soak run, and a multi-device session — plus a bandwidth sweep and a load that crosses a current-range boundary;
 - Claude Code and Codex skill installation verified against the current releases, and the documentation and examples reproduced from a clean environment.
+
+One thing `0.4.0` adds is finished but not yet usable: the wheel now carries a built browser console under `ppk2lab_web`, and nothing that serves it. There is no extra to install and no command to start it — the server that owns the PPK2 session is the next piece of work. [docs/webui.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/webui.md) says what is there and what it cannot do yet.
 
 The decoder support tiers are named for the rate each was designed against, not for a measured error rate — nothing has been measured yet. Validation that needs hardware has no CI workflow and is not meant to, so the maintainer runs it on the bench and fills in the compatibility matrix as units and platforms are covered. See [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md) for that matrix and for what is deliberately not being built.
 
@@ -271,6 +273,7 @@ The decoder support tiers are named for the rate each was designed against, not 
 | [docs/energy-analysis.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/energy-analysis.md) | Charge, energy, peak-current, and latency definitions |
 | [docs/agent-interface.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/agent-interface.md) | JSON, tools, state-changing operations, and context budgets |
 | [docs/sources.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/sources.md) | Nordic official documentation and repository references |
+| [docs/webui.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/webui.md) | The browser console: what ships in 0.4.0, and what has no server yet |
 | [SECURITY.md](https://github.com/tipoLi5890/ppk2lab/blob/main/SECURITY.md) | Hardware, USB, file, and untrusted-input security model |
 
 ## Contact

@@ -40,7 +40,7 @@ ppk2lab --version
 ppk2lab doctor --json
 ```
 
-`0.1.0.dev0` is the only build on PyPI today and needs an exact pin: `pip install ppk2lab==0.1.0.dev0`. A plain `pip install ppk2lab` resolves nothing, because pre-releases are excluded by default and no stable release has been cut — the first will be `0.2.0`, once the hardware gates below pass. This repository is at `0.2.0.dev0` and carries work the published preview does not, so install from a source checkout to follow it.
+`0.2.0` is the first stable release, so a plain `pip install ppk2lab` resolves it. It is labelled experimental on purpose: the toolchain is heavily tested without hardware, and the properties that keep a measurement honest are enforced rather than assumed — but the hardware validation behind it is partial. One unit, macOS only, and no decoder has yet read a real signal. [Roadmap](#roadmap) says exactly what that covers and what it does not; read it before you trust a number.
 
 Run from a development checkout:
 
@@ -237,16 +237,16 @@ See [docs/sources.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/sourc
 
 ## Roadmap
 
-The first stable release is `0.2.0`. What remains open before it is validation rather than implementation. One hardware session on 2026-08-20 closed the macOS pass on a single unit — firmware fingerprint `HW=49625 IA=59.0 keys=40 ports=2`, macOS on Apple silicon — and most of what is left needs hardware that session did not have:
+`0.2.0` is released. What is still open is validation rather than implementation, and it is worth knowing which is which. One hardware session on 2026-08-20 ran the tool end to end on a single unit — firmware fingerprint `HW=49625 IA=59.0 keys=40 ports=2`, macOS on Apple silicon — covering discovery, metadata, calibrated capture at 100 kS/s, interruption recovery, and every offline command. These are **not** validated, and each needs hardware that session did not have:
 
 - a physical pass on Windows and on Linux, where the OS reports the USB interface numbers macOS does not;
 - a second unit and a second firmware fingerprint, only one of each having been seen;
 - a cross-check that can resolve gain error: a resistor an order of magnitude tighter than ±5%, or a calibrated reference;
 - UART and SPI decoder validation on real signals from an MCU fixture, against defined error-rate thresholds;
-- hot-unplug recovery, an 8-24 h soak run, and a multi-device session — plus a bandwidth sweep and a load that crosses a current-range boundary, which are wanted but do not gate `0.2.0`;
-- Claude Code and Codex skill installation verified against the current releases, the documentation and examples reproduced from a clean environment, a release rehearsal, a dependency license re-scan at tag time, and the PyPI publish itself.
+- hot-unplug recovery, an 8-24 h soak run, and a multi-device session — plus a bandwidth sweep and a load that crosses a current-range boundary;
+- Claude Code and Codex skill installation verified against the current releases, and the documentation and examples reproduced from a clean environment.
 
-The gates that need hardware have no CI workflow and are not meant to — they need a PPK2 and a fixture MCU attached — so the maintainer runs them on the bench. See [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md) for the exit criteria, the compatibility matrix, and what is deliberately not being built.
+The decoder support tiers are named for the rate each was designed against, not for a measured error rate — nothing has been measured yet. Validation that needs hardware has no CI workflow and is not meant to, so the maintainer runs it on the bench and fills in the compatibility matrix as units and platforms are covered. See [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md) for that matrix and for what is deliberately not being built.
 
 ## Documentation
 

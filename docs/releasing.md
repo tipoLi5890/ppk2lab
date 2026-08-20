@@ -58,11 +58,12 @@ continuing.
 
 ## 3. Version and changelog
 
-1. Bump `__version__` in `src/ppk2lab/_version.py`. Stays `0.2.0.devN`
-   until every hardware gate passes; the first release clearing all gates
-   becomes `0.2.0`, the project's first stable release — never `1.0.0`.
-   `0.1.0.dev0` is on PyPI and is the only build there; it is a
-   pre-release, so `pip install ppk2lab` does not resolve to it.
+1. Bump `__version__` in `src/ppk2lab/_version.py`. `0.2.0` was the first
+   stable release; subsequent versions follow the compatibility policy in
+   `ROADMAP.md` — never `1.0.0` under the current plan. A release whose
+   hardware validation is still partial must say so in the README, in
+   `ROADMAP.md` and in the CHANGELOG entry, rather than letting a stable
+   number imply gates that have not passed.
 2. In `CHANGELOG.md`, rename `## [Unreleased]` to the release heading with
    today's date (e.g. `## [0.2.0] - YYYY-MM-DD`), keeping its entries.
 3. If this release changes `SCHEMA_VERSION` or capture `format_version`,

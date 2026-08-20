@@ -4,11 +4,12 @@ Never tag, push, or publish — report readiness; the maintainer acts. The
 authoritative gate list is `ROADMAP.md` ("`0.2.0` release gates"); the
 procedure the maintainer follows afterwards is `docs/releasing.md`.
 
-Version policy: the first stable release is `0.2.0`, cut once every gate
-below passes. Everything before it is a `0.2.0.devN` pre-release that plain
-`pip install ppk2lab` does not resolve. `0.1.0.dev0` is on PyPI and is
-still the only build there — a historical fact, not a gate. The project is
-never labeled `1.0.0` under the current plan.
+Version policy: `0.2.0` is released and is the first stable version. Stable
+numbering covers the machine-readable contracts, not the hardware validation
+— that is partial, and the gates below record what is outstanding. Report a
+gate honestly whether or not a release has already shipped past it; the
+purpose of this audit is to keep the README and `ROADMAP.md` matching
+reality. The project is never labeled `1.0.0` under the current plan.
 
 ## Preconditions — cheap, and they gate everything below
 

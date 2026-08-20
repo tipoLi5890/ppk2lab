@@ -1,8 +1,9 @@
 # Roadmap
 
-The project ships its first stable public release as `0.2.0`, only after
-every release gate below passes. Everything before that is a `0.2.0.devN`
-pre-release, which `pip install ppk2lab` does not resolve. The project is
+`0.2.0` is released — the project's first stable version. Stable numbering
+puts the machine-readable contracts under the policy at the end of this file;
+it is not a claim that every gate below has passed. Several need hardware this
+project has not had, and each says what closing it would take. The project is
 never labeled `1.0.0` as part of this plan.
 
 This file is what is left. Completed work lives in `CHANGELOG.md`.

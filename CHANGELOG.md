@@ -4,11 +4,16 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project uses semantic versioning once released.
 
-## [Unreleased] — 0.2.0.dev0
+## [0.2.0] — 2026-08-20
 
-`0.1.0.dev0` was published to PyPI on 2026-08-19 and carries only the initial
-implementation; everything under this heading is unreleased. The first stable
-release will be `0.2.0`, cut once every gate in `ROADMAP.md` passes.
+The project's first stable release. `0.1.0.dev0`, published on 2026-08-19,
+carried only the initial implementation; everything below is new since it.
+
+Stable numbering here means the machine-readable contracts are now under the
+stability policy in `docs/SPEC.md`. It does **not** mean every release gate in
+`ROADMAP.md` has passed: the hardware validation is partial — one unit, macOS
+only, and no decoder has yet read a real signal. `ROADMAP.md` says which gates
+are outstanding and what closing each would take.
 
 `format_version` stays `1` and `SCHEMA_VERSION` stays `"1"`. Every new field is
 an addition, and the values that change below changed only where they were

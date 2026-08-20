@@ -42,7 +42,7 @@ ppk2lab --version
 ppk2lab doctor --json
 ```
 
-目前 PyPI 上唯一的版本是 `0.1.0.dev0`，必須明確指定版號安裝：`pip install ppk2lab==0.1.0.dev0`。直接 `pip install ppk2lab` 不會安裝任何版本，因為預覽版預設被排除在解析之外，而穩定版尚未發布——第一個穩定版將是 `0.2.0`，待下方的硬體關卡通過後才會推出。本儲存庫目前為 `0.2.0.dev0`，包含尚未發布到 PyPI 的變更；若要跟上，請從原始碼安裝。
+`0.2.0` 是第一個穩定版本，因此直接 `pip install ppk2lab` 就能安裝。它刻意標示為 experimental：工具鏈在無硬體的情況下經過大量測試，讓量測保持誠實的那些性質是被強制執行而非假設的——但它背後的**硬體驗證仍然是部分的**。一台機器、只有 macOS，而且還沒有任何解碼器讀過真實訊號。[路線圖](#roadmap)說明它涵蓋了什麼、又沒有涵蓋什麼；在你信任任何一個數字之前，請先讀它。
 
 從開發用原始碼執行：
 
@@ -239,7 +239,7 @@ Nordic Semiconductor、Power Profiler Kit 與 PPK2 可能是 Nordic Semiconducto
 
 ## 路線圖
 
-第一個穩定版是 `0.2.0`。在那之前仍待完成的是驗證而非實作。2026-08-20 的一次硬體測試在單一裝置上完成了 macOS 這一關——韌體指紋 `HW=49625 IA=59.0 keys=40 ports=2`，Apple silicon 上的 macOS——其餘大多需要那次測試沒有的硬體：
+`0.2.0` 已發布。仍待完成的是驗證而非實作，而分清楚哪個是哪個很重要。2026-08-20 的一次硬體測試在單一裝置上把工具從頭跑到尾——韌體指紋 `HW=49625 IA=59.0 keys=40 ports=2`，Apple silicon 上的 macOS——涵蓋裝置探索、metadata、100 kS/s 校正後擷取、中斷復原，以及所有離線指令。以下這些**尚未**驗證，而且各自都需要那次測試沒有的硬體：
 
 - 在 Windows 與 Linux 上各跑一次實機測試，那裡的作業系統會提供 macOS 不提供的 USB interface 編號；
 - 第二台裝置與第二個韌體指紋，目前兩者都各只見過一個；
@@ -248,7 +248,7 @@ Nordic Semiconductor、Power Profiler Kit 與 PPK2 可能是 Nordic Semiconducto
 - 拔除後復原、8-24 小時的長時間穩定性測試（soak test）與多裝置 session——另有頻寬掃描與一個會跨越電流量程邊界的負載，兩者仍未量測，但不作為 `0.2.0` 的發布條件；
 - 對照目前版本驗證 Claude Code 與 Codex 的 skill 安裝流程、從乾淨環境重現文件與範例、發布演練、標記版本時重新執行相依套件授權掃描，以及 PyPI 發布本身。
 
-需要硬體的關卡沒有、也不打算有 CI workflow——它們需要接上 PPK2 與治具 MCU——因此由維護者在實機上執行。完成準則、相容性矩陣，以及刻意不做的項目請見 [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md)。
+解碼器的支援層級是以「設計時針對的速率」命名的，不是實測錯誤率——目前還沒有任何實測。需要硬體的驗證沒有、也不打算有 CI workflow，因此由維護者在實機上執行，並隨著涵蓋的機器與平台增加逐步填上相容性矩陣。該矩陣以及刻意不做的項目請見 [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md)。
 
 ## 文件
 

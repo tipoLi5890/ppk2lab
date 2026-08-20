@@ -12,13 +12,12 @@ python -m venv .venv && source .venv/bin/activate
 pip install ppk2lab
 ```
 
-> `0.1.0.dev0` is the only build published on PyPI today; install it with an
-> exact pin: `pip install ppk2lab==0.1.0.dev0`. Plain `pip install ppk2lab`
-> resolves nothing, because pre-releases are excluded by default and no stable
-> release has been cut — the first will be `0.2.0`, after the hardware gates in
-> `ROADMAP.md`. This repository is at `0.2.0.dev0` and carries work the
-> published preview does not, so install from a source checkout (below) to
-> follow it.
+> `0.2.0` is the first stable release, so plain `pip install ppk2lab` resolves
+> it. Stable numbering covers the machine-readable contracts, not the hardware
+> validation behind them: that is partial — one unit, macOS only, and no
+> decoder has read a real signal yet. `ROADMAP.md` names what is outstanding.
+> To follow work newer than the release, install from a source checkout
+> (below).
 
 From a development checkout:
 

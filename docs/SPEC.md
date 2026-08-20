@@ -1,7 +1,8 @@
 # Public data model, states, API, and schema contracts
 
-Status: pre-`0.2.0`; everything here may change until the release freeze.
-`SCHEMA_VERSION` is `"1"` and is independent of the package version.
+Status: frozen as of `0.2.0`. Changes follow the stability policy at the end
+of this file. `SCHEMA_VERSION` is `"1"` and is independent of the package
+version.
 
 ## Core concepts
 

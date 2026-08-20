@@ -2,17 +2,12 @@
 
 Nothing here changes hardware state.
 
-1. `ppk2lab --version` — if missing, install per the repo's INSTALL.md.
-   Only a development preview is on PyPI today, so plain
-   `pip install ppk2lab` resolves nothing; an exact pin
-   (`pip install ppk2lab==0.1.0.dev0`) or an editable checkout
-   (`pip install -e ".[dev]"`) is what works. Check the version before
-   trusting anything here: this skill describes the current repository,
-   which is `0.2.0.dev0` (the first stable release will be `0.2.0`), and
-   commands it names — `inspect`, `--max-samples`, `--window`,
-   `--state-threshold` — do not exist in the `0.1.0.dev0` preview that is on
-   PyPI. On that build they fail with a usage error rather than doing
-   something surprising.
+1. `ppk2lab --version` — if missing, `pip install ppk2lab` (or
+   `pip install -e ".[dev]"` from a checkout). Check the version before
+   trusting anything here: this skill describes `0.2.0`, and the commands it
+   names — `inspect`, `--max-samples`, `--window`, `--state-threshold` — do
+   not exist in the `0.1.0.dev0` preview that preceded it. On that build they
+   fail with a usage error rather than doing something surprising.
 2. `ppk2lab doctor --json` — diagnose first; apply each failing check's
    `remediation`, then re-run doctor to confirm. Doctor **exits nonzero on
    a failing check** (`warn` and `skip` stay non-blocking, and

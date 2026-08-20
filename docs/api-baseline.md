@@ -13,7 +13,7 @@ and agents may depend on, and the checklist the release gate diffs against.
   [SPEC.md - Stability policy](SPEC.md#stability-policy).
 - Anything not listed here is internal (section 5).
 
-Current: `ppk2lab.__version__ = "0.2.0.dev0"`, `ppk2lab.SCHEMA_VERSION = "1"`.
+Current: `ppk2lab.__version__ = "0.2.0"`, `ppk2lab.SCHEMA_VERSION = "1"`.
 
 ## 2. Stable Python surface (`0.2.0`)
 

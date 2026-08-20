@@ -10,10 +10,10 @@ contracts that must not drift.
   package, Python import, and CLI executable.
 - License: MIT (`LICENSE`), covering this repository's original material
   only; trademark and firmware boundaries are in `NOTICE.md`.
-- Versioning: `0.2.0.devN` previews may ship to PyPI; the first stable
-  release is `0.2.0` and ships only after every gate in `ROADMAP.md`
-  passes. `0.1.0.dev0` is the only build currently on PyPI. Never label
-  the project `1.0.0` under the current plan.
+- Versioning: `0.2.0` is released and is the project's first stable
+  version. Stable numbering covers the machine-readable contracts, not the
+  hardware validation, which is partial and tracked in `ROADMAP.md`. Never
+  label the project `1.0.0` under the current plan.
 - Unofficial project, not affiliated with Nordic Semiconductor ASA. PPK2
   behavior is referenced from Nordic official documentation and the official
   Power Profiler app repository only (`docs/sources.md`). Never copy,

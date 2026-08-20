@@ -8,8 +8,8 @@ convenience.
 
 from __future__ import annotations
 
+import itertools
 import json
-import math
 import struct
 import threading
 import time
@@ -1371,28 +1371,37 @@ def test_progress_is_reported_while_a_trigger_has_not_fired():
 
 
 def test_progress_updates_are_throttled_and_carry_a_stable_payload():
-    calls: list[dict] = []
+    calls: list[tuple[float, dict]] = []
     device = PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True)
-    started = time.monotonic()
     try:
-        result = device.capture(duration_s=2.0, on_progress=calls.append)
+        result = device.capture(
+            duration_s=2.0, on_progress=lambda update: calls.append((time.monotonic(), update))
+        )
     finally:
         device.close()
-    elapsed = time.monotonic() - started
     assert result.complete
-    assert len(calls) >= 2
+    # One report always fires immediately; how many follow depends entirely on
+    # how fast this host delivers the capture, so nothing here counts them. A
+    # runner that streams two seconds of samples in under 250 ms legitimately
+    # sees exactly one.
+    assert calls
+    updates = [update for _, update in calls]
     assert all(
-        set(update) == {"stored", "elapsed_s", "gap_count", "sample_limit"} for update in calls
+        set(update) == {"stored", "elapsed_s", "gap_count", "sample_limit"} for update in updates
     )
-    stored = [update["stored"] for update in calls]
+    stored = [update["stored"] for update in updates]
     assert stored == sorted(stored), "a progress bar cannot be allowed to run backwards"
-    times = [update["elapsed_s"] for update in calls]
+    times = [update["elapsed_s"] for update in updates]
     assert times == sorted(times)
-    # At most one report per interval, plus the one that fires immediately.
-    # The simulator delivers this capture in ~50 blocks, so an unthrottled
-    # callback runs ~50 times however slow the host is -- the bound catches a
-    # deleted throttle without pinning any particular timing.
-    assert len(calls) <= 2 + math.ceil(elapsed / PROGRESS_INTERVAL_S)
+    # The throttle itself, stated as the property rather than as a count:
+    # consecutive reports are at least one interval apart. The simulator
+    # delivers this capture in about fifty blocks, so a deleted throttle
+    # produces fifty calls microseconds apart and trips this on any host. The
+    # tolerance covers hosts whose monotonic clock is coarse enough to read a
+    # 250 ms interval as slightly less.
+    stamps = [stamp for stamp, _ in calls]
+    intervals = [b - a for a, b in itertools.pairwise(stamps)]
+    assert all(interval >= PROGRESS_INTERVAL_S * 0.9 for interval in intervals)
 
 
 def test_a_failing_progress_callback_is_disabled_not_fatal():

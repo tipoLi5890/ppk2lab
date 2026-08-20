@@ -201,9 +201,19 @@ def test_in_memory_capture_save_writes_the_timing_block(tmp_path):
     result.capture.save(str(path))
     with zipfile.ZipFile(path) as zf:
         timeline = json.loads(zf.read("manifest.json"))["timeline"]
-    assert timeline["rate_check"] == result.timeline["rate_check"]
-    assert timeline["timeline_advance"] == result.timeline["timeline_advance"]
-    assert timeline["unaccounted_samples_estimate"] is not None
+    # Every field the streaming path recorded, not two of them: the bug was
+    # that `save()` wrote no timing at all. Containment rather than equality,
+    # because the manifest block is the timing report plus the timeline's own
+    # sample_rate_hz/sample_period_ns/start_index/degraded.
+    #
+    # `unaccounted_samples_estimate` is deliberately not asserted non-null. It
+    # is None whenever both anchors were stamped at the same instant, and this
+    # capture spans about 13 ms — under the ~15.6 ms granularity
+    # `time.monotonic` has on Windows before Python 3.13, where the honest
+    # answer really is that no interval was measured.
+    assert result.timeline
+    assert timeline.items() >= result.timeline.items()
+    assert timeline["timeline_advance"] == 5000
 
 
 def test_gaps_truncated_is_written_and_read_back(tmp_path, capture):

@@ -20,6 +20,7 @@ from ppk2lab.errors import (
     PortBusyError,
     TransportError,
 )
+from ppk2lab.transport.base import Transport
 from ppk2lab.transport.serial import SerialTransport, _access_remediation, _map_open_error
 from ppk2lab.types import USB_PID, USB_VID, PortRole
 
@@ -36,9 +37,17 @@ class _ComPort:
 
 
 def _fake_list_ports(monkeypatch, entries):
+    """Make pyserial enumerate exactly ``entries``, whatever is plugged in."""
+    import serial.tools
+
     module = types.ModuleType("serial.tools.list_ports")
     module.comports = lambda: entries  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "serial.tools.list_ports", module)
+    # `from serial.tools import list_ports` reads the attribute bound on the
+    # package first and only falls back to sys.modules when there is none. One
+    # real import anywhere in the process binds it for good, so patching
+    # sys.modules alone lets a later test enumerate the developer's own PPK2.
+    monkeypatch.setattr(serial.tools, "list_ports", module, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -323,3 +332,113 @@ def test_flush_on_a_closed_transport_is_a_no_op(monkeypatch):
     transport.open()
     transport.close()
     transport.flush()  # already closed
+
+
+def test_the_library_honours_the_simulate_environment_variable(monkeypatch):
+    """A script and the equivalent command must behave the same under it."""
+    from ppk2lab import PPK2, discover
+
+    monkeypatch.setenv("PPK2LAB_SIMULATE", "1")
+    assert [d.serial_number for d in discover()] == ["SIM0001"]
+    with PPK2.open() as device:
+        assert device.info.simulated is True
+
+
+def test_an_explicit_choice_still_wins_over_the_environment(monkeypatch):
+    from ppk2lab import discover
+
+    monkeypatch.setenv("PPK2LAB_SIMULATE", "1")
+    _fake_list_ports(monkeypatch, [_ComPort("/dev/ttyACM0", location="1-1.1:1.0")])
+    devices = discover(simulate=False)
+    assert [d.serial_number for d in devices] == ["ABC123"]
+    assert all(not d.simulated for d in devices)
+
+
+class _SilentTransport(Transport):
+    """The minimum a caller can inject: a channel that answers nothing.
+
+    Not ``MockTransport``, deliberately — a mock is a simulator by
+    construction, and the question here is what identity a transport the
+    library knows nothing about is given.
+    """
+
+    def __init__(self) -> None:
+        self._open = False
+
+    def open(self) -> None:
+        self._open = True
+
+    def close(self) -> None:
+        self._open = False
+
+    def write(self, data: bytes) -> None:
+        return None
+
+    def read(self, max_bytes: int, timeout_s: float = 0.1) -> bytes:
+        return b""
+
+    @property
+    def is_open(self) -> bool:
+        return self._open
+
+    @property
+    def description(self) -> str:
+        return "silent://injected"
+
+
+def test_an_injected_transport_is_never_relabelled_by_the_environment(monkeypatch):
+    """The environment must not decide the identity of a caller's transport.
+
+    Under PPK2LAB_SIMULATE the injected channel used to be handed the
+    simulator's identity — serial ``injected``, firmware ``1.2.4-sim``,
+    ``simulated: true`` — while every byte still went out over the real
+    channel. `run_capture` stores that identity in the manifest next to a
+    firmware fingerprint read from the actual instrument, so a real
+    measurement would be filed as a simulation.
+    """
+    from ppk2lab import PPK2
+
+    monkeypatch.setenv("PPK2LAB_SIMULATE", "1")
+    with PPK2.open(
+        transport=_SilentTransport(), serial_number="PPK2-0042", read_metadata=False
+    ) as device:
+        assert device.info.simulated is False
+        assert device.info.serial_number == "PPK2-0042"
+        # No port was enumerated for it, and none may be invented: the
+        # simulator's `simulated://...` path is what got fabricated before.
+        assert device.info.ports == ()
+        assert device.info.firmware_version is None
+
+
+def test_an_injected_transport_can_still_be_declared_simulated(monkeypatch):
+    """False-alarm guard: the fix must scope the label, not remove it."""
+    from ppk2lab import PPK2
+    from ppk2lab.transport.mock import MockTransport, SimulatedPPK2
+
+    monkeypatch.delenv("PPK2LAB_SIMULATE", raising=False)
+    with PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True) as device:
+        assert device.info.simulated is True
+        assert device.info.serial_number == "injected"
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"serial_number": "SIM0001"}])
+def test_an_explicit_simulate_false_is_not_answered_by_the_simulator(monkeypatch, kwargs):
+    """``simulate=False`` has to escape the variable it exists to override.
+
+    Device selection used to call a bare ``discover()``, which reads
+    PPK2LAB_SIMULATE and enumerates the simulator — so ``open(simulate=False)``
+    picked the simulated device and handed the literal string
+    ``simulated://SIM0001`` to ``SerialTransport`` as a port path.
+    """
+    from ppk2lab import PPK2
+
+    monkeypatch.setenv("PPK2LAB_SIMULATE", "1")
+    _fake_list_ports(monkeypatch, [])
+    with pytest.raises(DeviceNotFoundError) as excinfo:
+        PPK2.open(simulate=False, **kwargs)
+    # The exception type alone proves nothing: opening the simulator's port
+    # path fails with ENOENT, which maps to DeviceNotFoundError too. What has
+    # to hold is that nothing was enumerated to open in the first place.
+    message = str(excinfo.value)
+    assert "simulated://" not in message
+    assert message.startswith("no PPK2")

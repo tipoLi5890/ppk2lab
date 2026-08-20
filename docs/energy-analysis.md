@@ -107,8 +107,13 @@ the remaining 76.67%. It never draws 1806.72 uA for a single sample — that
 value is arithmetically correct and describes no state the device is ever in.
 `p50` is the sleep current, and it was sitting in the data all along.
 
-Results therefore carry `current_ua.p50/p90/p99/p999` and a `distribution`
-block describing the grid they came from.
+Results therefore carry `current_ua.p5/p50/p90/p95/p99/p999` and a
+`distribution` block describing the grid they came from. The set is published
+as one list and every one of them is collected unconditionally, so a live
+capture's recorded statistics and a later `measure` of the same window cannot
+name different quantiles — and the human `distribution:` line prints all six,
+which is what keeps a quantile the floor warning names from being one the
+output never showed.
 
 ### Why p99 rather than max
 
@@ -125,10 +130,13 @@ same is true of any single-sample outlier: a `max` is one sample out of
 
 `p99` and `p999` are stable under capture length in a way `max` is not,
 because they describe a fraction of the distribution rather than its extreme.
-Prefer them for assertions — the metrics are `p50_current` (alias
-`median_current`), `p90_current`, `p99_current`, `p999_current` — and keep
-`max_current` for "did anything at all ever exceed this", which is a
-different and much weaker question.
+Prefer them for assertions — the metrics are `p5_current`, `p50_current`
+(alias `median_current`), `p90_current`, `p95_current`, `p99_current`,
+`p999_current` — and keep `max_current` for "did anything at all ever exceed
+this", which is a different and much weaker question. `p5_current` answers the
+other end of the same shape: it is the floor statistic, the level the DUT sits
+at or below for 5% of the window, which is where a sleep-current regression
+shows up before a mean does.
 
 ### How the quantiles are computed
 

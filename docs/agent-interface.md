@@ -13,12 +13,16 @@ worked example lives in `examples/agent_workflow.md`.
   documented `exit_code`. Agents branch on `code`/`exit_code`, never on
   message text.
 - Warnings are the same shape: every entry in `warnings` is
-  `{code, message}` with a `W_*` code (`W_SAMPLE_GAPS`,
-  `W_TIMELINE_COMPRESSION`, `W_VOLTAGE_ASSUMED`, `W_NOT_CALIBRATED`, …). A
-  code's meaning never changes within a schema version, but codes are added,
-  so the set is open. `capabilities --json` publishes the catalog with each
-  code's meaning, which makes the vocabulary discoverable rather than
-  something to memorize or pin.
+  `{code, message, category}` with a `W_*` code (`W_SAMPLE_GAPS`,
+  `W_TIMELINE_COMPRESSION`, `W_VOLTAGE_ASSUMED`, `W_NOT_CALIBRATED`, …). All
+  three keys are always present, live and in a stored manifest alike, so a
+  warning read back by `inspect` branches the same way as one returned by
+  the command that produced it — a capture written before `category` existed
+  has it filled in from the catalog on the way out. A code's meaning never
+  changes within a schema version, but codes are added, so the set is open.
+  `capabilities --json` publishes the catalog with each code's meaning,
+  which makes the vocabulary discoverable rather than something to memorize
+  or pin.
 - `ppk2lab capabilities --json` is generated from the live parser and
   registries: commands with their options, `choices`, and state-changing
   classification, decoder rate tiers, exit codes, the error, warning,
@@ -129,12 +133,21 @@ further down):
   served from the distribution grid's 200 nA floor rather than measured. Such a
   value is an **upper bound**: the true quantile is at or below it. The result
   carries `W_BELOW_MEASUREMENT_FLOOR` and human output prints `<=`. An empty
-  list is the only thing that makes `p50`/`p90`/`p99`/`p999` a measurement.
+  list is the only thing that makes `p5`/`p50`/`p90`/`p95`/`p99`/`p999` a
+  measurement; the list is monotone in rank, so `p5` is the first to go.
   Expect a non-empty list on any lightly loaded input — an unloaded PPK2
   measured over 60 s read below the floor 69-71% of the time, so its `p50` is
   the floor and nothing else. Fall back to `current_ua.mean`,
   `current_ua.min`, or `charge_uc`, which are computed from samples rather
   than from the grid.
+- **`same_instrument`** on a `compare` result is the shunt half of the
+  gain-cancellation premise: a gain error is one physical unit's unknown, so
+  it only cancels across two captures taken on one unit. `false` (the two
+  serial numbers differ, `W_INSTRUMENT_MISMATCH`) withdraws the cancellation
+  while `basis` may still read `same_range`, which is a true statement about
+  the ranges and not about the hardware. `null` means the captures did not
+  identify their instruments, so the claim is made but flagged unverified.
+  Do not read a tighter `same_range` bar as tighter without checking it.
 - **`capture_sha256`** is `null` for a windowed read (`measure --window`,
   `export --window`), with a `W_PARTIAL_INTEGRITY` warning: only the chunks
   the window touched were checked. Record the `null` and the warning; do not
@@ -199,7 +212,9 @@ Captures are large (400 kB/s of raw data). Agents should keep samples out of
 the model context:
 
 - `capture --output file.ppk2a --json` returns a summary (stats, gaps,
-  hashes) — a few hundred bytes — plus an artifact handle (the path).
+  hashes, and the `user_tags` the call supplied, handed straight back so a
+  tagged run needs no second read) — a few hundred bytes — plus an artifact
+  handle (the path).
 - `measure`, `assert`, and `decode --output annotations.jsonl` return
   aggregates and file handles, not sample dumps.
 - Only `decode` without `--output` inlines annotations; prefer `--output`

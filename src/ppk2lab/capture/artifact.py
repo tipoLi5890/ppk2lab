@@ -11,6 +11,13 @@ The artifact is a ZIP container:
 Raw samples are the source of truth; derived exports never replace them.
 Writes are atomic (temp file + rename) and never overwrite an existing file
 unless explicitly requested.
+
+Compression runs on a writer thread, not on the thread feeding samples in.
+Deflating one 4 MB chunk takes ~290 ms on a current laptop, and a capture
+hands one over every ten seconds; doing that inline stalled the consumer long
+enough for the reader's queue to overflow, so the artifact writer was itself
+producing the periodic ``host_overflow`` gaps the capture then reported. The
+producer now only slices the buffer and hands it over.
 """
 
 from __future__ import annotations
@@ -19,21 +26,31 @@ import hashlib
 import json
 import math
 import os
+import queue
 import sys
+import threading
 import zipfile
 import zlib
 from array import array
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from ..diagnostics import W_MANIFEST_IMPLAUSIBLE, W_PARTIAL_INTEGRITY, Diagnostic, warn
 from ..diagnostics import as_json as _warnings_as_json
 from ..errors import CaptureFileError, CaptureTooLargeError, OutputExistsError, UsageError
+from ..exports._atomic import fsync_directory
 from ..protocol.metadata import parse_metadata
 from ..protocol.samples import GapEvent, SampleBlock
 from ..types import SAMPLE_PERIOD_NS, SAMPLE_RATE_HZ
-from .model import MAX_LOAD_SAMPLES, Capture, CaptureMeta
+from .model import (
+    MAX_LOAD_SAMPLES,
+    Capture,
+    CaptureMeta,
+    capture_is_complete,
+    normalize_user_tags,
+)
 
 FORMAT_NAME = "ppk2lab-capture"
 FORMAT_VERSION = 1
@@ -98,6 +115,19 @@ class ArtifactWriter:
         self._zip = zipfile.ZipFile(self._tmp_path, "w", compression=zipfile.ZIP_DEFLATED)
         self._buffer = bytearray()
         self._chunks: list[dict[str, Any]] = []
+        # Only the writer thread touches _zip and _chunks while streaming;
+        # zipfile is not thread-safe and the chunk table must stay in order.
+        # maxsize bounds the extra memory to a couple of chunks and applies
+        # back-pressure if the disk ever falls behind the instrument.
+        self._write_q: queue.Queue = queue.Queue(maxsize=2)
+        self._writer_error: BaseException | None = None
+        self._chunk_seq = 0
+        self._written_samples = 0
+        self._writer_joined = False
+        self._writer = threading.Thread(
+            target=self._writer_loop, name="ppk2lab-artifact-writer", daemon=True
+        )
+        self._writer.start()
         self._stored_count = 0
         self._invalid_count = 0
         self._gaps: list[GapEvent] = []
@@ -105,6 +135,49 @@ class ArtifactWriter:
         self._sha256 = hashlib.sha256()
         self._start_index: int | None = None
         self._finalized = False
+
+    def _writer_loop(self) -> None:
+        while True:
+            item = self._write_q.get()
+            if item is None:
+                return
+            if self._writer_error is not None:
+                # Already failed: keep draining so a producer blocked on a
+                # full queue is released, but write nothing more.
+                continue
+            name, data = item
+            try:
+                self._zip.writestr(name, data)
+                self._chunks.append(
+                    {
+                        "file": name,
+                        "first_stored_index": self._written_samples,
+                        "count": len(data) // 4,
+                        "crc32": zlib.crc32(data) & 0xFFFFFFFF,
+                    }
+                )
+                self._written_samples += len(data) // 4
+            except BaseException as exc:  # re-raised on the caller's thread
+                self._writer_error = exc
+
+    def _raise_writer_error(self) -> None:
+        """Surface a writer-thread failure on the caller's thread.
+
+        A chunk that could not be written must never pass silently: the
+        manifest would describe samples the container does not hold.
+        """
+        exc = self._writer_error
+        if exc is not None:
+            self._writer_error = None
+            raise exc
+
+    def _join_writer(self) -> None:
+        """Stop the writer thread and adopt any error it recorded."""
+        if not self._writer_joined:
+            self._writer_joined = True
+            self._write_q.put(None)
+            self._writer.join()
+        self._raise_writer_error()
 
     def add_block(self, block: SampleBlock) -> None:
         if self._start_index is None:
@@ -117,6 +190,7 @@ class ArtifactWriter:
         self._invalid_count += sum(1 for r in block.ranges if r > 4)
         while len(self._buffer) >= CHUNK_SAMPLES * 4:
             self._flush_chunk(CHUNK_SAMPLES * 4)
+        self._raise_writer_error()
 
     #: See CaptureBuilder.MAX_GAPS: the manifest records the count, not an
     #: unbounded enumeration.
@@ -134,18 +208,13 @@ class ArtifactWriter:
         return self._gaps_truncated
 
     def _flush_chunk(self, n_bytes: int) -> None:
+        """Hand one chunk to the writer thread. Compresses nothing itself."""
+        self._raise_writer_error()
         data = bytes(self._buffer[:n_bytes])
         del self._buffer[:n_bytes]
-        name = f"chunks/{len(self._chunks):06d}.u32"
-        self._zip.writestr(name, data)
-        self._chunks.append(
-            {
-                "file": name,
-                "first_stored_index": sum(c["count"] for c in self._chunks),
-                "count": n_bytes // 4,
-                "crc32": zlib.crc32(data) & 0xFFFFFFFF,
-            }
-        )
+        name = f"chunks/{self._chunk_seq:06d}.u32"
+        self._chunk_seq += 1
+        self._write_q.put((name, data))
 
     def finalize(
         self,
@@ -193,6 +262,7 @@ class ArtifactWriter:
             )
         try:
             os.replace(self._tmp_path, self.path)
+            fsync_directory(self.path.parent)
         except OSError as exc:
             raise CaptureFileError(
                 f"the capture was written but could not be moved to {self.path}: {exc}",
@@ -218,6 +288,9 @@ class ArtifactWriter:
     ) -> dict[str, Any]:
         if self._buffer:
             self._flush_chunk(len(self._buffer))
+        # Every chunk must be in the container before the manifest describes
+        # it, and _zip belongs to the writer thread until it is joined.
+        self._join_writer()
         gaps = sorted(self._gaps, key=lambda g: g.index)
         # A capture being rewritten arrives with its gap table already
         # truncated, so the count it carries is added rather than recomputed.
@@ -230,6 +303,8 @@ class ArtifactWriter:
             "created_utc": self.meta.created_utc,
             "device": self.meta.device,
             "configuration": self.meta.configuration,
+            "user_tags": dict(self.meta.user_tags),
+            "scheduled_actions": list(self.meta.scheduled_actions),
             "timeline": {
                 "sample_rate_hz": self.meta.configuration.get("sample_rate_hz", SAMPLE_RATE_HZ),
                 "sample_period_ns": SAMPLE_PERIOD_NS,
@@ -249,7 +324,9 @@ class ArtifactWriter:
             },
             "gaps": [g.to_json() for g in gaps],
             "gaps_truncated": truncated,
-            "complete": bool(complete and not gaps and not truncated),
+            "complete": capture_is_complete(
+                ran_to_completion=complete, gap_count=len(gaps), gaps_truncated=truncated
+            ),
             "interruption": interruption,
             "stats": stats,
             # Warnings are stored in their machine-readable form so a stored
@@ -260,10 +337,35 @@ class ArtifactWriter:
             self._zip.writestr("metadata.txt", self.meta.metadata_text)
         self._zip.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
         self._zip.close()
+        # Flushed to stable storage before the rename in finalize(): os.replace
+        # is atomic for the directory entry only, so a power loss between the
+        # two would leave a full-length .ppk2a with an unwritten tail — a
+        # capture the operator was told had been written, failing its own
+        # SHA-256. Bench time is not re-acquirable; one sync per capture is
+        # cheap against it.
+        #
+        # After close(), not before: close() is what writes the zip central
+        # directory, and syncing ahead of it leaves the one structure without
+        # which the file is not a zip at all in the page cache. Such a capture
+        # could not even be opened to be diagnosed. `self._zip.fp` is None by
+        # now, so the temp file is reopened to be synced.
+        with suppress(OSError):
+            fd = os.open(self._tmp_path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
         return manifest
 
     def abort(self) -> None:
         if not self._finalized:
+            try:
+                # The writer owns _zip; stop it before closing. Its own error
+                # is irrelevant here — the artifact is being discarded.
+                self._writer_error = None
+                self._join_writer()
+            except BaseException:  # abort must not mask the original failure
+                pass
             try:
                 self._zip.close()
             finally:
@@ -499,7 +601,17 @@ class ArtifactReader:
             configuration=configuration,
             metadata_text=metadata_text,
             start_index=self.manifest.get("timeline", {}).get("start_index", 0),
+            user_tags=self._read_user_tags(),
+            scheduled_actions=list(self.manifest.get("scheduled_actions") or []),
         )
+
+    def _read_user_tags(self) -> dict[str, str]:
+        try:
+            return normalize_user_tags(self.manifest.get("user_tags"))
+        except UsageError as exc:
+            raise CaptureFileError(
+                f"capture manifest has an unusable user_tags block in {self.path}: {exc}"
+            ) from exc
 
     def iter_chunk_bytes(
         self,
@@ -654,11 +766,17 @@ def read_capture(
 
 
 def _stored_warnings(reader: ArtifactReader) -> list[Any]:
-    """Warnings the artifact carries, plus anything reading it turned up."""
+    """Warnings the artifact carries, plus anything reading it turned up.
+
+    Normalized through ``as_json`` so the two sources cannot arrive in
+    different shapes: an artifact written before ``category`` existed carries
+    two keys and a freshly raised one carries three, and a caller iterating
+    ``capture.warnings`` should not have to handle both.
+    """
     stored = reader.manifest.get("warnings", [])
     if not isinstance(stored, list):
         stored = []
-    return [*stored, *(w.to_json() for w in reader.manifest_warnings)]
+    return list(_warnings_as_json([*stored, *reader.manifest_warnings]))
 
 
 def read_window(

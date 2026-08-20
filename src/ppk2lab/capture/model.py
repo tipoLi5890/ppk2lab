@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..calibration import Calibration, SpikeFilter
-from ..errors import CalibrationUnavailableError
+from ..errors import CalibrationUnavailableError, UsageError
 from ..protocol.metadata import parse_metadata
 from ..protocol.samples import GapEvent, SampleBlock
 from ..types import SAMPLE_PERIOD_S, SAMPLE_RATE_HZ
@@ -46,6 +46,15 @@ class CaptureMeta:
     metadata_text: str | None = None
     #: Timeline index of the first stored sample (nonzero for triggered captures).
     start_index: int = 0
+    #: Caller-supplied provenance: board serial, firmware build, experiment id.
+    #: Raw samples are the source of truth, so what a capture is *of* belongs
+    #: in the capture, not only in whatever was derived from it afterwards.
+    #: ppk2lab never reads these; they travel with the file and come back out.
+    user_tags: dict[str, str] = field(default_factory=dict)
+    #: Actions the caller scheduled during the capture, with the sample index
+    #: each actually fired at. What was done to the DUT mid-capture is part of
+    #: what the capture is, so it travels with it.
+    scheduled_actions: list[dict[str, Any]] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -54,7 +63,71 @@ class CaptureMeta:
             "device": dict(self.device),
             "configuration": dict(self.configuration),
             "start_index": self.start_index,
+            "user_tags": dict(self.user_tags),
+            "scheduled_actions": list(self.scheduled_actions),
         }
+
+
+#: A tag set is provenance, not a payload: a handful of short strings saying
+#: what the capture is of. The caps keep a manifest readable and bound what a
+#: mistaken caller can write into an artifact that cannot be re-acquired.
+MAX_USER_TAGS = 64
+MAX_USER_TAG_LENGTH = 512
+
+
+def normalize_user_tags(tags: Any) -> dict[str, str]:
+    """Validate a caller's tag mapping.
+
+    Refuses anything that is not text rather than coercing it: a tag that
+    reads ``"3.7"`` when the caller passed ``3.7`` is a quiet lie about what
+    was recorded, and these strings exist precisely to be trusted later.
+    """
+    if tags is None:
+        return {}
+    if not isinstance(tags, dict):
+        raise UsageError(
+            f"tags must be a mapping of strings, got {type(tags).__name__}",
+            remediation='Pass a dict such as {"sn": "POD01", "fw": "0.3.0"}.',
+        )
+    if len(tags) > MAX_USER_TAGS:
+        raise UsageError(
+            f"too many tags ({len(tags)}); the limit is {MAX_USER_TAGS}",
+            remediation="Tags describe the capture; bulk data belongs beside it, not in it.",
+        )
+    out: dict[str, str] = {}
+    for key, value in tags.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise UsageError(
+                f"tag {key!r} must map a string to a string, "
+                f"got {type(key).__name__} -> {type(value).__name__}",
+                remediation="Convert the value yourself, so the recorded text is the text "
+                "you meant.",
+            )
+        if not key:
+            raise UsageError("a tag key cannot be empty")
+        if len(key) > MAX_USER_TAG_LENGTH or len(value) > MAX_USER_TAG_LENGTH:
+            raise UsageError(
+                f"tag {key!r} exceeds {MAX_USER_TAG_LENGTH} characters",
+                remediation="Record the long form beside the capture and tag it with a key.",
+            )
+        out[key] = value
+    return out
+
+
+def capture_is_complete(
+    *, ran_to_completion: bool, gap_count: int, gaps_truncated: int = 0
+) -> bool:
+    """Whether a capture holds everything it set out to record.
+
+    Three places write this field — the live result, the in-memory capture,
+    and the stored manifest — and they must not drift apart, so all three
+    derive it here. ``ran_to_completion`` folds in "reached its stopping
+    condition" and "was not interrupted"; the rest is loss.
+
+    This is the capture-level question. ``WindowStats.complete`` answers a
+    different one, about a chosen window, and is deliberately separate.
+    """
+    return bool(ran_to_completion and gap_count == 0 and gaps_truncated == 0)
 
 
 class Capture:
@@ -78,7 +151,11 @@ class Capture:
         self.meta = meta
         self.words = words
         self.gaps = sorted(gaps, key=lambda g: g.index)
-        self.complete = complete and not self.gaps
+        self.complete = capture_is_complete(
+            ran_to_completion=complete,
+            gap_count=len(self.gaps),
+            gaps_truncated=gaps_truncated,
+        )
         self.interruption = interruption
         self.warnings = list(warnings or [])
         #: Gaps that occurred after the gap table hit its ceiling. The count is

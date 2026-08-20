@@ -147,3 +147,34 @@ def test_documented_command_line_is_real(source, line):
     )
     unknown = [f for f in flags if f not in per_command[command]]
     assert not unknown, f"{source}: `{line}` names flag(s) `{command}` does not accept: {unknown}"
+
+
+#: The documents that enumerate the assertion metric vocabulary. `--rule` takes
+#: a metric name and nothing else publishes the list, so a metric named in
+#: neither document is one a reader can only find by opening the evaluator.
+METRIC_DOCS = ("docs/cli-reference.md", "skills/ppk2lab-operate/references/regression.md")
+
+
+def _backticked_words(text: str) -> str:
+    """Every inline code span, joined -- prose mentions do not count as documentation."""
+    return " ".join(match.group(1) for match in _INLINE_CODE.finditer(text))
+
+
+@pytest.mark.parametrize("source", METRIC_DOCS)
+def test_documented_metrics_are_the_ones_the_evaluator_accepts(source):
+    """The private table is the authority; the doc lists are hand-maintained.
+
+    Adding a metric to the evaluator without adding it here leaves a rule that
+    works but that nobody writes -- which is how `p5_current` and `p95_current`
+    shipped invisible.
+    """
+    from ppk2lab.analysis.assertions import _METRICS
+
+    path = ROOT / source
+    if not path.is_file():
+        pytest.skip(f"{source} is not present in this tree")
+    spans = _backticked_words(path.read_text(encoding="utf-8"))
+    missing = sorted(
+        metric for metric in _METRICS if not re.search(rf"(?<!\w){metric}(?!\w)", spans)
+    )
+    assert not missing, f"{source} never names assertion metric(s): {missing}"

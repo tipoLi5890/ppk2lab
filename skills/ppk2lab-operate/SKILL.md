@@ -26,8 +26,10 @@ The CLI is self-describing. Prefer querying it over any static text
   usable pre-flight gate. Each failing check carries its own `remediation`
   string and the `exit_code` it maps to — act on it, don't guess
 - Every command supports `--json`; errors carry a stable `code` +
-  `remediation`, and warnings are `{code, message}` too — branch on the
-  codes, never on message text
+  `remediation`, and warnings are `{code, message, category}` too. Those
+  three keys are the same live and in a stored manifest, so `inspect` and
+  `capture` describe the same warning the same way — branch on the codes,
+  never on message text
 - `--simulate` runs every command against a built-in simulated PPK2 for
   testing workflows — never report simulated output as a measurement
 
@@ -92,14 +94,18 @@ field, not a judgement call — work down the list before quoting a number.
    affected and `W_BELOW_MEASUREMENT_FLOOR` fires. Asked "what is the
    sleep current", answer with the mean, the minimum, or charge — never
    with a percentile that bottomed out.
-5. **Sample loss is ordinary, not a fault.** Measured on an otherwise idle
-   macOS host: a 60 s capture lost 25,792 samples (0.43%) in 5 gaps, every
-   one `host_overflow`. With 12 CPU spinners and continuous disk writes the
-   same run lost 1.08% — the gaps got *larger*, not more numerous — and a
-   third run in the same session lost 5.1%. Expect gaps; read
-   `covered_fraction` and `charge_is_lower_bound` before quoting an
-   integral, and report the loss instead of treating it as a device fault.
-   `gap_reasons` in `capabilities --json` says where each loss happened.
+5. **Loss is reported, and no longer expected.** Through `0.2.0` a 60 s
+   capture on an idle macOS host lost 25,792 samples (0.43%) in exactly 5
+   `host_overflow` gaps, and under load the gaps got *larger* rather than
+   more numerous. Both facts were the signature of a bug in this project:
+   the artifact writer compressed each 10-second chunk on the sample thread,
+   so a 60 s capture lost one gap per chunk boundary and load only made each
+   stall longer. Fixed in Unreleased; captures on that same host are now
+   gap-free. Still read `covered_fraction` and `charge_is_lower_bound`
+   before quoting an integral, still report loss rather than calling it a
+   device fault — but a gappy capture is now worth investigating rather than
+   shrugging at. `gap_reasons` in `capabilities --json` says where each loss
+   happened.
 6. **The coded warnings name which of those it was.** The ones that decide
    trust:
    - `W_SAMPLE_GAPS` — samples were lost; `sample_gaps` locates each one.
@@ -162,7 +168,7 @@ measured it.
 | configuring the device and recording captures; long recordings; looking at an artifact before loading it | [references/capture.md](references/capture.md) |
 | capturing on a condition (current/digital/protocol trigger, pre/post windows) | [references/triggers.md](references/triggers.md) |
 | UART or SPI content, D0-D7 edges/pulses/timing, VCD export | [references/decode.md](references/decode.md) |
-| current, charge, energy, percentiles, duty cycle, peak, latency numbers | [references/analysis.md](references/analysis.md) |
+| current, charge, energy, percentiles, duty cycle, peak, latency numbers; differencing two captures | [references/analysis.md](references/analysis.md) |
 | pass/fail power assertions, CI regression gates | [references/regression.md](references/regression.md) |
 | readings look wrong: wiring, Logic VCC, flat/noisy channels | [references/diagnostics.md](references/diagnostics.md) |
 

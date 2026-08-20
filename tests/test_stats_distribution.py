@@ -342,8 +342,10 @@ def test_the_result_publishes_the_grid_it_used():
         "min",
         "max",
         "peak_index",
+        "p5",
         "p50",
         "p90",
+        "p95",
         "p99",
         "p999",
     }
@@ -357,8 +359,8 @@ def test_a_distribution_straddling_the_floor_says_which_quantiles_are_bounds():
     maximum is above the floor — so the quantile *is* the floor, and saying so
     is the only thing that keeps it from reading as a measurement.
     """
-    # Two thirds under the floor, one third above: p50 lands in the underflow
-    # bin, p90 and p99 do not.
+    # Two thirds under the floor, one third above: p5 and p50 land in the
+    # underflow bin, p90 upward do not.
     accumulator = StatsAccumulator(0)
     n = 300
     words = array(
@@ -369,17 +371,17 @@ def test_a_distribution_straddling_the_floor_says_which_quantiles_are_bounds():
     stats = accumulator.finalize()
 
     assert stats.below_grid_samples == 200
-    assert stats.quantiles_at_floor == ["p50"]
+    assert stats.quantiles_at_floor == ["p5", "p50"]
     assert stats.p50_ua == QUANTILE_MIN_UA  # the floor, not the observed 0.05
     assert stats.p90_ua > QUANTILE_MIN_UA  # measured, not bounded
 
     codes = {d.code for d in stats.diagnostics()}
     assert "W_BELOW_MEASUREMENT_FLOOR" in codes
     message = next(d.message for d in stats.diagnostics() if d.code == "W_BELOW_MEASUREMENT_FLOOR")
-    assert "66.7%" in message and "p50 reports" in message
+    assert "66.7%" in message and "p5, p50 report" in message
 
     published = stats.to_json()["distribution"]["quantiles_at_floor"]
-    assert published == ["p50"]
+    assert published == ["p5", "p50"]
 
 
 def test_a_load_clear_of_the_floor_raises_no_bound_warning():
@@ -391,9 +393,9 @@ def test_a_load_clear_of_the_floor_raises_no_bound_warning():
 
 
 def test_every_reported_quantile_can_be_named_a_bound():
-    """A window entirely under the floor bounds all four, not just the median."""
+    """A window entirely under the floor bounds every published quantile."""
     accumulator = StatsAccumulator(0)
     words = array("I", [pack_sample(adc=0, range_index=0, counter=i, logic=0) for i in range(64)])
     accumulator.add_block(SampleBlock(0, words), [0.01] * 64)
     stats = accumulator.finalize()
-    assert stats.quantiles_at_floor == ["p50", "p90", "p99", "p999"]
+    assert stats.quantiles_at_floor == ["p5", "p50", "p90", "p95", "p99", "p999"]

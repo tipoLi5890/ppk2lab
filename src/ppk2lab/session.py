@@ -4,6 +4,14 @@ The reader thread pulls raw bytes from the transport into a bounded queue.
 If the consumer falls behind and the queue fills, whole chunks are dropped
 and the exact dropped byte count is reported to the parser, which converts
 it into an explicit ``GapEvent`` — data loss is never silent.
+
+The queue is bounded in **bytes**, not in items. A read returns
+``1 + in_waiting`` bytes, and ``in_waiting`` is small precisely when the
+reader is keeping up: on one macOS host a 30 s capture averaged 77 bytes per
+read. An item-count bound therefore sized the buffer by how well the reader
+was doing rather than by memory, and 256 items of 77 bytes is 20 kB — 50 ms
+of stream, not the 4 MB the read size suggests. Any consumer pause longer
+than that dropped samples.
 """
 
 from __future__ import annotations
@@ -34,19 +42,27 @@ class StreamSession:
         transport: Transport,
         *,
         read_chunk: int = 16384,
-        queue_chunks: int = 256,
+        queue_bytes: int = 4 * 1024 * 1024,
         read_timeout_s: float = 0.05,
         start_index: int = 0,
     ) -> None:
         self.transport = transport
         self.read_chunk = read_chunk
+        self.queue_bytes = queue_bytes
         self.read_timeout_s = read_timeout_s
         self.parser = SampleStreamParser(start_index=start_index)
-        self._queue: queue.Queue = queue.Queue(maxsize=queue_chunks)
+        # Unbounded in items, bounded in bytes by _queued_bytes below: the
+        # item count says nothing about how much stream is buffered.
+        self._queue: queue.Queue = queue.Queue()
+        self._budget = threading.Lock()
+        self._queued_bytes = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._pending_dropped = 0
         self.dropped_bytes_total = 0
+        #: Largest number of bytes ever queued at once; a run that never
+        #: approached ``queue_bytes`` had a consumer that kept up.
+        self.peak_queued_bytes = 0
         self.error: Exception | None = None
 
     # -- reader thread -----------------------------------------------------
@@ -56,26 +72,59 @@ class StreamSession:
                 data = self.transport.read(self.read_chunk, self.read_timeout_s)
                 if not data:
                     continue
-                if self._pending_dropped:
-                    try:
-                        self._queue.put_nowait(("dropped", self._pending_dropped))
-                        self._pending_dropped = 0
-                    except queue.Full:
-                        self._pending_dropped += len(data)
-                        self.dropped_bytes_total += len(data)
-                        continue
-                try:
-                    self._queue.put_nowait(("data", data))
-                except queue.Full:
+                if not self._reserve(len(data)):
+                    # No room: this read is lost. Remember the exact count so
+                    # the parser can turn it into an explicit gap once the
+                    # consumer catches up.
                     self._pending_dropped += len(data)
                     self.dropped_bytes_total += len(data)
+                    continue
+                if self._pending_dropped:
+                    # The marker is bookkeeping, not stream bytes, so it is
+                    # never itself subject to the budget.
+                    self._queue.put_nowait(("dropped", self._pending_dropped))
+                    self._pending_dropped = 0
+                self._queue.put_nowait(("data", data))
         except Exception as exc:
             self.error = exc
             with contextlib.suppress(queue.Full):
                 self._queue.put_nowait(("error", exc))
         finally:
             with contextlib.suppress(queue.Full):
+                if self._pending_dropped:
+                    # A drop only rides along with the next successful read, so
+                    # a stream that ends while still overflowing — a capture
+                    # stopped mid-loss, an unplugged device — would take its
+                    # last gap to the grave, leaving dropped_bytes_total larger
+                    # than every gap the timeline shows. Loss is never silent,
+                    # including the loss that happened last.
+                    self._queue.put_nowait(("dropped", self._pending_dropped))
+                    self._pending_dropped = 0
                 self._queue.put_nowait(("end", _SENTINEL))
+
+    def _reserve(self, n: int) -> bool:
+        """Claim ``n`` bytes of queue budget; False when the buffer is full.
+
+        An empty queue always admits, whatever the read's size. Without that,
+        a read larger than the whole budget is refused on every iteration
+        forever: the consumer sees no events, the parser is never told (the
+        pending-drop marker only rides along with a successful reserve), and
+        the idle timeout blames the device for going quiet while the host is
+        discarding 100% of the stream. The budget is a back-pressure target,
+        and one read past it beats reporting a host fault as an instrument
+        fault.
+        """
+        with self._budget:
+            if self._queued_bytes and self._queued_bytes + n > self.queue_bytes:
+                return False
+            self._queued_bytes += n
+            if self._queued_bytes > self.peak_queued_bytes:
+                self.peak_queued_bytes = self._queued_bytes
+            return True
+
+    def _release(self, n: int) -> None:
+        with self._budget:
+            self._queued_bytes -= n
 
     def start(self) -> None:
         if self._thread is not None:
@@ -148,6 +197,7 @@ class StreamSession:
             # Stamp after the consumer returns, further down, so a slow
             # consumer is never mistaken for a silent device.
             if kind == "data":
+                self._release(len(payload))
                 for event in self.parser.feed(payload):
                     yield event
                     if (

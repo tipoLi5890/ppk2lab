@@ -152,7 +152,11 @@ firmware fingerprint it was seen under; this one is
 
 ### Sustained streaming at 100 kS/s
 
-Two 60 s captures, differing only in what else the host was doing:
+Two 60 s captures, differing only in what else the host was doing. Both
+predate the Unreleased fix for this project's own artifact writer, which was
+stalling the consumer at every chunk boundary; the loss below is therefore
+mostly not a property of the host or the instrument. Recorded here because it
+is what the protocol layer saw:
 
 | host state | missing samples | share | gaps | gap sizes (samples) |
 |---|---|---|---|---|

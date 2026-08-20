@@ -49,6 +49,10 @@ _transport_factory = SerialTransport
 
 #: Environment variable holding a session-wide source-voltage ceiling in mV.
 MAX_VOLTAGE_ENV = "PPK2LAB_MAX_VOLTAGE_MV"
+#: Set to "1" to make every open simulate, without editing the call site.
+#: Honoured here rather than only in the CLI so a script and a command behave
+#: the same way under it, as they already do for MAX_VOLTAGE_ENV.
+SIMULATE_ENV = "PPK2LAB_SIMULATE"
 
 
 def _drain_input(transport: Transport, *, max_seconds: float = 3.0, quiet_reads: int = 3) -> int:
@@ -75,6 +79,10 @@ def _metadata_terminated(buf: bytes | bytearray) -> bool:
     not a guarantee: residue containing ``\nEND`` would still match.
     """
     return buf.startswith(b"END") or b"\nEND" in buf or b"\rEND" in buf
+
+
+def _env_simulate() -> bool:
+    return os.environ.get(SIMULATE_ENV) == "1"
 
 
 def _env_voltage_ceiling() -> int | None:
@@ -254,7 +262,7 @@ class PPK2:
         serial_number: str | None = None,
         port: str | None = None,
         transport: Transport | None = None,
-        simulate: bool = False,
+        simulate: bool | None = None,
         simulator: SimulatedPPK2 | None = None,
         read_metadata: bool = True,
         max_voltage_mv: int | None = None,
@@ -266,16 +274,23 @@ class PPK2:
         session cannot corrupt the metadata read. When the OS does not expose
         USB interface numbers (observed on macOS), the measurement port is
         identified by probing candidates with the read-only metadata command.
+
+        ``simulate=None`` (the default) reads ``PPK2LAB_SIMULATE``; pass
+        ``True`` or ``False`` to decide explicitly regardless of it. The
+        variable never applies to an injected ``transport``: the environment
+        must not decide the identity of a transport the caller supplied, or a
+        real instrument gets labelled ``simulated: true`` in a stored manifest
+        while every byte still reaches the wire.
         """
         if transport is not None:
             info = (
                 simulated_device_info("injected")
-                if simulate
+                if simulate is True
                 else DeviceInfo(
                     serial_number=serial_number, vid=None, pid=None, ports=(), simulated=False
                 )
             )
-        elif simulate or simulator is not None:
+        elif (simulate if simulate is not None else _env_simulate()) or simulator is not None:
             if simulator is None:
                 from .testing.profiles import DemoActivityProfile
 
@@ -799,7 +814,11 @@ class PPK2:
 
 
 def _select_device(*, serial_number: str | None, port: str | None) -> DeviceInfo:
-    devices = discover()
+    # Explicitly not simulated: this is only reached once `open()` has decided
+    # it wants real hardware, and a bare `discover()` would read
+    # PPK2LAB_SIMULATE and enumerate the simulator instead — so an explicit
+    # `simulate=False` could not escape the variable it is meant to override.
+    devices = discover(simulate=False)
     if port is not None:
         for dev in devices:
             if any(p.path == port for p in dev.ports):

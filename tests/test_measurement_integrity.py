@@ -9,7 +9,10 @@ convenience.
 from __future__ import annotations
 
 import json
+import math
 import struct
+import threading
+import time
 import zipfile
 
 import pytest
@@ -18,6 +21,7 @@ from ppk2lab.capture.runner import (
     ANCHOR_JITTER_S,
     DEFAULT_IN_MEMORY_LIMIT_SAMPLES,
     MIN_RATE_CHECK_SECONDS,
+    PROGRESS_INTERVAL_S,
     timeline_report,
 )
 from ppk2lab.capture.stats import IMPLAUSIBLE_CURRENT_UA, VoltageContext, compute_stats
@@ -42,7 +46,9 @@ from ppk2lab.protocol.samples import (
     SampleStreamParser,
     pack_sample,
 )
+from ppk2lab.session import StreamSession
 from ppk2lab.testing.profiles import ConstantProfile, DemoActivityProfile, StepProfile
+from ppk2lab.transport.base import Transport
 from ppk2lab.transport.mock import MockTransport, SimulatedPPK2
 from ppk2lab.types import GapEvent, Mode, PortInfo, PortRole, VoltageBasis
 
@@ -786,13 +792,39 @@ def test_warnings_carry_codes_agents_can_branch_on():
     payload = result.to_json()["warnings"]
     assert payload, "a capture with unknown DUT power should warn"
     for entry in payload:
-        assert set(entry) == {"code", "message"}
+        assert set(entry) == {"code", "message", "category"}
         assert entry["code"].startswith("W_")
+        # The category travels with the warning so a consumer can route it
+        # without fetching the capabilities catalog to join on the code.
+        assert entry["category"] in {
+            "capture integrity",
+            "measurement trust",
+            "device state",
+            "analysis",
+        }
 
 
 def test_as_json_round_trips_stored_warnings():
+    """A stored warning comes back in the same shape a live one has.
+
+    This used to assert `as_json(stored) == stored`, which pinned the opposite:
+    the dict branch rebuilt only {code, message}, so `category` was stripped on
+    the way into a manifest and `capture --json` and `inspect --json` reported
+    different shapes for the same warning.
+    """
     stored = [{"code": "W_SAMPLE_GAPS", "message": "text"}]
-    assert as_json(stored) == stored
+    restored = as_json(stored)
+    assert restored == [
+        {"code": "W_SAMPLE_GAPS", "message": "text", "category": "capture integrity"}
+    ]
+    # Idempotent: normalizing an already-normalized list must not change it,
+    # because a capture can be read, re-warned and rewritten.
+    assert as_json(restored) == restored
+    # A category already on the dict is preserved rather than re-derived.
+    tagged = [{"code": "W_SAMPLE_GAPS", "message": "text", "category": "something else"}]
+    assert as_json(tagged)[0]["category"] == "something else"
+    # An unrecognised code yields None, matching Diagnostic.to_json's contract.
+    assert as_json([{"code": "W_FROM_THE_FUTURE", "message": "x"}])[0]["category"] is None
     assert as_json(["bare string"])[0]["code"] == "W_GENERIC"
 
 
@@ -930,3 +962,451 @@ def test_consecutive_captures_do_not_inherit_stale_bytes():
         assert device.last_session.parser.desync_events == 0
     finally:
         device.close()
+
+
+# -- the reader queue is bounded in bytes -------------------------------
+#
+# SerialTransport.read returns ``1 + in_waiting`` bytes, and in_waiting is
+# small exactly when the reader is keeping up: a 30 s hardware capture
+# averaged 77 bytes per read. Bounding the queue by item count therefore
+# sized the buffer by how well the reader was doing — 256 items of 77 bytes
+# is 20 kB, 50 ms of stream — so any consumer pause longer than that dropped
+# samples. Bounding it in bytes is what makes the buffer mean what the
+# constants say it means.
+
+
+class _DribbleTransport(Transport):
+    """A transport that answers in the small reads a real serial port does.
+
+    Paces bytes at the PPK2's own 400 kB/s so a pause buffers a realistic
+    amount rather than an unbounded one.
+    """
+
+    RATE_BYTES_S = 400_000
+    READ_BYTES = 77
+
+    def __init__(self) -> None:
+        self._open = True
+        self._start = time.monotonic()
+        self._served = 0
+
+    def open(self) -> None:
+        self._open = True
+
+    def close(self) -> None:
+        self._open = False
+
+    def write(self, data: bytes) -> None:
+        return None
+
+    def read(self, max_bytes: int, timeout_s: float = 0.1) -> bytes:
+        due = int((time.monotonic() - self._start) * self.RATE_BYTES_S) - self._served
+        if due < self.READ_BYTES:
+            time.sleep(min(timeout_s, 0.005))
+            return b""
+        n = min(self.READ_BYTES, max_bytes)
+        self._served += n
+        return bytes(n)
+
+    @property
+    def is_open(self) -> bool:
+        return self._open
+
+    @property
+    def description(self) -> str:
+        return "dribble://test"
+
+
+def _pause_and_drain(queue_bytes: float) -> StreamSession:
+    session = StreamSession(_DribbleTransport(), queue_bytes=int(queue_bytes))
+    session.start()
+    try:
+        time.sleep(0.3)  # the consumer is busy; nothing is drained
+    finally:
+        session.stop()
+    return session
+
+
+@pytest.mark.slow
+def test_a_consumer_pause_fits_in_the_byte_budget():
+    """0.3 s of stream is 120 kB — comfortably inside the 4 MB buffer."""
+    session = _pause_and_drain(4 * 1024 * 1024)
+    assert session.dropped_bytes_total == 0
+    assert 0 < session.peak_queued_bytes <= 4 * 1024 * 1024
+
+
+@pytest.mark.slow
+def test_the_same_pause_overflows_the_buffer_the_item_bound_really_gave():
+    """256 items x 77 bytes was the effective size before; it drops here."""
+    session = _pause_and_drain(256 * _DribbleTransport.READ_BYTES)
+    assert session.dropped_bytes_total > 0
+
+
+def test_the_queue_budget_counts_bytes_and_is_returned_on_consumption():
+    session = StreamSession(_DribbleTransport(), queue_bytes=1000)
+    assert session._reserve(600) is True
+    assert session._reserve(600) is False, "600 + 600 must not fit in 1000 bytes"
+    session._release(600)
+    assert session._reserve(600) is True
+    assert session.peak_queued_bytes == 600
+
+
+class _FramedFloodTransport(Transport):
+    """Serves a correctly framed sample stream in fixed-size reads.
+
+    ``_DribbleTransport`` only needs its byte *counts* to be realistic; these
+    bytes have to parse. A host-side drop reaches the timeline as a gap only
+    if what surrounds it frames, and the 6-bit counter has to run unbroken
+    across the drop so the gap under test is the one the host caused rather
+    than a device-side skip. 1024 samples is a whole number of counter cycles,
+    so one chunk served over and over keeps the counter continuous.
+    """
+
+    CHUNK_SAMPLES = 1024
+    CHUNK_BYTES = CHUNK_SAMPLES * 4
+
+    def __init__(self, *, burst_chunks: int | None = None) -> None:
+        self._open = True
+        self._chunk = _raw_stream(self.CHUNK_SAMPLES)
+        self._remaining = burst_chunks
+        self._extra = 0
+        #: Set once the burst is spent, so a test can wait for the reader to
+        #: have made every keep-or-drop decision it is going to make.
+        self.burst_served = threading.Event()
+
+    def resume(self, chunks: int = 1) -> None:
+        """Let the reader have ``chunks`` further reads after the burst."""
+        self._extra += chunks
+
+    def open(self) -> None:
+        self._open = True
+
+    def close(self) -> None:
+        self._open = False
+
+    def write(self, data: bytes) -> None:
+        return None
+
+    def read(self, max_bytes: int, timeout_s: float = 0.1) -> bytes:
+        if self._remaining is not None and self._remaining <= 0:
+            if self._extra <= 0:
+                # Set here and not when the last chunk is handed over: the
+                # reader only asks again once it has queued or dropped the
+                # previous chunk, so a test waiting on this sees a settled
+                # drop count.
+                self.burst_served.set()
+                time.sleep(min(timeout_s, 0.005))
+                return b""
+            self._extra -= 1
+        elif self._remaining is not None:
+            self._remaining -= 1
+        time.sleep(0.001)  # a paced reader, not a spin loop pegging a core
+        return self._chunk[:max_bytes] if max_bytes < len(self._chunk) else self._chunk
+
+    @property
+    def is_open(self) -> bool:
+        return self._open
+
+    @property
+    def description(self) -> str:
+        return "framed://test"
+
+
+def test_a_host_side_overflow_reaches_the_timeline_as_a_gap():
+    """Bytes the host threw away have to be priced into the timeline.
+
+    The reader counts them, but the count only becomes measurement truth once
+    the parser turns it into a ``GapEvent`` the consumer sees. Without the
+    pending-drop hand-off the stream reads as continuous, and the samples that
+    never arrived are absorbed into the indices on either side of the hole —
+    loss reported nowhere the caller looks.
+    """
+    chunk = _FramedFloodTransport.CHUNK_BYTES
+    transport = _FramedFloodTransport(burst_chunks=20)
+    session = StreamSession(transport, read_chunk=chunk, queue_bytes=2 * chunk)
+    gaps: list[GapEvent] = []
+    blocks = 0
+    session.start()
+    try:
+        assert transport.burst_served.wait(5.0), "the reader never worked through the burst"
+        # The transport is silent now, so nothing further can be dropped and
+        # this total is final for the rest of the test.
+        dropped = session.dropped_bytes_total
+        assert dropped > 0, "the burst must overflow the budget or this proves nothing"
+        # One more read: the drop marker is handed over alongside the next
+        # successful reserve, never on its own.
+        transport.resume()
+        for event in session.events(idle_timeout_s=2.0):
+            if isinstance(event, GapEvent):
+                gaps.append(event)
+            else:
+                blocks += 1
+            if gaps and blocks >= 3:
+                break
+    finally:
+        session.stop()
+    assert [g.reason for g in gaps] == ["host_overflow"]
+    assert sum(g.missing for g in gaps) * 4 == dropped
+    # Device-side loss inside the discarded run is unknowable, so the gap
+    # cannot claim to be an exact account of what happened there.
+    assert all(g.ambiguous for g in gaps)
+
+
+def test_a_budget_smaller_than_one_read_is_not_a_black_hole():
+    """A read larger than the whole budget must still get through.
+
+    The budget is a back-pressure target, not a filter. Refusing every read
+    that could not fit meant the consumer saw nothing at all, the parser was
+    never told (the drop marker only rides along with a successful reserve),
+    and the idle timeout then blamed the device for going quiet while the host
+    was discarding 100% of the stream.
+    """
+    chunk = _FramedFloodTransport.CHUNK_BYTES
+    session = StreamSession(_FramedFloodTransport(), read_chunk=chunk, queue_bytes=chunk // 4)
+    gaps: list[GapEvent] = []
+    stored = 0
+    session.start()
+    try:
+        time.sleep(0.05)  # occupy the queue, so the next read really is refused
+        for event in session.events(sample_limit=4 * chunk, idle_timeout_s=1.0):
+            if isinstance(event, GapEvent):
+                gaps.append(event)
+            else:
+                stored += len(event.words)
+    finally:
+        session.stop()
+    assert stored > 0, "the whole stream was discarded and no event ever reached the consumer"
+    assert any(g.reason == "host_overflow" for g in gaps), "the loss must still be reported"
+    # Exactly one read past the budget is admitted -- the overshoot is bounded
+    # and deliberate, not an abandoned limit.
+    assert session.peak_queued_bytes == chunk
+
+
+# -- actions scheduled inside a capture ----------------------------------
+#
+# Switching DUT power mid-capture is how an inrush is recorded, and doing it
+# from a timer thread races the reader on the same port and lands within a
+# scheduler quantum of where it was asked to. Firing between two blocks is
+# single-threaded and lands on a sample index the manifest can record.
+
+
+def _artifact_writer_threads() -> int:
+    return sum(t.name == "ppk2lab-artifact-writer" for t in threading.enumerate())
+
+
+def test_a_scheduled_action_fires_inline_and_is_recorded():
+    fired: list[str] = []
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True)
+    try:
+        result = device.capture(
+            duration_s=0.5, at=[(0.2, lambda: fired.append("on"), "dut_power_on")]
+        )
+    finally:
+        device.close()
+    assert fired == ["on"]
+    (record,) = result.scheduled_actions
+    assert record["label"] == "dut_power_on"
+    assert record["error"] is None
+    assert record["requested_s"] == pytest.approx(0.2)
+    # Within one block of the request, not one scheduler quantum.
+    assert record["fired_s"] == pytest.approx(0.2, abs=0.01)
+    assert record["fired_index"] == pytest.approx(20_000, abs=1000)
+
+
+def test_a_failing_action_does_not_cost_the_capture():
+    def boom():
+        raise RuntimeError("the DUT said no")
+
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True)
+    try:
+        result = device.capture(duration_s=0.3, at=[(0.1, boom, "boom")])
+    finally:
+        device.close()
+    assert result.complete, "a bad callback must not damage the recording"
+    assert result.stats.stored_samples > 0
+    (record,) = result.scheduled_actions
+    assert "RuntimeError" in record["error"]
+    assert "W_SCHEDULED_ACTION" in _codes(result.warnings)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        (0.1,),
+        (0.1, "not callable"),
+        ("soon", lambda: None),
+        (-1.0, lambda: None),
+        # Infinity satisfies `delay_s >= 0`, so it used to sail past the
+        # validation and reach round() as a bare OverflowError -- no code, no
+        # remediation, and nothing to tell a caller which entry was wrong.
+        (float("inf"), lambda: None),
+        (float("nan"), lambda: None),
+    ],
+)
+def test_a_malformed_schedule_is_refused_before_the_capture(entry, tmp_path):
+    """A rejected schedule must cost nothing at all.
+
+    The validation used to run after ``ArtifactWriter`` had opened its temp
+    file and started its writer thread, and the raise escaped above the
+    try/except that aborts the writer: twenty rejected calls left twenty
+    parked threads, twenty open descriptors and twenty ``.tmp`` files, on a
+    call that never recorded a sample.
+    """
+    writers_before = _artifact_writer_threads()
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True)
+    try:
+        with pytest.raises(UsageError):
+            device.capture(duration_s=0.05, output=str(tmp_path / "cap.ppk2a"), at=[entry])
+    finally:
+        device.close()
+    assert list(tmp_path.iterdir()) == [], "a rejected capture left a file behind"
+    assert _artifact_writer_threads() <= writers_before
+
+
+def test_an_action_the_capture_never_reached_is_recorded_rather_than_dropped(tmp_path):
+    """A stimulus that never happened is a fact about the run.
+
+    Dropping the entry made a capture whose DUT was never switched on
+    byte-for-byte indistinguishable from one that scheduled nothing, so a
+    reader could only conclude the load really was that flat.
+    """
+    fired: list[str] = []
+    path = tmp_path / "never.ppk2a"
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True)
+    try:
+        result = device.capture(
+            duration_s=0.3, output=str(path), at=[(5.0, lambda: fired.append("late"), "never")]
+        )
+    finally:
+        device.close()
+    assert fired == []
+    (record,) = result.scheduled_actions
+    assert record["label"] == "never"
+    assert record["requested_s"] == pytest.approx(5.0)
+    assert record["fired_index"] is None
+    assert record["fired_s"] is None
+    assert record["error"] is not None
+    # The record is only half of it: a reader who did not pass `at=` never
+    # looks at scheduled_actions, and the warning is what reaches them.
+    assert "W_SCHEDULED_ACTION" in _codes(result.warnings)
+
+    with zipfile.ZipFile(path) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+    assert manifest["scheduled_actions"] == result.scheduled_actions
+    assert any(w["code"] == "W_SCHEDULED_ACTION" for w in manifest["warnings"])
+    # The stored form is the one an agent parses, and null firing fields are
+    # new there: a schema that still required integers would reject the very
+    # manifest ppk2lab now writes.
+    import jsonschema
+
+    from ppk2lab.schemas import get_schema
+
+    jsonschema.validate(manifest, get_schema("capture-manifest"))
+
+
+def _never_firing_trigger(device):
+    """A current threshold no simulated load can cross.
+
+    A trigger that never fires is exactly the case the stream keeps flowing
+    and nothing reaches the sink, which is where the capture spends its time
+    on a real bench.
+    """
+    from ppk2lab.triggers.engine import CurrentThresholdTrigger, TriggerEngine
+
+    return TriggerEngine(
+        CurrentThresholdTrigger(1e9, direction="above"),
+        pre_samples=10,
+        post_samples=10,
+        calibration=device.calibration,
+        vdd_mv=device.state.source_voltage_mv,
+    )
+
+
+def test_a_scheduled_action_cannot_be_combined_with_a_trigger():
+    """The two ways of placing an event on the timeline do not compose.
+
+    A triggered capture's timeline begins ``pre_samples`` before the trigger
+    fires, so a delay measured from the first sample cannot be honoured. Worse
+    in practice: the action is the stimulus meant to make the trigger fire, so
+    accepting the pair produced a capture that waited for something its own
+    unfired schedule was supposed to cause.
+    """
+    fired: list[str] = []
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True)
+    try:
+        with pytest.raises(UsageError):
+            device.capture(
+                trigger_engine=_never_firing_trigger(device),
+                trigger_timeout_s=0.5,
+                at=[(0.05, lambda: fired.append("power_on"), "power_on")],
+            )
+    finally:
+        device.close()
+    assert fired == [], "the refusal must come before anything touches the DUT"
+
+
+def test_progress_is_reported_while_a_trigger_has_not_fired():
+    """Waiting for a trigger is when a caller most needs to be told anything.
+
+    Progress used to be reported from the sink, and a triggered capture only
+    reaches the sink through trigger output -- so a 90 s wait for an event
+    that never came produced not one update, the exact silence the callback
+    exists to prevent.
+    """
+    calls: list[dict] = []
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True)
+    try:
+        result = device.capture(
+            trigger_engine=_never_firing_trigger(device),
+            trigger_timeout_s=0.6,
+            on_progress=calls.append,
+        )
+    finally:
+        device.close()
+    assert result.interruption == {"reason": "trigger_timeout"}
+    assert len(calls) >= 1
+    # Nothing is stored before a trigger fires; reporting anything else here
+    # would be reporting samples that no capture will ever contain.
+    assert all(update["stored"] == 0 for update in calls)
+
+
+def test_progress_updates_are_throttled_and_carry_a_stable_payload():
+    calls: list[dict] = []
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True)
+    started = time.monotonic()
+    try:
+        result = device.capture(duration_s=2.0, on_progress=calls.append)
+    finally:
+        device.close()
+    elapsed = time.monotonic() - started
+    assert result.complete
+    assert len(calls) >= 2
+    assert all(
+        set(update) == {"stored", "elapsed_s", "gap_count", "sample_limit"} for update in calls
+    )
+    stored = [update["stored"] for update in calls]
+    assert stored == sorted(stored), "a progress bar cannot be allowed to run backwards"
+    times = [update["elapsed_s"] for update in calls]
+    assert times == sorted(times)
+    # At most one report per interval, plus the one that fires immediately.
+    # The simulator delivers this capture in ~50 blocks, so an unthrottled
+    # callback runs ~50 times however slow the host is -- the bound catches a
+    # deleted throttle without pinning any particular timing.
+    assert len(calls) <= 2 + math.ceil(elapsed / PROGRESS_INTERVAL_S)
+
+
+def test_a_failing_progress_callback_is_disabled_not_fatal():
+    calls: list[dict] = []
+
+    def cb(update):
+        calls.append(update)
+        raise ValueError("callback is broken")
+
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True)
+    try:
+        result = device.capture(duration_s=0.3, on_progress=cb)
+    finally:
+        device.close()
+    assert len(calls) == 1, "a broken callback must not be called again"
+    assert "W_PROGRESS_CALLBACK" in _codes(result.warnings)
+    assert result.complete

@@ -9,8 +9,10 @@ record and ``complete=False``.
 from __future__ import annotations
 
 import contextlib
+import math
 import signal
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -23,7 +25,9 @@ from ..diagnostics import (
     W_METADATA,
     W_NO_SAMPLES,
     W_NOT_CALIBRATED,
+    W_PROGRESS_CALLBACK,
     W_SAMPLE_GAPS,
+    W_SCHEDULED_ACTION,
     W_STREAM_DESYNC,
     W_TIMELINE_COMPRESSION,
     W_TRIGGER,
@@ -36,7 +40,13 @@ from ..errors import StreamStalledError, TransportError, UsageError
 from ..protocol.samples import GapEvent, SampleBlock
 from ..triggers.engine import TriggerEngine
 from ..types import SAMPLE_PERIOD_S, SAMPLE_RATE_HZ, VoltageBasis
-from .model import Capture, CaptureBuilder, CaptureMeta
+from .model import (
+    Capture,
+    CaptureBuilder,
+    CaptureMeta,
+    capture_is_complete,
+    normalize_user_tags,
+)
 from .stats import StatsAccumulator, VoltageContext, WindowStats
 
 #: A capture whose timeline advanced measurably slower than the wall clock
@@ -81,6 +91,12 @@ class CaptureResult:
     warnings: list[Diagnostic] = field(default_factory=list)
     #: Wall-clock cross-check of the sample timeline; see ``timeline_report``.
     timeline: dict[str, Any] = field(default_factory=dict)
+    #: Scheduled actions, with the sample index each fired at — or nulls and a
+    #: reason for one the capture ended before reaching.
+    scheduled_actions: list[dict[str, Any]] = field(default_factory=list)
+    #: The provenance the caller passed in, handed straight back. A caller that
+    #: just tagged a capture should not have to reopen the file to read them.
+    user_tags: dict[str, str] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -91,6 +107,8 @@ class CaptureResult:
             "interruption": self.interruption,
             "trigger": self.trigger,
             "timeline": dict(self.timeline),
+            "user_tags": dict(self.user_tags),
+            "scheduled_actions": list(self.scheduled_actions),
             "stats": self.stats.to_json() if self.stats else None,
             "warnings": [w.to_json() for w in self.warnings],
         }
@@ -170,6 +188,46 @@ def timeline_report(
     return report
 
 
+#: How often a progress callback may be invoked. Progress is a courtesy to a
+#: human watching a long capture, not a data path; calling it per block would
+#: put a caller's code in the way of the stream 25 times a second.
+PROGRESS_INTERVAL_S = 0.25
+
+
+def _normalize_schedule(at: Sequence[tuple[Any, ...]] | None) -> list[tuple[int, Any, str]]:
+    """Validate scheduled actions and put them in firing order.
+
+    Each entry is ``(delay_s, callable)`` or ``(delay_s, callable, label)``,
+    with ``delay_s`` measured from the first sample of the capture.
+    """
+    if not at:
+        return []
+    out: list[tuple[int, Any, str]] = []
+    for i, entry in enumerate(at):
+        if not isinstance(entry, tuple) or len(entry) not in (2, 3):
+            raise UsageError(
+                f"scheduled action {i} must be (delay_s, callable[, label]), got {entry!r}"
+            )
+        delay_s, action = entry[0], entry[1]
+        label = entry[2] if len(entry) == 3 else getattr(action, "__name__", f"action{i}")
+        if not callable(action):
+            raise UsageError(f"scheduled action {label!r} is not callable")
+        if not isinstance(delay_s, int | float) or isinstance(delay_s, bool):
+            raise UsageError(f"scheduled action {label!r} needs a numeric delay_s")
+        # isfinite rather than `>= 0`: infinity satisfies `>= 0` and would
+        # reach round() as a bare OverflowError, where every other malformed
+        # entry here produces a UsageError with a remediation.
+        if not math.isfinite(delay_s) or delay_s < 0:
+            raise UsageError(
+                f"scheduled action {label!r} needs a finite delay_s >= 0, got {delay_s!r}"
+            )
+        if not isinstance(label, str):
+            raise UsageError(f"scheduled action {i} needs a string label, got {label!r}")
+        out.append((round(delay_s * SAMPLE_RATE_HZ), action, label))
+    out.sort(key=lambda item: item[0])
+    return out
+
+
 def run_capture(
     device: Any,
     *,
@@ -182,6 +240,9 @@ def run_capture(
     trigger_timeout_s: float | None = None,
     assume_voltage_mv: int | None = None,
     in_memory_limit_samples: int | None = DEFAULT_IN_MEMORY_LIMIT_SAMPLES,
+    tags: dict[str, str] | None = None,
+    at: Sequence[tuple[Any, ...]] | None = None,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> CaptureResult:
     """Capture from an open device. Never enables DUT power or changes any
     hardware state other than starting/stopping the measurement stream."""
@@ -195,6 +256,21 @@ def run_capture(
         )
     if keep_in_memory is None:
         keep_in_memory = output is None
+
+    # Validated here, with the other argument checks, and deliberately before
+    # ArtifactWriter opens a temp file and starts its writer thread: a raise
+    # below that point escapes above the try/except that would abort the
+    # writer, leaving a parked thread, an open fd and a stray `.tmp` file
+    # behind for every rejected call.
+    pending_actions = _normalize_schedule(at)
+    if at and trigger_engine is not None:
+        raise UsageError(
+            "scheduled actions cannot be combined with a trigger",
+            remediation="A triggered capture's timeline starts pre_samples before the "
+            "trigger fires, so a delay measured from the first sample cannot be honoured "
+            "and the recorded fired_index would predate the action. Run the stimulus "
+            "before the capture, or use duration_s=/sample_limit=.",
+        )
 
     if duration_s is not None:
         limit = round(duration_s * SAMPLE_RATE_HZ)
@@ -244,6 +320,9 @@ def run_capture(
             "trigger": trigger_engine.describe() if trigger_engine else None,
         },
         metadata_text=device.metadata.raw_text if device.metadata else None,
+        # Validated before a single sample is recorded: a tag rejected at
+        # finalize would cost the capture, and bench time is not re-acquirable.
+        user_tags=normalize_user_tags(tags),
     )
 
     calibration = device.calibration
@@ -274,6 +353,68 @@ def run_capture(
     first_sample_utc: str | None = None
     first_block_samples = 0
     last_block_samples = 0
+
+    fired_actions: list[dict[str, Any]] = []
+    progress_state = {"last": 0.0, "live": on_progress is not None}
+
+    def _run_due_actions() -> None:
+        """Fire scheduled actions inline, on this thread.
+
+        Inline is the point. A timer thread writing to the same serial port
+        races the reader and lands within a scheduler quantum of where it was
+        asked to; here the action happens between two blocks, at a sample
+        index the manifest can then record.
+        """
+        if not pending_actions or first_index is None or last_index is None:
+            return
+        elapsed_samples = last_index - first_index
+        while pending_actions and pending_actions[0][0] <= elapsed_samples:
+            due_samples, action, label = pending_actions.pop(0)
+            record: dict[str, Any] = {
+                "label": label,
+                "requested_s": due_samples / SAMPLE_RATE_HZ,
+                "fired_index": last_index,
+                "fired_s": elapsed_samples / SAMPLE_RATE_HZ,
+                "error": None,
+            }
+            try:
+                action()
+            except Exception as exc:
+                # The capture outlives a bad callback: samples already taken
+                # cannot be re-acquired, and a silent failure would leave the
+                # manifest claiming something happened that did not.
+                record["error"] = f"{type(exc).__name__}: {exc}"
+                warnings.append(
+                    warn(
+                        W_SCHEDULED_ACTION,
+                        f"scheduled action {label!r} raised at "
+                        f"{record['fired_s']:.3f} s: {record['error']}",
+                    )
+                )
+            fired_actions.append(record)
+
+    def _report_progress() -> None:
+        if not progress_state["live"] or on_progress is None:
+            return
+        now = time.monotonic()
+        if now - float(progress_state["last"]) < PROGRESS_INTERVAL_S:
+            return
+        progress_state["last"] = now
+        try:
+            on_progress(
+                {
+                    "stored": acc.stored,
+                    "elapsed_s": now - started,
+                    "gap_count": acc.gap_count,
+                    "sample_limit": sample_limit,
+                }
+            )
+        except Exception as exc:
+            # A reporting callback is not worth a capture. Say so once.
+            progress_state["live"] = False
+            warnings.append(
+                warn(W_PROGRESS_CALLBACK, f"progress callback raised and was disabled: {exc}")
+            )
 
     def sink(event: SampleBlock | GapEvent) -> None:
         nonlocal first_index, last_index, first_sample_at, last_sample_at
@@ -308,6 +449,7 @@ def run_capture(
                 writer.add_block(event)
             else:
                 writer.add_gap(event)
+        _run_due_actions()
 
     started_utc = datetime.now(UTC).isoformat(timespec="milliseconds")
     started = time.monotonic()
@@ -331,6 +473,11 @@ def run_capture(
     try:
         if trigger_engine is None:
             for event in device.stream(sample_limit=sample_limit, duration_s=None):
+                # Driven by the stream, not by `sink`: a triggered capture
+                # reaches `sink` only through trigger output, so reporting from
+                # there showed nothing at all during the wait -- which is the
+                # 90 s capture the callback exists for.
+                _report_progress()
                 if (
                     sample_limit is not None
                     and isinstance(event, SampleBlock)
@@ -351,6 +498,7 @@ def run_capture(
                     break
         else:
             for event in device.stream():
+                _report_progress()
                 if (
                     trigger_timeout_s is not None
                     and not trigger_engine.fired
@@ -480,13 +628,52 @@ def run_capture(
             # the offline `measure` path from disagreeing about what they mean.
             warnings.extend(stats.diagnostics())
 
-        complete = reached_target and interruption is None and acc.gap_count == 0
+        ran_to_completion = reached_target and interruption is None
+        # acc.gap_count counts every gap, including any the sinks' gap tables
+        # stopped enumerating, so truncation cannot hide loss from this test.
+        complete = capture_is_complete(ran_to_completion=ran_to_completion, gap_count=acc.gap_count)
+
+        # An action that never came due is a fact about the run, and dropping
+        # it made a capture whose stimulus never happened byte-for-byte
+        # indistinguishable from one that scheduled nothing. Recorded with the
+        # ones that fired, and warned about once for the whole set so a long
+        # schedule cannot flood the list -- the warning is the half that
+        # reaches a reader who did not pass `at=`.
+        if pending_actions:
+            ended_s = (
+                (last_index - first_index) / SAMPLE_RATE_HZ
+                if first_index is not None and last_index is not None
+                else 0.0
+            )
+            for due_samples, _action, label in pending_actions:
+                fired_actions.append(
+                    {
+                        "label": label,
+                        "requested_s": due_samples / SAMPLE_RATE_HZ,
+                        "fired_index": None,
+                        "fired_s": None,
+                        "error": f"never fired: the capture ended at {ended_s:.3f} s",
+                    }
+                )
+            names = ", ".join(repr(entry[2]) for entry in pending_actions)
+            warnings.append(
+                warn(
+                    W_SCHEDULED_ACTION,
+                    f"{len(pending_actions)} scheduled action(s) never fired; the capture "
+                    f"ended at {ended_s:.3f} s: {names}",
+                )
+            )
+            pending_actions.clear()
+
+        # Recorded before either sink is finalized so the stored manifest and
+        # the in-memory capture describe the same run.
+        meta.scheduled_actions = fired_actions
 
         capture: Capture | None = None
         if builder is not None:
             builder.warnings.extend(warnings)
             capture = builder.finish(
-                complete=reached_target and interruption is None,
+                complete=ran_to_completion,
                 interruption=interruption,
                 timing=timeline,
             )
@@ -495,7 +682,7 @@ def run_capture(
         sha256: str | None = None
         if writer is not None:
             manifest = writer.finalize(
-                complete=reached_target and interruption is None,
+                complete=ran_to_completion,
                 interruption=interruption,
                 stats=stats.to_json() if stats else None,
                 warnings=[w.to_json() for w in warnings],
@@ -526,6 +713,8 @@ def run_capture(
         capture_sha256=sha256,
         warnings=warnings,
         timeline=timeline,
+        scheduled_actions=fired_actions,
+        user_tags=dict(meta.user_tags),
     )
 
 

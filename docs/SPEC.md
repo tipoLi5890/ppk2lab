@@ -1,7 +1,8 @@
 # Public data model, states, API, and schema contracts
 
-Status: frozen as of `0.2.0`. Changes follow the stability policy at the end
-of this file. `SCHEMA_VERSION` is `"1"` and is independent of the package
+Status: frozen since `0.2.0`; `0.3.0` is the current release and adds to that
+surface without changing it. Changes follow the stability policy at the end of
+this file. `SCHEMA_VERSION` is `"1"` and is independent of the package
 version.
 
 ## Core concepts
@@ -187,6 +188,15 @@ result = dev.capture(duration_s=5.0, output="run.ppk2a")  # -> CaptureResult
 dev.close()                              # restores session-start power state
 ```
 
+`simulate` decides explicitly when it is given and reads `PPK2LAB_SIMULATE`
+when it is not, in `PPK2.open` and in `discover` alike; `PPK2LAB_SIMULATE=1` is
+what makes the environment variable interchangeable with `--simulate`. It never
+applies to an injected `transport=`, because the environment must not decide
+the identity of a transport the caller supplied: a real instrument would be
+recorded as `simulated: true` in a stored manifest while every byte still
+reached the wire. Only an explicit `simulate=True` labels an injected transport
+simulated.
+
 `with dev.stream(...) as events:` is the documented idiom. A stream owns the
 instrument — the claim is taken when `stream()` returns, not at the first
 iteration, so an iterator that is created and never started still holds it —
@@ -215,7 +225,12 @@ Offline:
 cap = ppk2lab.Capture.load("run.ppk2a")
 anns = ppk2lab.decode_capture(cap, ppk2lab.UARTDecoder(rx="D0", baud=9600))
 from ppk2lab.analysis import measure_window, measure_annotations, parse_rule, evaluate_assertion
+from ppk2lab.analysis import compare_stats, summarize_side, dominant_range
 ```
+
+`compare_stats(a, b, *, metric=, same_instrument=)` differences two
+`WindowStats` as `b - a` and is what `ppk2lab compare` publishes; see
+"Differencing two captures" below for what its error bar assumes.
 
 ## CLI JSON envelope
 
@@ -236,11 +251,23 @@ Every command with `--json` emits (schema `envelope`):
 `exit_code`. Codes are frozen strings (see `ppk2lab capabilities --json`,
 `error_codes`).
 
-`warnings` is an array of `{code, message}` for the same reason: a program
-deciding whether to retry cannot parse prose. Codes live in
+`warnings` is an array of `{code, message, category}` for the same reason: a
+program deciding whether to retry cannot parse prose. Codes live in
 `ppk2lab.diagnostics` (`W_SAMPLE_GAPS`, `W_TIMELINE_COMPRESSION`,
 `W_VOLTAGE_ASSUMED`, `W_NOT_CALIBRATED`, …); new codes may be added, and an
 existing code never changes meaning within a schema version.
+
+`category` says which part of a result the warning is about — `capture
+integrity`, `measurement trust`, `device state`, `analysis` — so a consumer can
+route a warning without joining against the catalog first. It is **not** a
+severity: `W_DUT_POWER_UNKNOWN` and `W_SAMPLE_GAPS` differ in what they are
+about, not in how loud they are, and nothing in this project ranks them. It is
+`null` for a code the reading version does not know, which is the honest answer
+for an open catalog. The three keys are the shape everywhere a warning is
+published: a live `--json` result, the `warnings` array stored in a capture
+manifest, and `inspect` output — an artifact written before `category` existed
+has it supplied on the way out rather than being republished in the old shape,
+so one reader handles every artifact.
 
 ### Voltage and energy
 
@@ -260,8 +287,11 @@ and nothing in the artifact records it; the tool never corrects for it, and
 
 ### Distribution statistics
 
-Window results carry `current_ua.p50/p90/p99/p999` alongside mean/min/max,
-and a `distribution` block naming the grid they came from. They are computed
+Window results carry `current_ua.p5/p50/p90/p95/p99/p999` alongside
+mean/min/max, and a `distribution` block naming the grid they came from — `p5`
+and `p95`, the conventional floor and burst statistics in power work, joined the
+set in `0.3.0`. The set is fixed rather than an arbitrary `pN`, which is what
+lets every quantile be collected unconditionally. They are computed
 from a fixed log-spaced histogram (200 nA to 1 A, 128 bins per decade)
 accumulated in the same pass as everything else, so they cost no extra memory
 and are available for an hours-long capture. Consequences a consumer must
@@ -377,6 +407,38 @@ gain error, and reporting +2.1% as if it were a measured accuracy would be
 exactly the substitution this section exists to refuse. Resolving gain needs a
 resistor an order of magnitude tighter, or a calibrated reference.
 
+### Differencing two captures
+
+`ppk2lab compare` (`compare_stats`) reports `b - a` for one metric and prices
+the difference with the same per-range typical figures. The bar is tighter than
+the two absolute ones only when a premise holds: both captures stayed in one
+shunt range **and** came from one instrument. The gain error is one physical
+unit's residual, so it scales the difference rather than each reading — but two
+units carry independent residuals, and the same range index on a second unit is
+not the same shunt. `same_instrument` records which case applied: `true` from
+matching serial numbers, `false` from differing ones — `W_INSTRUMENT_MISMATCH`,
+and the cancellation is withdrawn — and `null` when the captures did not
+identify their instruments, where the cancellation is kept and the note says
+the premise is unverified. Unknown is not the same as different.
+
+"Stayed in one range" is judged on the sample count **and** on absolute charge,
+both at 99.5%. The metrics being differenced are charge-weighted while a sample
+count is not, and a duty-cycled load can hold almost all of its samples in one
+range and almost all of its charge in another; pricing that with the wrong
+shunt's accuracy publishes a sentence about the hardware that is not true.
+
+Two more properties of the reported difference:
+
+- `relative` divides by `abs(a_value)`, so its sign always matches the delta's.
+  This instrument legitimately reads below zero on an unloaded input, and a
+  signed denominator turned a rise against a negative baseline into a reported
+  fall.
+- An `energy` comparison also publishes a `voltage` block — each side's
+  setpoint, basis and note, and whether the two differ. Energy is charge times
+  an assumed supply, so two captures taken at different setpoints differ by the
+  instrument's configuration as well as by the DUT; `W_VOLTAGE_ASSUMED` says so
+  rather than letting the difference read as the DUT's.
+
 ## Exit codes (frozen)
 
 | code | meaning |
@@ -416,6 +478,16 @@ uses (`ppk2lab.schemas`), and tests validate live CLI output against them.
   change of meaning, and does not bump `SCHEMA_VERSION` — but it does need a
   CHANGELOG entry under behaviour changes, because a result that used to read
   as a pass can start reading as "cannot be evaluated".
+- **Widening a field's type** — most often making it nullable, because a
+  situation turned up in which the honest answer is "no value" rather than an
+  invented one — sits between the two rules above. It does not bump
+  `SCHEMA_VERSION` when the field was introduced in the same release, since no
+  published version ever promised the narrower type. Widening a field a
+  released version already published *does* bump it: a consumer that validated
+  against the old schema, or that indexed the field without a null check, was
+  entitled to rely on what shipped. Either way it needs a CHANGELOG entry
+  saying which field and why the wider type is the truthful one. Narrowing a
+  type is a removal and follows the first rule.
 - The capture `format_version` (currently 1) is append-only: newer readers
   open older files; older readers refuse newer files explicitly.
 - Derived exports (CSV/VCD/JSONL) are reproducible views over raw captures

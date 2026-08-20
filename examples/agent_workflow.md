@@ -14,6 +14,10 @@ through the CLI JSON contract. Every command returns the same envelope:
 }
 ```
 
+Every entry in `warnings` is `{code, message, category}`, and those three
+keys are the same live and in a stored manifest — a warning `inspect` reads
+back out of an artifact branches exactly like one `capture` returned.
+
 All examples below work without hardware by adding `--simulate`.
 
 ## 1. Survey before touching anything (read-only)
@@ -96,12 +100,18 @@ Check `result.complete`. If false, the capture has gaps or was interrupted;
 code 6 signals an incomplete capture. Durations accept `us`, `ms`, `s`,
 `min` and `h`, so a soak run is `--duration 8h`.
 
-Expect some loss. Measured over 60 s on an otherwise idle macOS host: 25,792
-samples missing (0.43%) in 5 gaps, every one `host_overflow`. Under CPU and
-disk load the same run lost 1.08%, with gaps that were larger rather than more
-numerous, and a third run in that session lost 5.1%. Gaps are marked, counted
-and located; report them instead of treating them as a device fault, and check
-`gap_reasons` in `capabilities --json` when the reason is not `host_overflow`.
+`--tag KEY=VALUE` (repeatable) records what the run is *of* — board serial,
+firmware build, experiment id — inside the artifact. The capture result hands
+them straight back as `result.user_tags`, so a script that just tagged a run
+does not reopen the file to read them, and `inspect --json` returns the same
+map later. Nothing interprets a tag; values stay the strings that went in.
+
+Loss is always reported, and since the Unreleased fix it is no longer the
+normal outcome: through `0.2.0` a 60 s capture lost 5 `host_overflow` gaps
+because the artifact writer compressed each 10-second chunk on the sample
+thread, and captures on that same host are now gap-free. Gaps are marked,
+counted and located; report them instead of treating them as a device fault,
+and check `gap_reasons` in `capabilities --json` for where a loss happened.
 
 Triggered capture:
 
@@ -192,17 +202,36 @@ Interpretation:
 | 6 | at least one window could not be evaluated as written (neither pass nor fail) |
 
 An `incomplete` outcome names why in each observation's `reason_code`:
-`sample_gaps`, `window_past_capture_end`, `window_unpopulated`, or
-`metric_not_computable`. The window is evaluated as the rule wrote it and is
-never trimmed to fit the data, so `within 20ms` against a capture that ends
-5 ms later is `incomplete`, not `passed`. Every observation also carries
-`covered_fraction` and `capture_end_sample`.
+`sample_gaps`, `window_past_capture_end`, `window_unpopulated`,
+`metric_not_computable`, or `metric_at_measurement_floor` — the last when
+the rule's own metric was served from the 200 nA grid floor and the verdict
+would flip for any smaller true value. The window is evaluated as the rule
+wrote it and is never trimmed to fit the data, so `within 20ms` against a
+capture that ends 5 ms later is `incomplete`, not `passed`. Every observation
+also carries `covered_fraction` and `capture_end_sample`.
 
 An anchor is not matched across a sample gap, an unsynchronized or errored
 UART frame, or two SPI CS transactions — a pattern stitched across a
 discontinuity is not evidence the event happened. Prefer `p99_current` to
 `max_current` for a burst ceiling: `max` is one sample and drifts upward with
 capture length, a percentile does not.
+
+For "how much did this change cost", difference the two captures rather than
+quoting two absolute numbers:
+
+```bash
+ppk2lab compare baseline.ppk2a candidate.ppk2a --metric mean_current --json
+```
+
+The +/-10% per-range figure is a gain error, so it cancels across two captures
+taken in one range on one instrument and the delta gets a much tighter bar
+than either reading. Check that the premise held before quoting it:
+`same_instrument` is `false` with `W_INSTRUMENT_MISMATCH` when the two serial
+numbers differ and `null` when the captures did not identify their
+instruments; an `energy` comparison publishes a `voltage` block and warns
+`W_VOLTAGE_ASSUMED` when the two sides ran at different supplies. Both sides'
+`measure` diagnostics come back as warnings tagged with their path, so a delta
+between two floor-served quantiles is visible as the non-result it is.
 
 Persist `capture_sha256` together with the verdict so conclusions stay
 traceable to raw evidence.

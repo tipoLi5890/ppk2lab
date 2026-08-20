@@ -407,7 +407,7 @@ def test_open_probes_ambiguous_measurement_port(monkeypatch):
         ),
     )
     monkeypatch.setattr(device_mod, "_transport_factory", factory)
-    monkeypatch.setattr(device_mod, "discover", lambda: [info])
+    monkeypatch.setattr(device_mod, "discover", lambda **_kw: [info])
 
     device = PPK2.open(serial_number="REAL01")
     try:

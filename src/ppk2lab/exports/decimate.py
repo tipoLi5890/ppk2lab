@@ -28,7 +28,7 @@ import csv as _csv
 import json
 import math
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,7 +36,7 @@ from ..capture.model import Capture
 from ..errors import CaptureFileError, UsageError
 from ..protocol.samples import ADC_FULL_SCALE, ADC_MASK, MAX_VALID_RANGE, GapEvent, SampleBlock
 from ..types import SAMPLE_PERIOD_S, SAMPLE_RATE_HZ
-from ._atomic import atomic_write
+from ._atomic import atomic_write, write_comments
 
 #: The five auto-switching shunt ranges (same partition ``capture/stats.py``
 #: reports); duplicated as a local so the hot loop does not import through it.
@@ -415,10 +415,12 @@ def export_decimated_csv(
     *,
     bucket_samples: int,
     overwrite: bool = False,
+    comments: Sequence[str] | None = None,
 ) -> int:
     """Write the decimated view as CSV; returns the number of buckets."""
     expected = bucket_count(capture, bucket_samples)
     with atomic_write(path, overwrite=overwrite, newline="", encoding="utf-8") as fh:
+        write_comments(fh, comments)
         count = write_decimated_csv(fh, iter_buckets(capture, bucket_samples=bucket_samples))
         _check_count(count, expected)
     return count

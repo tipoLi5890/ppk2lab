@@ -62,3 +62,17 @@ def sim_device():
     device = open_simulated()
     yield device
     device.close()
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_simulate(monkeypatch):
+    """Never let a developer's exported `PPK2LAB_SIMULATE` reach the code.
+
+    `PPK2.open` and `discover` both consult it whenever `simulate` is left at
+    its default, so with the variable exported a test that expects a real
+    device lookup to fail instead finds a simulator, and one that asserts a
+    handle is *not* labelled simulated sees it labelled. Tests that want the
+    variable set it themselves with `monkeypatch.setenv`, which runs after
+    this fixture.
+    """
+    monkeypatch.delenv("PPK2LAB_SIMULATE", raising=False)

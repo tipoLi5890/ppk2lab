@@ -84,8 +84,16 @@ def simulated_device_info(serial_number: str = "SIM0001") -> DeviceInfo:
     )
 
 
-def discover(*, simulate: bool = False) -> list[DeviceInfo]:
-    """List connected PPK2 devices; deterministic ordering by serial number."""
+def discover(*, simulate: bool | None = None) -> list[DeviceInfo]:
+    """List connected PPK2 devices; deterministic ordering by serial number.
+
+    ``simulate=None`` (the default) reads ``PPK2LAB_SIMULATE``; pass ``True``
+    or ``False`` to decide explicitly regardless of it.
+    """
+    if simulate is None:
+        from .device import _env_simulate
+
+        simulate = _env_simulate()
     if simulate:
         return [simulated_device_info()]
     try:

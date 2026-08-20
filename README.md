@@ -40,7 +40,7 @@ ppk2lab --version
 ppk2lab doctor --json
 ```
 
-`0.2.0` is the first stable release, so a plain `pip install ppk2lab` resolves it. It is labelled experimental on purpose: the toolchain is heavily tested without hardware, and the properties that keep a measurement honest are enforced rather than assumed — but the hardware validation behind it is partial. One unit, macOS only, and no decoder has yet read a real signal. [Roadmap](#roadmap) says exactly what that covers and what it does not; read it before you trust a number.
+`0.3.0` is the current release and `0.2.0` was the first stable one, so a plain `pip install ppk2lab` resolves it. It is labelled experimental on purpose: the toolchain is heavily tested without hardware, and the properties that keep a measurement honest are enforced rather than assumed — but the hardware validation behind it is partial. One unit, macOS only, and no decoder has yet read a real signal. [Roadmap](#roadmap) says exactly what that covers and what it does not; read it before you trust a number.
 
 Run from a development checkout:
 
@@ -119,7 +119,7 @@ ppk2lab assert capture.ppk2a \
 
 For a CI threshold, prefer a percentile to `max_current`: range switches accumulate as a capture runs longer, so a maximum drifts upward with capture length while `p99_current` does not.
 
-These commands are implemented today. Every JSON contract carries `schema_version` 1 and remains subject to change until the `0.2.0` release.
+These commands are implemented today. Every JSON contract carries `schema_version` 1 and has followed the stability policy in [docs/SPEC.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/SPEC.md) since `0.2.0`: additions are backward compatible, and a removal or a change of meaning needs a `schema_version` bump and a migration note.
 
 ## What it does
 
@@ -134,6 +134,7 @@ These commands are implemented today. Every JSON contract carries `schema_versio
 | `decode` | Produce UART, SPI, edge, pulse, and transaction annotations | Offline |
 | `measure` | Current, charge, energy, peaks, percentiles, and an optional duty-cycle split for a time range or annotation | Offline |
 | `assert` | Apply reproducible power and protocol regression rules | Offline |
+| `compare` | Difference two captures on one metric, with an error bar that says whether the instrument's gain error cancelled | Offline |
 | `export` | Create CSV, VCD, JSONL, windowed, and decimated views without replacing raw evidence | Offline |
 
 ## Scope and physical limits
@@ -147,7 +148,7 @@ PPK2 samples its digital inputs at 100 kS/s. Protocol decoding is therefore inte
 
 This project is not intended to replace a MHz-class logic analyzer. A frame that crosses a missing-sample interval is reported as incomplete or invalid, never as a confident decode.
 
-Losing samples to the USB host is normal at 100 kS/s, and every capture reports it. On one macOS host, 60-second captures lost 0.43% of their samples with the machine idle and 1.08% with twelve CPU spinners and continuous disk writes — five whole-chunk gaps in each case, not scattered samples. A later 60-second capture on the same host lost 5.1%, so the rate depends on what else the machine is doing rather than on the capture itself.
+Every capture reports the samples it lost. Most of the loss `0.2.0` measured turned out to be self-inflicted: the artifact writer compressed each 4 MB chunk on the thread feeding samples in, and the ~290 ms pause overflowed the reader's queue. That is why those 60-second captures each lost exactly five whole chunks — one per chunk boundary crossed. Compression now runs on its own thread and the reader's queue is bounded in bytes rather than in reads, and on the same host six consecutive captures (5 × 30 s and 1 × 60 s) recorded every sample: no gaps, `complete: true`. What the host itself costs under load is now unquantified — it was never separated from the writer's own stalls — so treat loss as possible, reported, and no longer expected.
 
 > [!IMPORTANT]
 > **One known load has now been measured; a calibrated reference still has not.** A 680 kΩ ±5% resistor between VOUT and GND, at one unit's existing 3700 mV setpoint, should draw 5.4332 µA through the meter's own 1000.625 Ω shunt; eleven captures measured 5.55 µA (5.5280–5.5614 µA), +2.1% from nominal. The resistor's own tolerance puts the true current anywhere in 5.175–5.719 µA, so that check rules out a gross error and cannot resolve the instrument's own gain error — resolving it needs a resistor an order of magnitude tighter, or a calibrated reference. Every accuracy figure here still restates Nordic's *typical* per-range specification, and uncertainty is reported as `guaranteed: false` for exactly that reason. That session covered one unit, one firmware fingerprint, macOS only, and no MCU fixture, so the UART and SPI tiers below remain samples-per-bit budgets rather than measured error rates. [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md) lists what is still unmeasured.
@@ -188,6 +189,7 @@ ppk2lab inspect
 ppk2lab decode
 ppk2lab measure
 ppk2lab assert
+ppk2lab compare
 ppk2lab export
 ppk2lab doctor
 ```
@@ -237,7 +239,7 @@ See [docs/sources.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/sourc
 
 ## Roadmap
 
-`0.2.0` is released. What is still open is validation rather than implementation, and it is worth knowing which is which. One hardware session on 2026-08-20 ran the tool end to end on a single unit — firmware fingerprint `HW=49625 IA=59.0 keys=40 ports=2`, macOS on Apple silicon — covering discovery, metadata, calibrated capture at 100 kS/s, interruption recovery, and every offline command. These are **not** validated, and each needs hardware that session did not have:
+`0.3.0` is released. What is still open is validation rather than implementation, and it is worth knowing which is which. One hardware session on 2026-08-20 ran the tool end to end on a single unit — firmware fingerprint `HW=49625 IA=59.0 keys=40 ports=2`, macOS on Apple silicon — covering discovery, metadata, calibrated capture at 100 kS/s, interruption recovery, and every offline command. These are **not** validated, and each needs hardware that session did not have:
 
 - a physical pass on Windows and on Linux, where the OS reports the USB interface numbers macOS does not;
 - a second unit and a second firmware fingerprint, only one of each having been seen;

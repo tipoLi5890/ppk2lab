@@ -4,6 +4,328 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project uses semantic versioning once released.
 
+## [0.3.0] — 2026-08-20
+
+A minor rather than a patch release: it adds a subcommand, two capture flags,
+two published quantiles and two `run_capture` parameters. Every one of those is
+an addition, so `SCHEMA_VERSION` stays `"1"` and the capture `format_version`
+stays `1`; an artifact written by 0.2.0 still opens, and a 0.2.0 consumer still
+reads a 0.3.0 result.
+
+### Fixed
+
+- **The artifact writer was producing the sample loss the capture then
+  reported.** `ArtifactWriter._flush_chunk` compressed each full chunk inline,
+  on the same thread that consumes the sample stream. One chunk is 1,000,000
+  samples — 4 MB, ten seconds — and deflating it takes ~290 ms on a current
+  laptop. The reader's queue drained nothing for that long and overflowed, so
+  the bytes it dropped came back as a `host_overflow` gap immediately after
+  every chunk boundary. Compression and CRC32 now run on a dedicated writer
+  thread with a two-chunk bounded queue; the producer only slices the buffer
+  and hands it over. A failure on that thread is re-raised on the caller's
+  thread at the next `add_block()` or at `finalize()` — a chunk that could not
+  be written must never leave a manifest describing samples the container does
+  not hold.
+- **The stream queue was bounded in reads, not in bytes.**
+  `SerialTransport.read` returns `1 + in_waiting`, and `in_waiting` is small
+  exactly when the reader is keeping up: an instrumented 30 s hardware capture
+  averaged 77 bytes per read across 155,577 reads. A 256-item bound therefore
+  held about 20 kB — 50 ms of stream — rather than the 4 MB the 16 kB read size
+  suggests, so any consumer pause past 50 ms dropped samples. `StreamSession`
+  now takes `queue_bytes` (4 MB by default) and accounts for the budget in
+  bytes. It also publishes `peak_queued_bytes`, so a run that never approached
+  the budget can say so. On the fixed writer, real captures peaked between
+  33 kB and 907 kB — the second figure is 45x the old effective capacity, so
+  moving compression off the thread was necessary but not sufficient on its own.
+
+Measured on the hardware that found it (one PPK2, macOS, Python 3.14.5, DUT
+power off throughout). Before: five consecutive 30 s captures each lost
+46,064–75,280 samples in exactly two gaps, at timeline indices ~1,004,5xx and
+~2,03x,xxx, for 97.49–98.46% coverage. After: 5 x 30 s and 1 x 60 s recorded
+3,000,000 and 6,000,000 samples respectively — no gaps, no dropped bytes,
+100% coverage, `complete: true`, artifact sizes unchanged. The same 30 s
+capture written with `ZIP_STORED` instead of deflate, and the same 30 s
+capture held in memory with no artifact at all, had already both come back
+gap-free; those were the experiments that isolated the cause.
+
+The rest of this section is the result of auditing the four feature commits
+above against their own claims before release. Each item is a defect the
+features shipped with, found by reproducing it rather than by reading.
+
+- **`compare` called a duty-cycled capture a single-range capture.**
+  `dominant_range` weighted by sample count while the metrics it prices —
+  `mean_ua`, `charge_uc` — are charge-weighted. A load that idles at
+  microamps and bursts at milliamps puts 99.6% of its *samples* in the bottom
+  range and 99.8% of its *charge* in the top one, so the comparison printed
+  `basis: same_range` with the note "both captures stayed in range 0" — a
+  false statement about the hardware — and priced the delta with the wrong
+  shunt's accuracy. With opposite-sign per-range charge deltas the published
+  bar came out 56× smaller than the term it had dropped. Dominance is now
+  required in both samples and absolute charge, so the sentence is only ever
+  printed when it is true.
+- **The gain cancellation never checked that both captures came from the same
+  instrument.** *k* is one physical unit's residual gain error; two units have
+  independent *k*, and the tighter bar rests entirely on their being the same
+  unit. `compare` now compares the two recorded serial numbers, warns
+  `W_INSTRUMENT_MISMATCH` and withdraws the cancellation when they differ, and
+  says the premise is unverified when either capture does not identify itself.
+  `compare_stats` takes `same_instrument` for callers driving it directly.
+- **`compare` dropped every `WindowStats` diagnostic.** It computed full
+  statistics for both sides and then built its warning list from `gaps` and
+  `interruption` only, so `W_BELOW_MEASUREMENT_FLOOR`, `W_CLIPPED`,
+  `W_UNACCOUNTED_SAMPLES`, `W_GAP_TABLE_TRUNCATED` and `W_WINDOW_UNPOPULATED`
+  all vanished. Two saturated captures whose true charge differed by about
+  123,000 µC compared as `3000 ± 510 µC`, `complete: true`, exit 0, no
+  warnings at all. Both sides' diagnostics are now surfaced, tagged with the
+  path they came from, and each side reports `quantiles_at_floor`,
+  `saturated_samples` and `charge_is_lower_bound` in the result body.
+- **`compare --metric energy` ignored the supply voltage.** Energy is charge
+  times V, and V comes from each capture's own supply. Two identical-current
+  captures taken at 3000 mV and 5000 mV compared as `+66.7%` with no warning:
+  the DUT drew the same current and the whole delta was the instrument's
+  setpoint. An energy comparison now publishes a `voltage` block and warns
+  when the two supplies differ; when energy is unavailable on both sides it
+  says why instead of only "not computable".
+- **`compare`'s `relative` used the signed baseline as its denominator.** This
+  instrument legitimately reads below zero on an unloaded input, and against a
+  negative baseline the sign inverted — a rise from −0.5 µA to −0.2 µA printed
+  as `-60.00%`. It now divides by `abs(baseline)`.
+- **`compare`'s human output presented the typical bar as the whole story.**
+  `delta_batch_stderr` was computed and put in the JSON but never printed, and
+  the "typical, per-range; not guaranteed" caveat `measure` prints had no
+  counterpart. On one reproduction the typical bar was 37 µA while the batch
+  stderr of the same delta was 299 µA, so a result indistinguishable from zero
+  by the tool's own estimator read as an 8σ finding. Both now print.
+- **`at=` scheduled actions were driven only by trigger output.** `sink` is
+  reached through `trigger_engine.process(event)`, which returns nothing until
+  the detector fires — so an action scheduled to *cause* the event the trigger
+  waits for never ran, and with no `trigger_timeout_s` the capture never
+  ended. When the trigger did fire, the pre-trigger ring flushed at once and
+  the action was recorded at a timeline position digitised before it ran
+  (measured: executed after raw index 61440, recorded as `fired_index=12288`).
+  The combination is now refused with a `UsageError` that explains why.
+- **`on_progress` reported nothing during a trigger wait** — the 90-second
+  capture the callback exists for was the one case that showed nothing. It is
+  now driven from the stream loops rather than from `sink`, so it reports
+  while the trigger is still waiting.
+- **A scheduled action that never came due was silently dropped.** A capture
+  whose power-on stimulus never fired was byte-for-byte indistinguishable from
+  one that scheduled nothing: no record, no warning, `complete: true`. Such an
+  action is now recorded with `fired_index: null`, `fired_s: null` and a reason
+  in `error`, and one `W_SCHEDULED_ACTION` is raised for the whole set.
+- **A rejected `at=` leaked the artifact writer.** `_normalize_schedule` ran
+  after `ArtifactWriter` had already opened its temp file and started its
+  writer thread, and the raise escaped above the handler that would have
+  aborted it. Twenty rejected calls in one process left twenty parked threads,
+  twenty stray `.tmp` files and open file descriptors up from 4 to 24, with the
+  temp files surviving process exit. Argument validation now runs before any
+  resource is acquired.
+- **`delay_s=float("inf")` escaped as a bare `OverflowError`** from `round()`,
+  where every other malformed schedule entry produced a `UsageError` with a
+  remediation. Non-finite delays are now refused with the rest.
+- **`PPK2LAB_SIMULATE=1` relabelled an injected transport as simulated.** With
+  the variable set, `PPK2.open(transport=..., serial_number=...)` returned
+  `simulated: true` and a fabricated serial and firmware version while every
+  byte still reached the real transport — and `run_capture` then wrote that
+  identity into the manifest next to a real firmware fingerprint. The variable
+  no longer applies to a transport the caller supplied; only an explicit
+  `simulate=True` does.
+- **An explicit `simulate=False` could not escape `PPK2LAB_SIMULATE`.**
+  `_select_device` called `discover()` with no argument, so under the variable
+  it enumerated the simulator and handed the literal string
+  `simulated://SIM0001` to `SerialTransport`. It now asks for real hardware
+  explicitly, which is what the documented opt-out promised.
+- **The new warning `category` was stripped on the way into a manifest.**
+  `as_json` rebuilt dict-form warnings as `{code, message}`, so `capture
+  --json` carried the category and the stored artifact and `inspect --json`
+  did not — and `load_capture(...).warnings` could hold both shapes in one
+  list. `as_json` is now idempotent and fills the category in from the code for
+  artifacts written before the field existed.
+- **`measure`'s human output never printed p5 or p95.** The distribution line
+  was built from a hardcoded `p50, p90, p99` while the `<=` floor marking is
+  driven by `quantiles_at_floor`, which is monotone in rank. Adding p5 below
+  p50 opened a band — 5% to 50% of samples below the floor — in which the
+  warning named a quantile the line did not show, so the reader was told a
+  number was a bound and never shown the number. The line now follows
+  `WindowStats.QUANTILE_LEVELS`, which also makes p999 visible for the first
+  time.
+- **`comments="sn: POD01"` wrote one `# ` line per character.** A bare `str`
+  satisfies `Sequence[str]` structurally, so mypy accepted it and
+  `write_comments` iterated it, destroying the provenance in the file that
+  exists to carry it. A bare string and a non-string element are both refused
+  now. Comment lines are also CRLF-terminated to match `csv.writer`'s dialect;
+  a bare LF left a file whose preamble and data rows ended differently.
+- **Nothing was ever fsynced.** `atomic_write` and `ArtifactWriter.finalize`
+  both renamed a complete temp file into place without flushing it to stable
+  storage first, and `os.replace` is atomic for the directory entry only. A
+  host losing power seconds after a capture finished could leave a
+  full-length `.ppk2a` with a zeroed tail — a file the operator was told had
+  been written, failing its own SHA-256. The data handle is now synced before
+  the rename and the parent directory after it, for both derived exports and
+  the canonical artifact.
+- **A stream queue budget smaller than one read discarded everything.**
+  `_reserve` had no case for a single read larger than the whole budget, so it
+  refused forever, the parser was never told, and the idle timeout raised
+  "the device stopped streaming" — blaming the instrument for a host-side
+  configuration fault. An empty queue now admits a read whatever its size. Not
+  reachable with the shipped defaults; the misattribution was the problem.
+
+### Behaviour changes — read before upgrading a CI job
+
+- **Captures longer than ten seconds now usually complete.** They used to
+  cross a chunk boundary, lose samples there, and report `complete: false`
+  with exit code 6. The same capture now reports `complete: true` and exit 0.
+  A job that treated exit 6 as its normal outcome, or that pinned
+  `covered_fraction` below 1.0, will see different numbers. Nothing about the
+  meaning of `complete`, `covered_fraction`, or exit 6 changed — the captures
+  did.
+- **`assert` rules over a whole capture become evaluable.** A gap anywhere in
+  the evaluation window still yields `incomplete` and exit 6; that policy is
+  unchanged and is the right one. It simply stopped firing on every run
+  longer than ten seconds. Rules that had never returned a verdict will now
+  return one, and it may be `failed`.
+- The `0.2.0` loss measurements recorded below stand as observations of that
+  release. Their periodic component is now attributed to this bug — a 60 s
+  capture crosses five chunk boundaries and lost exactly five whole-chunk
+  gaps. What the host itself costs under load was never separated from the
+  writer's stalls and is currently unquantified.
+
+- **`W_SAMPLE_GAPS` no longer fires for an interruption.** `decode` and
+  `measure` derived it from `not capture.complete`, so a capture that was cut
+  short but lost nothing was reported under a code that names sample gaps.
+  Each now emits `W_SAMPLE_GAPS` for actual gaps and `W_INTERRUPTED` for an
+  interruption, and says how many gaps there were. A caller branching on the
+  code rather than reading the prose was being told the wrong thing.
+- **`complete` had four independent derivations** — the live result, the
+  in-memory capture, the stored manifest, and window statistics — that agreed
+  only by coincidence. The three capture-level ones now share
+  `ppk2lab.capture.model.capture_is_complete`. `WindowStats.complete` answers
+  a different question, about a chosen window, and stays separate on purpose.
+
+### Added
+
+- **Captures can say what they are of.** `capture --tag KEY=VALUE` (repeatable)
+  and `run_capture(tags={...})` record provenance — board serial, firmware
+  build, experiment id — in the manifest as `user_tags`, returned unchanged by
+  `inspect --json`. ppk2lab never interprets a tag. Values must be strings and
+  are never coerced: a tag reading `"3.7"` when `3.7` was passed would be a
+  quiet lie about the record. Raw samples are the source of truth, so what a
+  capture is of belongs in the capture rather than only in a filename or a
+  spreadsheet beside it.
+- **Actions can be scheduled inside a capture.** `run_capture(at=[(delay_s,
+  callable[, label])])` fires each between two sample blocks, on the capture's
+  own thread, and records the sample index it actually fired at in
+  `scheduled_actions` — in the result, in the manifest, and in `inspect`. This
+  is how a cold-boot inrush is recorded: the capture must already be running
+  when power arrives. A timer thread would land within a scheduler quantum and
+  would write to the same serial port the reader is draining; this does
+  neither. A callable that raises does not cost the capture — the failure is
+  recorded against the action and `W_SCHEDULED_ACTION` reports it. So is an
+  action the capture ended before reaching, with `fired_index` and `fired_s`
+  null: a stimulus that never happened is a fact about the run. The callable
+  runs on the sample-consuming thread, so it must return well inside the
+  stream buffer's depth; combining `at=` with a trigger is refused, because a
+  triggered timeline starts before the trigger fires and a delay measured from
+  the first sample cannot be honoured. Deliberately Python-only: `capture`
+  never enables DUT power and has no option that would.
+- **`run_capture(on_progress=...)`** reports `{stored, elapsed_s, gap_count,
+  sample_limit}` at most every 250 ms, so a caller running a 90 s capture can
+  show something moving without guessing from a wall clock. A callback that
+  raises is disabled for the rest of the capture and reported once as
+  `W_PROGRESS_CALLBACK`; reporting is a courtesy and is not worth a recording.
+  It reports while a trigger is still waiting, which is the case it exists for.
+- `StreamSession.peak_queued_bytes`, the high-water mark of buffered stream
+  bytes. `ppk2lab.session` is internal (`docs/api-baseline.md` section 5); this
+  is diagnostic surface, not a contract.
+- Warning codes `W_SCHEDULED_ACTION`, `W_PROGRESS_CALLBACK` and
+  `W_INSTRUMENT_MISMATCH`. The catalog is open, so this is an addition rather
+  than a breaking change.
+- `user_tags` in the capture result, not only in the manifest and in
+  `inspect`: a caller that just tagged a capture should not have to reopen the
+  file to read the tags back.
+- **`ppk2lab compare BASELINE CANDIDATE`** — the difference between two
+  captures on one metric, with an error bar that says whether the instrument's
+  gain error cancelled. `ROADMAP.md` had this waiting on "the uncertainty
+  surface being stable enough that a delta means something on a ±10%
+  instrument"; that precondition turned out to be answerable from the existing
+  model rather than to need a new one. The ±10% is a *per-range gain* error —
+  the same fraction of reading on every sample through that shunt, which is
+  why `TypicalUncertainty` says it does not shrink with capture length. Two
+  captures through the same shunt share the unknown factor k, so
+  `delta_measured = k * delta_true` and the gain contributes
+  `accuracy * abs(delta)` rather than `accuracy * (abs(a) + abs(b))`. On a
+  54 µA difference between two ~200 µA readings that is ±6 µA instead of
+  ±45 µA. The claim is about the shunt, so `basis` is `same_range` only when
+  both captures really stayed in one range — 99.5% of valid samples *and*
+  99.5% of absolute charge, because the metrics being differenced are
+  charge-weighted and a sample count is not. `cross_range` adds the two gains
+  and says it is no tighter than the absolute figures, and `mixed` — either
+  capture switched ranges — adds them conservatively. The resolution term is
+  always added: it bounds an offset per sample rather than scaling a reading.
+  The claim is also about one physical unit, so the two captures' serial
+  numbers are compared: different units withdraw the cancellation and raise
+  `W_INSTRUMENT_MISMATCH`, and unidentified ones keep it but say the premise is
+  unverified. Metrics the model does not price (percentiles, `max_current`,
+  `min_current`, `energy`) are still differenced, with `uncertainty: null` and
+  a note saying why. Both sides report their own `complete`,
+  `covered_fraction`, `user_tags`, `device`, `quantiles_at_floor`,
+  `saturated_samples`, `charge_is_lower_bound` and voltage basis, and both
+  sides' `WindowStats` diagnostics are surfaced as warnings, so comparing
+  against a lossy, clipped or floor-served capture is visible rather than
+  silent. `relative` divides by `abs(baseline)`. New schema `compare-result`;
+  new `ppk2lab.analysis` exports `compare_stats`, `dominant_range`,
+  `summarize_side`.
+
+- **`p5_current` and `p95_current`.** The bins were already there; only four
+  quantiles were published. p5 and p95 are the conventional floor and burst
+  statistics in power work, and a `p95` column that had to be computed by
+  hand from `currents_ua()` was the reason one integration materialised three
+  million Python floats per capture. A fixed published set rather than an
+  arbitrary `pN` keeps the rule that everything except `--state-threshold` is
+  collected unconditionally, so an offline measurement of a window can never
+  disagree with what that window recorded live. Both are registered as
+  quantiles, so the `metric_at_measurement_floor` protection covers them.
+- **Assertion observations carry `quantiles_at_floor` and
+  `below_grid_fraction`.** `regression.md` had told users to run `measure`
+  first to find out whether a low-current quantile rule was measuring anything
+  or reading the grid floor; that was a workaround for a missing field. It is
+  now in the assert report itself.
+- **`export --format csv --comment TEXT`** (repeatable) and `comments=[...]`
+  on `export_csv` / `export_decimated_csv` write `# ` provenance lines before
+  the header. Hand-rolling the preamble meant opening the file yourself and
+  calling the unfrozen `write_*` helpers, giving up the atomic write and the
+  row-count check. Refused for VCD and JSONL rather than dropped: neither has
+  a `# ` comment line, and a caller who asked for one would otherwise believe
+  the file was annotated.
+
+### Changed
+
+- **`Diagnostic.to_json()` now carries `category`.** The classification
+  already existed in `WARNING_CATEGORY`, but only in the `capabilities`
+  catalog, so every consumer had to fetch that and join on the code just to
+  learn which part of a result a warning was about. It is deliberately still
+  not a severity — how much a warning matters depends on the question being
+  asked.
+- **`PPK2LAB_SIMULATE` is honoured by the library, not only the CLI.**
+  `PPK2.open()` and `discover()` take `simulate: bool | None = None` and read
+  the variable when it is left unset; passing `True` or `False` still decides
+  explicitly. `PPK2LAB_MAX_VOLTAGE_MV` already worked this way, and a script
+  behaving differently from the equivalent command under the same variable was
+  a trap rather than a policy. It never applies to an injected `transport=`:
+  the environment must not decide the identity of a transport the caller
+  supplied.
+- **`measure`'s distribution line now prints all six published quantiles.**
+  It followed a hardcoded `p50, p90, p99`; it now follows
+  `WindowStats.QUANTILE_LEVELS`, so p5, p95 and p999 appear and each can carry
+  the `<=` marking that says a value was served from the grid floor.
+- **Warnings carry `category` everywhere**, including inside stored manifests
+  and in `inspect --json`, not only in live results.
+- The byte-bounded stream queue also makes throughput steadier, not just
+  loss-free. Ten interleaved 3 s full-rate simulated captures per side: before,
+  the worst run achieved 77,106 S/s and one in ten reported a rate deficit over
+  1%; after, the worst achieved 99,991 S/s and none did. The buffer now absorbs
+  an ordinary host hiccup instead of turning it into a reported deficit.
+
 ## [0.2.0] — 2026-08-20
 
 The project's first stable release. `0.1.0.dev0`, published on 2026-08-19,

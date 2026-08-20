@@ -29,9 +29,13 @@ they differ by orders of magnitude on the same capture:
 - **p50** (`median_current`) answers *what is my sleep current* — the value
   the DUT actually sits at, provided it is a measurement and not the grid
   floor (next section).
-- **p90 / p99 / p999** answer *how bad do the bursts get* without resting on
-  one sample. `max` is one sample and drifts upward with capture length as
-  range-switch transients accumulate; a percentile does not.
+- **p90 / p95 / p99 / p999** answer *how bad do the bursts get* without
+  resting on one sample. `max` is one sample and drifts upward with capture
+  length as range-switch transients accumulate; a percentile does not.
+- **p5** is the conventional floor statistic — what the DUT is under 5% of
+  the time. Being the lowest published rank it is also the first to be
+  served from the grid floor, so read `quantiles_at_floor` before quoting
+  it (next section).
 
 On the shipped demo profile the mean is 1806.72 uA — a current the DUT
 never draws for a single sample — while `p50` sits at 6.05 uA, the real
@@ -70,6 +74,59 @@ faults:
   0.2177 uA on a mean of about 0.17 uA — ±123%. That is the resolution term
   doing its job at the bottom of range 0, not a defect. Report the interval;
   do not quote the mean as if it were tight.
+
+## Comparing two captures: `compare`
+
+```bash
+ppk2lab compare baseline.ppk2a candidate.ppk2a --metric mean_current --json
+```
+
+The difference is `candidate - baseline`, the order the arguments are given
+in. Use it instead of quoting two absolute numbers: the +/-10% per-range
+figure is a *gain* error — the same fraction of every reading taken through
+that shunt — so two captures through the same shunt share it and it scales
+the difference rather than each reading. `basis: same_range` is the case
+where that cancellation applies; `cross_range` and `mixed` add the two
+gains and are no tighter than the absolute figures.
+
+What decides whether the delta is worth reporting:
+
+- **Both sides' `measure` diagnostics come back as warnings**, each tagged
+  with its path. A floor-served quantile, a clipped maximum or a truncated
+  gap table makes an operand a bound, and a difference of two bounds is not
+  a measurement either — a delta of exactly 0.0 between two medians pinned
+  at the 200 nA floor says nothing about the DUT.
+- **`W_INSTRUMENT_MISMATCH`** — the two captures name different serial
+  numbers. A gain error is one physical unit's unknown, so it does not
+  cancel across two of them: `same_instrument: false` withdraws the
+  cancellation while `basis` still reads `same_range`, which is a true
+  statement about the ranges. `same_instrument: null` means the captures
+  did not identify their instruments, and the note says the shared-shunt
+  premise is unverified rather than pretending it holds.
+- **`W_VOLTAGE_ASSUMED` on an `energy` comparison** whose sides used
+  different supply voltages. Energy is charge x V and V comes from each
+  capture's own supply, so that delta contains the setpoint change as well
+  as the DUT's. The `voltage` block publishes both values, both
+  `voltage_basis` strings and `differs`; `--assume-voltage-mv` prices both
+  sides alike.
+- **Two error figures, never added.** `delta_typical` is the systematic
+  gain bar; `delta_batch_stderr` says how settled these two particular
+  means are. Human output prints both on the `uncertainty:` line, and they
+  can differ by an order of magnitude — a delta smaller than the stderr is
+  not a confident result however tight the gain bar is.
+- `relative` divides by `abs(a_value)`, so its sign always matches the
+  delta's. This instrument legitimately reads below zero on an unloaded
+  input, and a signed denominator turns a rise against a negative baseline
+  into a reported fall.
+- `dominant_range` is claimed only when one range holds at least 99.5% of
+  both the samples *and* the absolute charge. A duty-cycled load puts most
+  of its *samples* in the microamp range and most of its *charge* in the
+  milliamp one; requiring both stops the delta being priced with the wrong
+  shunt's accuracy.
+
+`uncertainty` is `null` for metrics the model does not price (percentiles,
+`max_current`, `min_current`, `energy`); the difference is still reported,
+with `uncertainty_note` saying why there is no bar.
 
 ## Duty cycle: `--state-threshold`
 
@@ -168,8 +225,11 @@ The DUT terminal always sees less than the setpoint; here that is how much.
 ## Output format
 
 A compact table per window: duration, mean with its typical uncertainty,
-min/max, p50/p90/p99, charge, energy, gaps — plus the `capture_sha256`
-prefix so numbers stay traceable. On a windowed read that digest is `null`
+min/max, the distribution line, charge, energy, gaps — plus the
+`capture_sha256` prefix so numbers stay traceable. The distribution line
+carries every published quantile — `p5`, `p50`, `p90`, `p95`, `p99`,
+`p999` — each prefixed `<=` when it was served from the grid floor, so a
+bound is never mistaken for a reading. On a windowed read that digest is `null`
 with `W_PARTIAL_INTEGRITY`: report the `capture_id` and say why.
 
 Done when: every reported figure carries the question it answers, its

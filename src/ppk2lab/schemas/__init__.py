@@ -33,7 +33,12 @@ _STR_ARRAY = {"type": "array", "items": {"type": "string"}}
 #: A warning with a stable code an agent can branch on (see
 #: ``ppk2lab.diagnostics``), alongside the sentence a human should read.
 _DIAGNOSTIC = _obj(
-    {"code": {"type": "string"}, "message": {"type": "string"}},
+    {
+        "code": {"type": "string"},
+        "message": {"type": "string"},
+        # Which part of a result the warning is about, not how much it matters.
+        "category": _NULLABLE_STR,
+    },
     ["code", "message"],
 )
 _DIAGNOSTIC_ARRAY = {"type": "array", "items": _DIAGNOSTIC}
@@ -144,8 +149,10 @@ _WINDOW_STATS = _obj(
                 # its extreme, so unlike `max` they do not drift upward as a
                 # capture gets longer (range switches accumulate; the DUT does
                 # not change). See docs/energy-analysis.md.
+                "p5": _NULLABLE_NUMBER,
                 "p50": _NULLABLE_NUMBER,
                 "p90": _NULLABLE_NUMBER,
+                "p95": _NULLABLE_NUMBER,
                 "p99": _NULLABLE_NUMBER,
                 "p999": _NULLABLE_NUMBER,
             }
@@ -300,6 +307,30 @@ _INTERRUPTION = _obj(
 _NULLABLE_INTERRUPTION: dict[str, Any] = {"anyOf": [{"type": "null"}, _INTERRUPTION]}
 
 
+#: Caller-supplied provenance recorded with a capture. Strings only, so what
+#: comes back out is exactly the text that went in.
+_USER_TAGS: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": {"type": "string"},
+}
+
+#: A scheduled action and the sample index it actually fired at. An action the
+#: capture ended before reaching is recorded too, with both index fields null
+#: and the reason in ``error`` — a stimulus that never happened is a fact about
+#: the run, so the keys stay present rather than the record being dropped.
+_SCHEDULED_ACTIONS: dict[str, Any] = {
+    "type": "array",
+    "items": _obj(
+        {
+            "label": {"type": "string"},
+            "requested_s": {"type": "number"},
+            "fired_index": _NULLABLE_INT,
+            "fired_s": _NULLABLE_NUMBER,
+            "error": _NULLABLE_STR,
+        }
+    ),
+}
+
 SCHEMAS: dict[str, dict[str, Any]] = {
     "envelope": _obj(
         {
@@ -425,6 +456,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "interruption": _NULLABLE_INTERRUPTION,
             "trigger": {"type": ["object", "null"]},
             "timeline": _TIMELINE_CHECK,
+            "user_tags": _USER_TAGS,
+            "scheduled_actions": _SCHEDULED_ACTIONS,
             "stats": {"anyOf": [{"type": "null"}, _WINDOW_STATS]},
             "warnings": _DIAGNOSTIC_ARRAY,
         },
@@ -440,6 +473,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "created_utc": {"type": "string"},
             "device": {"type": "object"},
             "configuration": {"type": "object"},
+            "user_tags": _USER_TAGS,
+            "scheduled_actions": _SCHEDULED_ACTIONS,
             "timeline": _TIMELINE_CHECK,
             "duration_s": {"type": "number"},
             # A truncated gap table or an unknown-size gap makes the span a
@@ -517,6 +552,64 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ["outcomes", "passed"],
         **{"$schema": _DRAFT, "$id": "ppk2lab:assert-result"},
     ),
+    "compare-result": _obj(
+        {
+            "metric": {"type": "string"},
+            "unit": {"type": "string"},
+            "a": {"type": "object"},
+            "b": {"type": "object"},
+            "a_value": _NULLABLE_NUMBER,
+            "b_value": _NULLABLE_NUMBER,
+            # candidate - baseline: the change from the first capture to the second.
+            "delta": _NULLABLE_NUMBER,
+            "relative": _NULLABLE_NUMBER,
+            # same_range: both captures stayed in one shunt range, so the gain
+            # error is a shared unknown and scales the difference. cross_range:
+            # independent gains, which add. mixed: at least one capture switched
+            # ranges, so no single gain factor describes it.
+            "basis": {"enum": ["same_range", "cross_range", "mixed"]},
+            "dominant_range": _obj(
+                {"a": {"type": ["integer", "null"]}, "b": {"type": ["integer", "null"]}}
+            ),
+            # A gain error is one physical unit's unknown, so the cancellation
+            # needs one physical unit. null = the captures did not identify
+            # their instruments, so the premise is unverified rather than
+            # known-false.
+            "same_instrument": _NULLABLE_BOOL,
+            # Present for voltage-dependent metrics only: energy is charge x V,
+            # and two captures taken at different setpoints differ by the
+            # supply as well as by the DUT.
+            "voltage": _obj(
+                {
+                    "a": _NULLABLE_INT,
+                    "b": _NULLABLE_INT,
+                    "basis": _obj({"a": _NULLABLE_STR, "b": _NULLABLE_STR}),
+                    "differs": {"type": "boolean"},
+                    "note": _obj({"a": _NULLABLE_STR, "b": _NULLABLE_STR}),
+                }
+            ),
+            "uncertainty": {
+                "anyOf": [
+                    {"type": "null"},
+                    _obj(
+                        {
+                            "model": {"type": "string"},
+                            "guaranteed": {"const": False},
+                            "delta_typical": {"type": "number"},
+                            "gain_term": {"type": "number"},
+                            "resolution_term": {"type": "number"},
+                            "gain_error_cancels": {"type": "boolean"},
+                            "delta_batch_stderr": _NULLABLE_NUMBER,
+                            "note": {"type": "string"},
+                        }
+                    ),
+                ]
+            },
+            "uncertainty_note": {"type": "string"},
+        },
+        ["metric", "unit", "a", "b", "delta", "basis", "uncertainty"],
+        **{"$schema": _DRAFT, "$id": "ppk2lab:compare-result"},
+    ),
     "export-result": _obj(
         {
             "format": {"enum": ["csv", "vcd", "jsonl"]},
@@ -573,6 +666,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "created_utc": {"type": "string"},
             "device": {"type": "object"},
             "configuration": {"type": "object"},
+            "user_tags": _USER_TAGS,
+            "scheduled_actions": _SCHEDULED_ACTIONS,
             "timeline": _obj(
                 {
                     "sample_rate_hz": {"type": "integer", "minimum": 1},

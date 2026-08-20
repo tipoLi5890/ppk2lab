@@ -10,9 +10,11 @@ contracts that must not drift.
   package, Python import, and CLI executable.
 - License: MIT (`LICENSE`), covering this repository's original material
   only; trademark and firmware boundaries are in `NOTICE.md`.
-- Versioning: `0.2.0` is released and is the project's first stable
-  version. Stable numbering covers the machine-readable contracts, not the
-  hardware validation, which is partial and tracked in `ROADMAP.md`. Never
+- Versioning: `0.3.0` is the current release; `0.2.0` was the project's
+  first stable version. Stable numbering covers the machine-readable
+  contracts, not the hardware validation, which is partial and tracked in
+  `ROADMAP.md`. Semantic versioning applies from `0.2.0` onward, so a
+  release that adds surface is a minor bump even when nothing broke. Never
   label the project `1.0.0` under the current plan.
 - Unofficial project, not affiliated with Nordic Semiconductor ASA. PPK2
   behavior is referenced from Nordic official documentation and the official
@@ -27,12 +29,14 @@ contracts that must not drift.
   100 kS/s stream parser, calibration, canonical `.ppk2a` capture artifact,
   D0-D7 logic analysis + VCD, streaming UART/SPI decoders with enforced
   rate tiers, software triggers, per-event energy analysis, assertion DSL
-  with JSON/JUnit reports, a 12-command CLI with `--simulate`, sync/async
+  with JSON/JUnit reports, a 13-command CLI with `--simulate`, sync/async
   Python APIs, and versioned JSON schemas.
 - Published: public GitHub repository with CI (Linux/macOS/Windows ×
   Python 3.11-3.14) and a PyPI development preview released through the
   trusted-publishing workflow.
-- Remaining before `0.2.0`: hardware validation gates — see `ROADMAP.md`.
+- Still open: hardware validation gates — see `ROADMAP.md`. They did not
+  gate `0.2.0` and do not gate `0.3.0`; what has and has not been validated
+  is stated there and in the README.
 - The frozen public surface is `docs/api-baseline.md`; data model and
   stability policy are `docs/SPEC.md`.
 

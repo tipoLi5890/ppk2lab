@@ -1,10 +1,13 @@
-# Public API baseline (`0.2.0`)
+# Public API baseline (`0.3.0`)
 
 ## 1. Purpose
 
-This document is the **frozen surface** for the `0.2.0` release gate: the
-Python names, CLI commands, exit codes, and file formats that downstream code
-and agents may depend on, and the checklist the release gate diffs against.
+This document is the **frozen surface** as of `0.3.0`: the Python names, CLI
+commands, exit codes, and file formats that downstream code and agents may
+depend on, and the checklist the release gate diffs against. The surface was
+frozen at `0.2.0`; every change `0.3.0` made to it is recorded below, and
+every one of them is an addition — nothing a `0.2.0` reader was told to expect
+was removed, renamed, or re-typed.
 
 - **Additions** (exported names, result fields, schemas, optional CLI flags)
   are backward compatible and may land in a patch or minor release.
@@ -13,9 +16,11 @@ and agents may depend on, and the checklist the release gate diffs against.
   [SPEC.md - Stability policy](SPEC.md#stability-policy).
 - Anything not listed here is internal (section 5).
 
-Current: `ppk2lab.__version__ = "0.2.0"`, `ppk2lab.SCHEMA_VERSION = "1"`.
+Current: `ppk2lab.__version__ = "0.3.0"`, `ppk2lab.SCHEMA_VERSION = "1"` — the
+schema version has not moved since `0.2.0`, and under the policy below it does
+not have to, because nothing was removed, renamed, or given a new meaning.
 
-## 2. Stable Python surface (`0.2.0`)
+## 2. Stable Python surface (`0.3.0`)
 
 Every name in `ppk2lab.__all__` (24 exports):
 
@@ -23,15 +28,15 @@ Every name in `ppk2lab.__all__` (24 exports):
 |---|---|---|
 | `PPK2` | class | Synchronous device handle; `PPK2.open(serial_number=, port=, transport=, simulate=, simulator=, read_metadata=, max_voltage_mv=)`, context manager, `refresh_metadata`, `set_mode`, `set_source_voltage_mv`, `set_dut_power`, `set_user_gain`, `reset`, `start_measuring`, `stop_measuring`, `stream`, `capture`, `recover_session`, `close`, and the read-only `state` property. `stream()` returns a closable `StreamIterator`; `with device.stream(...) as events:` is the documented idiom. |
 | `AsyncPPK2` | class | Async handle over the same device, taking `PPK2.open`'s keyword arguments: `await AsyncPPK2.open(...)`, async context manager, `close`, `refresh_metadata`, `set_mode`, `set_source_voltage_mv`, `set_dut_power`, `reset`, `capture`, `stream`, and the `state` / `info` properties. It is not a complete mirror — `set_user_gain`, `start_measuring`, `stop_measuring`, `recover_session` and `firmware_fingerprint` have no async counterpart. `stream()` returns a closable `AsyncStreamIterator`; `async with adev.stream(...) as events:` is the documented idiom. Blocking calls run via `asyncio.to_thread`. |
-| `discover` | function | `discover(*, simulate=False) -> list[DeviceInfo]`; read-only device enumeration. |
+| `discover` | function | `discover(*, simulate=None) -> list[DeviceInfo]`; read-only device enumeration. `simulate=None` reads `PPK2LAB_SIMULATE`; `True` and `False` decide explicitly, regardless of the environment. |
 | `DeviceInfo` | class | Frozen dataclass: `serial_number`, `vid`, `pid`, `ports`, `firmware_version`, `simulated`, `measurement_port`, `to_json()`. |
 | `DeviceState` | class | **Frozen** dataclass: `mode`, `source_voltage_mv`, `dut_power`, `measuring`, `source_voltage_basis`; `None` means unknown. Reached through the read-only `PPK2.state` property — the host cannot assert a hardware state the device never confirmed. |
 | `StateChange` | class | Dataclass record of one state-changing operation: `operation`, `requested`, `before`, `after`, `applied`, `observed_after`, `warnings`. |
 | `Mode` | class | `IntEnum` with `AMPERE = 1`, `SOURCE = 2` (wire values). |
 | `GapEvent` | class | Frozen dataclass for sample loss: `index`, `missing`, `reason`, `ambiguous`. |
 | `Capture` | class | In-memory capture model over raw samples: `load`/`save`, `stored_count`, `start_index`, `end_index`, `missing_known`, `duration_s`, `sample_rate_hz`, `calibration`, `source_voltage_mv`, `raw_bytes`, `sha256`, `stored_to_timeline`, `timeline_to_stored`, `time_to_index`, `index_to_time`, `iter_events`, `logic_bytes`, `currents_ua`, `summary`. |
-| `CaptureResult` | class | Dataclass returned by `PPK2.capture()`: `capture`, `path`, `stats`, `complete`, `interruption`, `trigger`, `capture_id`, `capture_sha256`, `warnings`, `to_json()`. |
-| `read_capture` | function | `read_capture(path) -> Capture`; reads a `.ppk2a` artifact. |
+| `CaptureResult` | class | Dataclass returned by `PPK2.capture()`: `capture`, `path`, `stats`, `complete`, `interruption`, `trigger`, `capture_id`, `capture_sha256`, `warnings`, `timeline`, `scheduled_actions`, `user_tags`, `to_json()`. |
+| `read_capture` | function | `read_capture(path, *, max_samples=) -> Capture`; reads a `.ppk2a` artifact whole. `max_samples` is the load ceiling (25,000,000 by default, roughly 200 MB of RAM); above it the read raises `CaptureTooLargeError` instead of exhausting memory, and `read_window` reads a slice. |
 | `write_capture` | function | `write_capture(capture, path, *, overwrite=False) -> str`; writes a `.ppk2a` artifact. |
 | `Calibration` | class | Per-range calibrated ADC conversion: `Calibration(ranges, *, vdd_mv=, calibrated=)`, `from_metadata`, `missing_ranges`, `convert`, `convert_block`. |
 | `Annotation` | class | One decoded event tied to an exact sample range: `decoder`, `kind`, `start_sample`, `end_sample`, `fields`, `confidence`, `errors`, `to_json`/`from_json`. |
@@ -46,18 +51,30 @@ Every name in `ppk2lab.__all__` (24 exports):
 | `SCHEMA_VERSION` | constant | `"1"` — version of the machine-readable contracts, independent of the package version. |
 | `__version__` | constant | Package version string. |
 
+`PPK2LAB_SIMULATE=1` is read by `PPK2.open` and by `discover` when `simulate`
+is left unset, which is what makes it interchangeable with `--simulate`. It
+never applies to an injected `transport=`: the environment must not decide the
+identity of a transport the caller supplied, or a real instrument gets written
+into a stored manifest as `simulated: true` while every byte still reaches the
+wire. Only an explicit `simulate=True` labels an injected transport simulated,
+and an explicit `simulate=False` reaches real hardware however the variable is
+set.
+
 Also stable at the subpackage level (imported by path, not re-exported at top
 level): `ppk2lab.schemas` (`SCHEMAS`, `list_schemas`, `get_schema`) and the
 `ppk2lab.analysis` entry points named in [SPEC.md](SPEC.md#python-api-surface-sync).
 
 ## 3. Stable CLI surface
 
-Executable: `ppk2lab`. Twelve subcommands, frozen for `0.2.0`: `discover`,
+Executable: `ppk2lab`. Thirteen subcommands, frozen for `0.3.0`: `discover`,
 `info`, `capabilities`, `schema`, `doctor`, `configure`, `capture`, `inspect`,
-`decode`, `measure`, `assert`, `export`. All are read-only except `configure`
-(dry-run unless `--apply`) and `capture` (starts/stops measuring only; never
-enables DUT power). `inspect` reads a capture's manifest without touching a
-sample chunk, so it is bounded regardless of how long the recording is.
+`decode`, `measure`, `assert`, `compare`, `export`. Twelve of them were frozen
+at `0.2.0`; `compare` joined them in `0.3.0`, and a new command is an addition
+under the policy in `docs/SPEC.md`, not a change to those twelve. All are
+read-only except `configure` (dry-run unless `--apply`) and `capture`
+(starts/stops measuring only; never enables DUT power). `inspect` reads a
+capture's manifest without touching a sample chunk, so it is bounded regardless
+of how long the recording is.
 
 Global flags, accepted before or after the subcommand: `--json` (emit the JSON
 envelope instead of human text), `--simulate` (simulated PPK2 — toolchain
@@ -91,22 +108,26 @@ published by `ppk2lab capabilities --json`.
   `kind`, `start_sample`, `end_sample`, `fields`, `confidence`, `errors`),
   written by `ppk2lab decode --output` and read back by `measure`/`assert`.
 - **Derived exports** — `csv`, `vcd`, `jsonl` via `ppk2lab export --format`;
-  reproducible views over a capture, never a replacement for it.
+  reproducible views over a capture, never a replacement for it. A CSV export
+  may carry `# `-prefixed provenance lines before the header (`--comment`,
+  repeatable), CRLF-terminated like the rows that follow; a reader that does
+  not want them skips leading `#` lines.
 - **Decimated exports** — `ppk2lab export --decimate N` / `--bucket-ms M`
   emit one record per timeline bucket instead of one per sample. Opt-in only,
   never a default, and the header shares no column name with the raw export so
   the two can never be confused ([decimation.md](decimation.md)).
-- **Schemas** (21, from `ppk2lab.schemas.SCHEMAS`, served by `ppk2lab schema`):
+- **Schemas** (22, from `ppk2lab.schemas.SCHEMAS`, served by `ppk2lab schema`):
   `annotation`, `assert-result`, `capabilities-result`, `capture-manifest`,
-  `capture-result`, `configure-result`, `decode-result`, `device`,
-  `diagnostic`, `discover-result`, `doctor-result`, `envelope`, `error`,
-  `export-result`, `gap`, `info-result`, `inspect-result`, `measure-result`,
-  `state-change`, `timeline-check`, `window-stats`.
+  `capture-result`, `compare-result`, `configure-result`, `decode-result`,
+  `device`, `diagnostic`, `discover-result`, `doctor-result`, `envelope`,
+  `error`, `export-result`, `gap`, `info-result`, `inspect-result`,
+  `measure-result`, `state-change`, `timeline-check`, `window-stats`.
 
 ## 4b. Also stable at the subpackage level
 
 Not every stable name is re-exported at the top level. These are part of the
-`0.2.0` surface and follow the same change policy:
+stable surface — frozen at `0.2.0`, extended by addition since — and follow the
+same change policy:
 
 | Name | Kind | Description |
 |---|---|---|
@@ -133,7 +154,8 @@ Not every stable name is re-exported at the top level. These are part of the
 Result fields added under the append-only policy: `voltage_basis`,
 `voltage_measured`, `energy_note`, `charge_is_lower_bound`,
 `samples.implausible`, `samples.covered_fraction`, `samples.unpopulated`,
-`samples.saturated`, `samples.zero_code`, `current_ua.p50`/`p90`/`p99`/`p999`,
+`samples.saturated`, `samples.zero_code`,
+`current_ua.p5`/`p50`/`p90`/`p95`/`p99`/`p999`,
 `distribution` (including `quantiles_at_floor`), `state_split`,
 `uncertainty`, `saturated_samples`,
 `saturated_ranges`, `samples_per_range`, `charge_per_range_uc`,
@@ -149,9 +171,44 @@ state; `warning_codes`, `gap_reasons`, `interruption_reasons` and per-option
 `capture_sha256` is now `string|null` — a windowed read verifies only the
 chunks it touched, so the whole-file digest is reported as unverified rather
 than as verified. Assertion observations carry `covered_fraction`,
-`capture_end_sample`, and a machine-branchable `reason_code`. Envelope
-`warnings` entries are `{code, message}` objects, and the published catalogs
-carry `{code, category, meaning}`.
+`capture_end_sample`, a machine-branchable `reason_code`, and
+`quantiles_at_floor` / `below_grid_fraction` so a floor-served quantile is
+visible without a second command.
+
+Envelope `warnings` entries are `{code, message, category}` objects, and the
+published catalogs carry `{code, category, meaning}`. `category` says which
+part of a result a warning is about — `capture integrity`, `measurement trust`,
+`device state` and `analysis` are the categories in use, from the same open
+catalog the codes come from. It is explicitly **not** a severity, and it is
+`null` for a code the reading version does not know. All three keys are present
+wherever a warning is: a live result, a stored capture manifest, and `inspect`
+output alike — including for an artifact written before `category` existed,
+which is filled in on the way out rather than republished in the older shape.
+
+`user_tags` and `scheduled_actions` appear in the capture manifest, in capture
+results, and in `inspect` output; both are recorded verbatim and never
+interpreted. Both are new in `0.3.0`: `0.2.0` published neither, in any of the
+three places, so a reader of either is reading a field that did not exist before
+and no `0.2.0` contract changed shape.
+
+A scheduled action (`PPK2.capture(at=...)`) that the capture ended before
+reaching is recorded alongside the ones that fired, with `fired_index: null`,
+`fired_s: null` and the reason in `error`, and the run carries one
+`W_SCHEDULED_ACTION` for the whole set — a stimulus that never happened is a
+fact about the run, and dropping the record made such a capture
+indistinguishable from one that scheduled nothing. `fired_index` and `fired_s`
+are therefore **nullable from the start** in `capture-manifest`,
+`capture-result` and `inspect-result`: a reader must branch on null rather than
+assume every listed action has an index.
+
+`compare-result` gained `same_instrument` (`true`, `false`, or `null` when the
+captures did not identify their instruments — unknown is not the same as
+different) and, for the voltage-dependent `energy` metric, a `voltage` block
+holding each side's setpoint, `basis`, `note`, and whether the two `differs`.
+Each `compare` side gained `device` (`serial_number`, `firmware_version`),
+`quantiles_at_floor`, `saturated_samples`, `charge_is_lower_bound`,
+`source_voltage_mv`, `voltage_basis` and `energy_note`, so a reader can see that
+an operand is a bound before trusting a difference between two of them.
 
 The `W_*` catalog itself is new to a PyPI consumer: `0.1.0.dev0` emitted
 warnings as bare strings with no codes at all, so every code in
@@ -163,10 +220,18 @@ number means and must not be softened: `W_BELOW_MEASUREMENT_FLOOR` (a reported
 quantile was served from the distribution grid's floor and bounds the true
 value from above; `distribution.quantiles_at_floor` names which) and
 `W_DUT_POWER_TRANSIENT` (DUT power was enabled, and the device drops VOUT once
-the port closes, so a later command measures an unpowered DUT).
+the port closes, so a later command measures an unpowered DUT). `0.3.0` adds
+`W_INSTRUMENT_MISMATCH` (category `measurement trust`): the two captures being
+differenced came from different serial numbers, so their gain errors are
+independent unknowns, the shared-shunt cancellation is withdrawn, and the delta
+is priced no tighter than the two absolute figures.
 
-New assertion metrics: `p50_current` (alias `median_current`), `p90_current`,
-`p99_current`, `p999_current`. A CI threshold on `max_current` drifts upward
+New assertion metrics: `p5_current`, `p50_current` (alias `median_current`),
+`p90_current`, `p95_current`, `p99_current`, `p999_current`. `p5` and `p95` are
+the conventional floor and burst statistics in power work; publishing a fixed
+set rather than an arbitrary `pN` keeps every statistic except
+`--state-threshold` collected unconditionally, so an offline measurement of a
+window can never disagree with what that window recorded live. A CI threshold on `max_current` drifts upward
 with capture length because range switches accumulate; `p99_current` describes
 a fraction of the distribution instead and does not.
 

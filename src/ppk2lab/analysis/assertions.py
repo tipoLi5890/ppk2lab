@@ -47,9 +47,11 @@ _METRICS = {
     # extreme. A CI threshold on `max_current` drifts upward with capture
     # length because range switches accumulate, so `p99_current` is the more
     # defensible bound — see docs/energy-analysis.md.
+    "p5_current": ("p5_ua", "current"),
     "p50_current": ("p50_ua", "current"),
     "median_current": ("p50_ua", "current"),
     "p90_current": ("p90_ua", "current"),
+    "p95_current": ("p95_ua", "current"),
     "p99_current": ("p99_ua", "current"),
     "p999_current": ("p999_ua", "current"),
     "charge": ("charge_uc", "charge"),
@@ -291,7 +293,14 @@ def _matches_in(values: list[int], pattern: list[int]) -> int:
 
 
 #: Result field -> the name `WindowStats.quantiles_at_floor` reports it under.
-_QUANTILE_FIELDS = {"p50_ua": "p50", "p90_ua": "p90", "p99_ua": "p99", "p999_ua": "p999"}
+_QUANTILE_FIELDS = {
+    "p5_ua": "p5",
+    "p50_ua": "p50",
+    "p90_ua": "p90",
+    "p95_ua": "p95",
+    "p99_ua": "p99",
+    "p999_ua": "p999",
+}
 
 
 def _quantile_name(metric_field: str) -> str | None:
@@ -449,6 +458,15 @@ def evaluate_assertion(
             "gaps_in_window": stats.gap_count,
             "covered_fraction": stats.covered_fraction,
             "capture_end_sample": capture.end_index,
+            # Carried on every observation, not only when this rule's own
+            # metric is affected: a rule that reads a quantile in a regime
+            # where quantiles bottom out is exactly the rule whose author
+            # needs to see it, and making them run `measure` separately to
+            # find out is a workaround for a missing field.
+            "quantiles_at_floor": list(stats.quantiles_at_floor),
+            "below_grid_fraction": (
+                stats.below_grid_samples / stats.valid_samples if stats.valid_samples else None
+            ),
         }
         if stats.gap_count > 0 or stats.has_unknown_gaps:
             observation["status"] = "incomplete"

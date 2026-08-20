@@ -171,7 +171,7 @@ simulated profile `measure` reports `mean 1806.72 uA` next to
 current, and the DUT never draws 1806.72 uA for a single sample. Both are
 correct answers to different questions.
 
-Every result carries `p50`/`p90`/`p99`/`p999` beside mean/min/max.
+Every result carries `p5`/`p50`/`p90`/`p95`/`p99`/`p999` beside mean/min/max.
 `measure --state-threshold 1mA` goes further and costs the two sides
 separately — time, mean, charge and run count for each.
 `docs/energy-analysis.md` has the worked example.
@@ -200,7 +200,15 @@ expect it to be repeatable only to within the range's accuracy.
 
 ## I lost samples on an idle machine. Is that my fault?
 
-Probably not, and it is worth knowing what a quiet host looks like. Measured
+Through `0.2.0` it was not yours and not the host's: it was this project's.
+The artifact writer compressed each 4 MB chunk on the thread consuming the
+sample stream, and the ~290 ms pause overflowed the reader's queue, so a
+capture lost a gap at every chunk boundary it crossed. That is why the runs
+below each show exactly five gaps over 60 s, and why load made the gaps
+*larger* rather than more numerous. Fixed in the Unreleased CHANGELOG entry;
+on the same host, 5 x 30 s and 1 x 60 s captures now record every sample.
+
+The measurements below are kept as the record of that behaviour. Measured
 on one host (macOS on Apple silicon, 10 cores) with nothing else running: a
 60 s capture lost 25,792 samples — **0.43%** — in 5 gaps of 4,864 to 5,648
 samples. Every one was `host_overflow`: the host's bounded stream queue
@@ -464,6 +472,67 @@ with PPK2.open(serial_number="SERIAL") as device:
 Verify it from the current itself rather than from the return value: this
 hardware cannot report its power state back, which is also why an
 unpowered DUT in Ampere mode reads near zero instead of raising anything.
+
+## How do I capture a cold-boot inrush?
+
+The interesting part of an inrush is the moment power arrives, so the capture
+has to be running before it does. Pass `at=` a list of
+`(delay_s, callable[, label])`: each fires between two sample blocks, on the
+capture's own thread, at a sample index the capture then records.
+
+```python
+with PPK2.open(serial_number="SERIAL") as device:
+    device.set_dut_power(False)                       # start from cold
+    result = device.capture(
+        duration_s=10.0,
+        output="inrush.ppk2a",
+        at=[(2.0, lambda: device.set_dut_power(True), "dut_power_on")],
+    )
+print(result.scheduled_actions)
+# [{'label': 'dut_power_on', 'requested_s': 2.0, 'fired_index': 200192,
+#   'fired_s': 2.0019, 'error': None}]
+```
+
+`fired_index` is where it actually happened, so the moment is locatable in the
+samples rather than inferred from a wall clock. A timer thread would land
+within a scheduler quantum and would be writing to the same serial port the
+reader is draining; this does neither. If the callable raises, the capture
+continues, the failure is recorded against the action, and `W_SCHEDULED_ACTION`
+says so — samples already taken are not worth losing to a bad callback.
+
+**`at=` cannot be combined with a trigger**, and asking for both is a usage
+error rather than a best-effort attempt. A triggered capture's timeline starts
+`pre` samples *before* the trigger fires, so a delay measured from the first
+sample cannot be honoured, and the `fired_index` recorded against the action
+would predate the action itself. Schedule the stimulus on a `duration_s=`
+capture, or perform it before a triggered capture starts.
+
+An action whose delay never came due is recorded too: the same entry, with
+`fired_index: null`, `fired_s: null`, and an `error` naming where the capture
+ended — plus one `W_SCHEDULED_ACTION` for the whole set. Without that record a
+capture whose stimulus never happened was byte-for-byte indistinguishable from
+one that scheduled nothing, which is the case where the samples look like a
+perfectly good measurement of the wrong thing.
+
+**Both the `at=` callables and `on_progress` run on the thread consuming
+samples.** That is the point for `at=` — the action lands between two sample
+blocks, at an index the capture can record — and the cost is that a slow
+callable stalls the consumer. The reader buffers up to `queue_bytes` (4 MB by
+default) as a back-pressure target, and the device sends 100,000 samples/s x
+4 bytes = 400 kB/s, so that buffer is about ten seconds of stream: a callable
+that returns well inside that costs nothing, and one that does not drops
+samples. It is the same class of stall that produced a `host_overflow` gap at
+every artifact chunk boundary until the Unreleased fix (see "I lost samples on
+an idle machine"). Do the slow part after the capture returns.
+
+`on_progress` takes the same care but is cheaper to get right: it is called at
+most once every 0.25 s with `{stored, elapsed_s, gap_count, sample_limit}`, it
+now also reports while a triggered capture is waiting to fire, and a callback
+that raises is disabled once with `W_PROGRESS_CALLBACK` instead of ending the
+capture.
+
+There is deliberately no CLI flag for this. `capture` never enables DUT power
+and has no option that would; scheduling one is an explicit, Python-only act.
 
 ## How do I try it without hardware?
 

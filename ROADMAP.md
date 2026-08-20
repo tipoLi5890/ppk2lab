@@ -1,8 +1,8 @@
 # Roadmap
 
-`0.2.0` is released — the project's first stable version. Stable numbering
-puts the machine-readable contracts under the policy at the end of this file;
-it is not a claim that every gate below has passed. Several need hardware this
+`0.3.0` is the current release; `0.2.0` was the project's first stable
+version. Stable numbering puts the machine-readable contracts under the policy
+at the end of this file; it is not a claim that every gate below has passed. Several need hardware this
 project has not had, and each says what closing it would take. The project is
 never labeled `1.0.0` as part of this plan.
 
@@ -21,7 +21,7 @@ used one unit, one firmware, one OS, one host, and no calibrated reference, so
 every other hardware gate below is still open, and each says what closing it
 would take.
 
-## Remaining work before `0.2.0`
+## Remaining work
 
 ### Needs hardware the session did not have
 
@@ -60,7 +60,7 @@ would take.
   What this gate needs now is bench time and disk.
 - **Multi-device session.** One unit was attached; this needs two.
 
-Two more measurements need hardware but do not gate `0.2.0`: the bandwidth
+Two more measurements need hardware but gate no release: the bandwidth
 sweep and the range-switch settling window, both under "Blocked on a
 measurement" below.
 
@@ -73,7 +73,7 @@ measurement" below.
 - Release rehearsal per `docs/releasing.md`.
 - PyPI publish (requires explicit maintainer authorization).
 
-## `0.2.0` release gates
+## Release gates
 
 1. API, schemas, and capture format labeled with stability and version policy.
 2. README/INSTALL/CLI examples reproducible from a clean environment.
@@ -92,7 +92,7 @@ measurement" below.
    and an MCU fixture attached. The compatibility matrix below is the in-repo
    record of which configurations were covered.
 
-## Decoder support tiers (frozen for `0.2.0`)
+## Decoder support tiers (frozen since `0.2.0`)
 
 | Protocol / rate | Tier | Behavior |
 |---|---|---|
@@ -125,12 +125,14 @@ configuration nobody ran.
 That macOS pass covered: discovery and automatic measurement-port selection
 by metadata probe, `info`, `doctor` (11 pass, 1 warn `calibrated_flag`, 1 skip
 `stream_rate`, exit 0), 3 s and 60 s captures at 100 kS/s with all sample loss
-accounted for in the gap table, recovery from SIGTERM and from SIGKILL
+accounted for in the gap table — that loss has since been traced to this
+project's own artifact writer and fixed, see the Unreleased CHANGELOG entry —
+recovery from SIGTERM and from SIGKILL
 mid-capture, and the offline commands on the resulting artifacts. It did not
 cover decoding a real signal, a calibrated reference, or anything the matrix
 still shows as empty. The bench evidence itself stays with the maintainer.
 
-## After `0.2.0` (not commitments)
+## Later (not commitments)
 
 **Blocked on a measurement.** Each needs a load or a reference this project has
 not applied; the measurements it does have are in CHANGELOG.md.
@@ -149,9 +151,16 @@ not applied; the measurements it does have are in CHANGELOG.md.
 
 **Next.** Streaming decimation straight from an artifact, without an in-memory
 capture. Battery-life estimation from the duty-cycle split — the deliverable is
-the caveat framework, not the arithmetic. A `compare` verb, once the
-uncertainty surface is stable enough that a delta means something on a ±10%
-instrument.
+the caveat framework, not the arithmetic.
+
+`compare` has shipped. The precondition it was waiting on — that a delta mean
+something on a ±10% instrument — turned out to be answerable from the existing
+uncertainty model rather than to need a new one: that ±10% is a per-range gain
+error, the same fraction of reading on every sample through that shunt, so two
+captures taken through the same shunt share the unknown factor and it scales
+their difference instead of each reading. `compare` makes that claim only when
+both captures really did stay in one range, adds the two gains when they did
+not, and always adds the resolution term.
 
 **Later.** A lossy `.ppk2` import/export layer; bit-banged I2C, PWM,
 Manchester/NRZ and 1-Wire decoders; an optional stdio MCP server once the API
@@ -167,7 +176,7 @@ a second of the USB host going away. Higher decoder tiers without fixture data.
 
 ## Compatibility policy
 
-Until `0.2.0`, everything may change. From `0.2.0`, the JSON `schema_version`
+Before `0.2.0`, everything could change. From `0.2.0` onward the JSON `schema_version`
 only changes with a documented migration note in CHANGELOG.md, and the
 capture `format_version` is append-only: newer readers open older artifacts;
 older readers refuse newer ones explicitly.

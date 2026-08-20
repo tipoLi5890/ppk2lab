@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from typing import Any, NoReturn
 
 from .._version import SCHEMA_VERSION, __version__
+from ..analysis.compare import metric_names as compare_metric_names
 from ..diagnostics import Diagnostic, as_json
 from ..errors import EXIT_OK, Ppk2labError, UsageError
 
@@ -37,6 +38,7 @@ COMMAND_CATEGORIES: dict[str, str] = {
     "decode": "offline",
     "measure": "offline",
     "assert": "offline",
+    "compare": "offline",
     "export": "offline",
 }
 
@@ -59,6 +61,7 @@ COMMAND_SUMMARIES: dict[str, str] = {
     "decode": "decode UART/SPI from a capture (offline)",
     "measure": "current/charge/energy for windows or events (offline)",
     "assert": "evaluate power/protocol assertions against a capture (offline)",
+    "compare": "difference two captures on one metric, with an error bar (offline)",
     "export": "derived views: CSV, VCD, JSONL (offline)",
 }
 
@@ -247,6 +250,13 @@ def build_parser() -> CliParser:
         action="store_true",
         help="allow buffering a long capture in RAM instead of requiring --output",
     )
+    p.add_argument(
+        "--tag",
+        action="append",
+        metavar="KEY=VALUE",
+        help="record provenance in the capture itself (repeatable), e.g. "
+        "--tag sn=POD01 --tag fw=0.3.0; ppk2lab never interprets these",
+    )
     _add_spi_options(p)
 
     p = add_command("inspect")
@@ -387,6 +397,31 @@ def build_parser() -> CliParser:
         metavar="MS",
         help="CSV/JSONL: same as --decimate, with the bucket width given in milliseconds",
     )
+    p.add_argument(
+        "--comment",
+        action="append",
+        metavar="TEXT",
+        help="CSV only: write a `# TEXT` provenance line before the header "
+        "(repeatable). A derived file usually outlives the session that made it",
+    )
+
+    p = add_command("compare")
+    p.add_argument("baseline", help="the capture to measure the change from")
+    p.add_argument("candidate", help="the capture to measure the change to")
+    _add_max_samples_option(p)
+    p.add_argument(
+        "--metric",
+        default="mean_current",
+        choices=compare_metric_names(),
+        help="which figure to difference (default: mean_current)",
+    )
+    p.add_argument(
+        "--assume-voltage-mv",
+        type=int,
+        metavar="MV",
+        help="DUT supply voltage to use for energy on both sides when the meter "
+        "cannot know it; recorded as an explicit assumption",
+    )
 
     return parser
 
@@ -442,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
             "decode": impl.cmd_decode,
             "measure": impl.cmd_measure,
             "assert": impl.cmd_assert,
+            "compare": impl.cmd_compare,
             "export": impl.cmd_export,
         }
         outcome = handlers[command](args)

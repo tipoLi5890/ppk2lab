@@ -621,3 +621,323 @@ def test_estimating_an_empty_capture_promises_only_a_header():
     assert estimate["records"] == 0
     assert estimate["bytes_per_record"] is None
     assert estimate["estimated_bytes"] == len(RAW_CSV_HEADER.encode())
+
+
+# -- compare ------------------------------------------------------------
+#
+# The +/-10% in the per-range accuracy table is a gain error: the same fraction
+# of reading on every sample through that shunt. Two captures through the same
+# shunt share the unknown factor, so it scales their difference rather than
+# each reading. These pin that the claim is made only when it is true.
+
+
+def _capture_at(current_ua, samples=3000):
+    from ppk2lab.testing.profiles import ConstantProfile
+
+    from .conftest import capture_of
+
+    return capture_of(ConstantProfile(current_ua), samples=samples)
+
+
+def _stats_at(current_ua, samples=3000):
+    from ppk2lab.analysis import measure_window
+
+    return measure_window(_capture_at(current_ua, samples))
+
+
+def test_a_same_range_delta_does_not_pay_for_both_absolute_readings():
+    from ppk2lab.analysis import compare_stats
+
+    a, b = _stats_at(197.0), _stats_at(251.0)
+    result = compare_stats(a, b)
+    assert result["basis"] == "same_range"
+    assert result["delta"] == pytest.approx(54.0, abs=1.0)
+    unc = result["uncertainty"]
+    assert unc["gain_error_cancels"] is True
+    # The gain term prices the difference, not the two readings.
+    assert unc["gain_term"] == pytest.approx(0.10 * result["delta"], rel=0.01)
+    naive = 0.10 * (a.mean_ua + b.mean_ua)
+    assert unc["delta_typical"] < naive / 4, "the whole point is a tighter bar"
+
+
+def test_a_cross_range_delta_adds_the_two_gains_and_says_so():
+    from ppk2lab.analysis import compare_stats
+
+    a, b = _stats_at(197.0), _stats_at(5361.0)
+    result = compare_stats(a, b)
+    assert result["basis"] == "cross_range"
+    assert result["dominant_range"]["a"] != result["dominant_range"]["b"]
+    unc = result["uncertainty"]
+    assert unc["gain_error_cancels"] is False
+    assert unc["gain_term"] > 0.10 * abs(result["delta"])
+
+
+def test_a_capture_that_switched_ranges_gets_no_cancellation_claim():
+    from ppk2lab.analysis import compare_stats, measure_window
+    from ppk2lab.testing.profiles import StepProfile
+
+    from .conftest import capture_of
+
+    swinging = measure_window(
+        capture_of(StepProfile([(1500, 50.0, 0), (1500, 20000.0, 0)]), samples=3000)
+    )
+    result = compare_stats(_stats_at(197.0), swinging)
+    assert result["basis"] == "mixed"
+    assert result["uncertainty"]["gain_error_cancels"] is False
+
+
+def test_a_duty_cycled_burst_is_not_reported_as_a_single_range_capture():
+    """Sample share alone calls this range 0; the charge is 99.8% in range 4.
+
+    A short, hard burst on top of a long sleep is the shape of nearly every
+    real embedded power measurement, and it is exactly the shape that breaks a
+    sample-counted dominance test: the metrics being differenced are
+    charge-weighted, so pricing this delta with range 0's shunt understates it
+    by an order of magnitude *and* prints "both captures stayed in range 0",
+    which is a false sentence about the hardware.
+    """
+    from ppk2lab.analysis import compare_stats, measure_window
+    from ppk2lab.analysis.compare import DOMINANT_RANGE_SHARE
+    from ppk2lab.capture.stats import RANGE_TYPICAL_ACCURACY
+    from ppk2lab.testing.profiles import StepProfile
+
+    from .conftest import capture_of
+
+    def burst(idle_samples, burst_samples):
+        profile = StepProfile([(idle_samples, 2.0, 0), (burst_samples, 250_000.0, 0)])
+        return measure_window(capture_of(profile, samples=idle_samples + burst_samples))
+
+    a, b = burst(24900, 100), burst(24890, 110)
+
+    # Without this the test would pass on any capture that happens not to be
+    # single-range, and would prove nothing about the charge half of the rule.
+    for side in (a, b):
+        by_samples = max(range(len(side.samples_per_range)), key=side.samples_per_range.__getitem__)
+        assert side.samples_per_range[by_samples] / sum(side.samples_per_range) > (
+            DOMINANT_RANGE_SHARE
+        ), "the sample share alone would have qualified this as a single-range capture"
+        charge = side.charge_per_range_uc
+        assert abs(charge[by_samples]) / sum(abs(c) for c in charge) < 0.01
+
+    result = compare_stats(a, b)
+    assert result["basis"] == "mixed"
+    assert result["dominant_range"] == {"a": None, "b": None}
+    unc = result["uncertainty"]
+    assert unc["gain_error_cancels"] is False
+    # The burst is where the charge is, so the bar cannot be cheaper than the
+    # shunt that carried it.
+    assert unc["gain_term"] >= RANGE_TYPICAL_ACCURACY[4] * abs(result["delta"])
+
+
+def test_a_delta_between_two_instruments_gets_no_cancellation_claim():
+    """k is one physical unit's residual gain error; two units have two of them."""
+    from ppk2lab.analysis import compare_stats
+
+    a, b = _stats_at(197.0), _stats_at(251.0)
+    result = compare_stats(a, b, same_instrument=False)
+    # "same_range" stays true — it is a statement about ranges, not about units.
+    assert result["basis"] == "same_range"
+    assert result["same_instrument"] is False
+    unc = result["uncertainty"]
+    assert unc["gain_error_cancels"] is False
+    # Two independent unknowns: the bar falls back to the naive sum that the
+    # shared-shunt case exists to avoid.
+    assert unc["gain_term"] == pytest.approx(0.10 * (a.mean_ua + b.mean_ua), rel=0.01)
+    assert "different instruments" in unc["note"]
+
+
+def test_an_unidentified_pair_keeps_the_tighter_bar_but_flags_the_premise():
+    """Nothing said the two captures came from one unit, so nothing may imply it."""
+    from ppk2lab.analysis import compare_stats
+
+    result = compare_stats(_stats_at(197.0), _stats_at(251.0), same_instrument=None)
+    unc = result["uncertainty"]
+    assert unc["gain_error_cancels"] is True
+    assert unc["gain_term"] == pytest.approx(0.10 * abs(result["delta"]), rel=0.01)
+    assert "premise is unverified" in unc["note"]
+    assert (
+        "premise is unverified"
+        not in compare_stats(_stats_at(197.0), _stats_at(251.0), same_instrument=True)[
+            "uncertainty"
+        ]["note"]
+    )
+
+
+def test_a_rise_against_a_negative_baseline_reads_as_a_rise():
+    """An unloaded input legitimately reads below zero, and -0.5 -> -0.2 is a rise.
+
+    Dividing by a signed baseline printed that as -60%, which is the opposite
+    of what happened.
+    """
+    from dataclasses import replace
+
+    from ppk2lab.analysis import compare_stats
+
+    a = replace(_stats_at(197.0), min_ua=-0.5)
+    b = replace(_stats_at(197.0), min_ua=-0.2)
+    result = compare_stats(a, b, metric="min_current")
+    assert result["delta"] > 0
+    assert result["relative"] > 0
+    assert result["relative"] == pytest.approx(0.6)
+
+
+def test_a_charge_delta_is_priced_in_charge_units():
+    """The per-sample terms have to be rescaled to each window's own charge.
+
+    A same-range pair discards the rescaled gains for the shared-unknown form,
+    so only a cross-range pair can show that the rescaling happened at all.
+    """
+    from ppk2lab.analysis import compare_stats
+
+    a, b = _stats_at(197.0), _stats_at(5361.0)
+    result = compare_stats(a, b, metric="charge")
+    assert result["basis"] == "cross_range", "a same_range pair would hide the rescale"
+    assert result["unit"] == "uC"
+    unc = result["uncertainty"]
+    # Only mean_ua carries a batch stderr; a charge delta must not borrow one
+    # expressed in microamps.
+    assert unc["delta_batch_stderr"] is None
+    assert unc["delta_typical"] == pytest.approx(a.uncertainty.charge_uc + b.uncertainty.charge_uc)
+
+
+def test_an_energy_delta_carries_both_supply_voltages():
+    """Energy is charge x an assumed V, so a delta across two setpoints is
+    partly a report of how the instrument was configured."""
+    from ppk2lab.analysis import compare_stats, measure_window
+    from ppk2lab.analysis.compare import summarize_side
+    from ppk2lab.testing.profiles import ConstantProfile
+
+    from .conftest import open_simulated
+
+    def capture_at_supply(voltage_mv):
+        device = open_simulated(ConstantProfile(197.0), initial_vdd_mv=voltage_mv)
+        try:
+            result = device.capture(sample_limit=3000)
+        finally:
+            device.close()
+        return result.capture
+
+    capture_a, capture_b = capture_at_supply(3000), capture_at_supply(1800)
+    stats_a, stats_b = measure_window(capture_a), measure_window(capture_b)
+
+    side = summarize_side(capture_a, stats_a)
+    assert side["source_voltage_mv"] == 3000
+    assert side["voltage_basis"] == stats_a.voltage_basis
+    assert side["energy_note"] == stats_a.energy_note
+
+    voltage = compare_stats(stats_a, stats_b, metric="energy")["voltage"]
+    assert voltage["differs"] is True
+    assert (voltage["a"], voltage["b"]) == (3000, 1800)
+    assert voltage["basis"] == {"a": stats_a.voltage_basis, "b": stats_b.voltage_basis}
+
+    same = compare_stats(stats_a, measure_window(capture_at_supply(3000)), metric="energy")
+    assert same["voltage"]["differs"] is False
+
+
+def test_an_unmodelled_metric_is_differenced_without_an_invented_error_bar():
+    from ppk2lab.analysis import compare_stats
+
+    result = compare_stats(_stats_at(197.0), _stats_at(251.0), metric="p90_current")
+    assert result["delta"] is not None
+    assert result["uncertainty"] is None
+    assert "no error bar is modelled" in result["uncertainty_note"]
+
+
+def test_an_unknown_metric_is_a_usage_error():
+    from ppk2lab.analysis import compare_stats
+    from ppk2lab.errors import UsageError
+
+    with pytest.raises(UsageError):
+        compare_stats(_stats_at(1.0), _stats_at(1.0), metric="temperature")
+
+
+def test_the_delta_reads_candidate_minus_baseline():
+    from ppk2lab.analysis import compare_stats
+
+    result = compare_stats(_stats_at(100.0), _stats_at(160.0))
+    assert result["delta"] > 0, "b - a, so a rise is positive"
+    assert compare_stats(_stats_at(160.0), _stats_at(100.0))["delta"] < 0
+
+
+def test_csv_comments_land_before_the_header(tmp_path):
+    from ppk2lab.exports import export_csv
+
+    path = tmp_path / "annotated.csv"
+    export_csv(_capture_at(100.0, samples=50), path, comments=["sn: POD01", "scenario: E12"])
+    # Split on CRLF, not splitlines(): a preamble ending in bare LF would be
+    # one glued record to an RFC 4180 reader, and splitlines() cannot see it.
+    lines = path.read_bytes().split(b"\r\n")
+    assert lines[0] == b"# sn: POD01"
+    assert lines[1] == b"# scenario: E12"
+    assert lines[2].startswith(b"timeline_index,")
+
+
+def test_decimated_csv_takes_comments_too(tmp_path):
+    from ppk2lab.exports import DECIMATED_CSV_HEADER, export_decimated_csv
+
+    path = tmp_path / "annotated.csv"
+    export_decimated_csv(
+        _capture_at(100.0, samples=500), path, bucket_samples=100, comments=["fw: 0.3.0"]
+    )
+    lines = path.read_bytes().split(b"\r\n")
+    assert lines[0] == b"# fw: 0.3.0"
+    assert lines[1].decode().split(",") == list(DECIMATED_CSV_HEADER)
+
+
+def test_csv_comment_lines_end_the_way_the_data_rows_do(tmp_path):
+    """One file, one line terminator — the comments use csv.writer's dialect.
+
+    The exporters open the file with newline="", so csv.writer emits CRLF. A
+    comment written with a bare LF made a file whose preamble and body ended
+    differently: a conforming reader splitting on CRLF returns the whole
+    preamble plus the header as a single record, and the provenance the
+    comments exist to carry takes the header down with it.
+    """
+    from ppk2lab.exports import export_csv
+
+    path = tmp_path / "annotated.csv"
+    export_csv(_capture_at(100.0, samples=50), path, comments=["sn: POD01", "scenario: E12"])
+    raw = path.read_bytes()
+    assert raw.startswith(b"# sn: POD01\r\n# scenario: E12\r\n")
+    assert raw.count(b"\n") == raw.count(b"\r\n") == 53, "2 comments + header + 50 rows"
+
+
+def test_a_comment_containing_a_newline_is_refused(tmp_path):
+    from ppk2lab.errors import UsageError
+    from ppk2lab.exports import export_csv
+
+    path = tmp_path / "annotated.csv"
+    with pytest.raises(UsageError):
+        export_csv(_capture_at(100.0, samples=50), path, comments=["one\ntwo"])
+    assert not path.exists(), "a refused export must not leave a file behind"
+
+
+def test_a_bare_string_of_comments_is_refused(tmp_path):
+    """`str` satisfies `Sequence[str]`, so this used to be one line per character.
+
+    `comments="sn: POD01"` wrote `# s`, `# n`, `# :` ... — it destroyed the
+    provenance inside the very file that exists to carry it, and no type
+    checker or exception ever said so.
+    """
+    from ppk2lab.errors import UsageError
+    from ppk2lab.exports import export_csv
+
+    path = tmp_path / "annotated.csv"
+    with pytest.raises(UsageError):
+        export_csv(_capture_at(100.0, samples=50), path, comments="sn: POD01")
+    assert list(tmp_path.iterdir()) == [], "not even a temp file survives the refusal"
+
+    with pytest.raises(UsageError):
+        export_csv(_capture_at(100.0, samples=50), path, comments=b"sn: POD01")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_comment_that_is_not_a_string_is_refused(tmp_path):
+    """str(5) is a guess about what the caller meant the recorded text to be."""
+    from ppk2lab.errors import UsageError
+    from ppk2lab.exports import export_csv
+
+    path = tmp_path / "annotated.csv"
+    with pytest.raises(UsageError):
+        export_csv(_capture_at(100.0, samples=50), path, comments=["ok", 5])
+    assert list(tmp_path.iterdir()) == []

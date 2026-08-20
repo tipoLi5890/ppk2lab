@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 import zipfile
 
 import pytest
@@ -593,3 +594,340 @@ def test_reader_streaming_iteration(tmp_path, capture):
         total = sum(len(words) for _, words in reader.iter_raw_words())
         assert total == capture.stored_count
         assert reader.verify_sha256()
+
+
+# -- the writer thread ---------------------------------------------------
+#
+# Compressing a chunk inline used to stall the thread feeding samples in for
+# as long as the deflate took (~290 ms for 4 MB), which overflowed the
+# reader's queue and made the artifact writer the source of the very
+# host_overflow gaps the capture reported. These pin the arrangement that
+# fixed it.
+
+
+def _one_block(samples, start_index=0):
+    from array import array
+
+    from ppk2lab.protocol.samples import SampleBlock
+
+    return SampleBlock(start_index=start_index, words=array("I", [0] * samples))
+
+
+def test_compression_does_not_run_on_the_thread_feeding_samples(tmp_path, monkeypatch):
+    """A slow write must not block the producer: that is the whole fix."""
+    import threading
+    import time
+
+    from ppk2lab.capture.model import CaptureMeta
+
+    monkeypatch.setattr(artifact_module, "CHUNK_SAMPLES", 1000)
+    writer = ArtifactWriter(tmp_path / "cap.ppk2a", CaptureMeta())
+    producer_thread = threading.get_ident()
+    seen: list[int] = []
+    real_writestr = writer._zip.writestr
+
+    def slow_writestr(name, data):
+        # Only chunk writes are the hot path; the manifest is written on the
+        # caller's thread after the writer has been joined, and should be.
+        if name.startswith("chunks/"):
+            seen.append(threading.get_ident())
+            time.sleep(0.3)
+        return real_writestr(name, data)
+
+    monkeypatch.setattr(writer._zip, "writestr", slow_writestr)
+
+    started = time.monotonic()
+    writer.add_block(_one_block(1000))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.15, f"add_block blocked for {elapsed:.3f}s on the compressor"
+    writer.finalize(complete=True)
+    assert seen, "the chunk was never written"
+    assert producer_thread not in seen, "compression ran on the producer's thread"
+
+
+def test_a_failing_writer_thread_surfaces_and_never_passes_silently(tmp_path, monkeypatch):
+    """A chunk that could not be written must not leave a lying manifest."""
+    from ppk2lab.capture.model import CaptureMeta
+
+    monkeypatch.setattr(artifact_module, "CHUNK_SAMPLES", 1000)
+    writer = ArtifactWriter(tmp_path / "cap.ppk2a", CaptureMeta())
+
+    def boom(name, data):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(writer._zip, "writestr", boom)
+    writer.add_block(_one_block(1000))
+    with pytest.raises(OSError, match="disk went away"):
+        # Either the next block or the finalize adopts it; both are the
+        # caller's thread, and neither may return as if all was well.
+        writer.add_block(_one_block(1000))
+        writer.finalize(complete=True)
+
+
+def test_chunk_table_stays_ordered_and_contiguous(tmp_path, monkeypatch):
+    """Chunks are written off-thread; their table must still be in order."""
+    from ppk2lab.capture.model import CaptureMeta
+
+    monkeypatch.setattr(artifact_module, "CHUNK_SAMPLES", 1000)
+    writer = ArtifactWriter(tmp_path / "cap.ppk2a", CaptureMeta())
+    for i in range(5):
+        writer.add_block(_one_block(1000, start_index=i * 1000))
+    manifest = writer.finalize(complete=True)
+    chunks = manifest["samples"]["chunks"]
+    assert [c["file"] for c in chunks] == [f"chunks/{i:06d}.u32" for i in range(5)]
+    assert [c["first_stored_index"] for c in chunks] == [0, 1000, 2000, 3000, 4000]
+    assert ArtifactReader(tmp_path / "cap.ppk2a").stored_count == 5000
+
+
+# -- provenance and in-capture actions -----------------------------------
+
+
+def test_user_tags_travel_with_the_capture(tmp_path, capture):
+    capture.meta.user_tags = {"sn": "POD01", "fw": "0.3.0", "scenario": "E12"}
+    path = tmp_path / "tagged.ppk2a"
+    capture.save(str(path))
+    assert read_capture(path).meta.user_tags == {
+        "sn": "POD01",
+        "fw": "0.3.0",
+        "scenario": "E12",
+    }
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        {"sn": 3.7},
+        {3: "x"},
+        {"": "x"},
+        {"k": "v" * 600},
+        "not a mapping",
+        {f"k{i}": "v" for i in range(100)},
+    ],
+)
+def test_tags_that_are_not_short_text_are_refused(tags):
+    from ppk2lab.capture.model import normalize_user_tags
+
+    with pytest.raises(UsageError):
+        normalize_user_tags(tags)
+
+
+def test_a_number_is_not_quietly_stringified():
+    """A tag reading "3.7" when 3.7 was passed is a lie about the record."""
+    from ppk2lab.capture.model import normalize_user_tags
+
+    with pytest.raises(UsageError, match="string"):
+        normalize_user_tags({"voltage": 3.7})
+
+
+def test_an_unusable_user_tags_block_is_refused(tmp_path, capture):
+    path = tmp_path / "cap.ppk2a"
+    capture.save(str(path))
+    _rewrite_manifest(path, lambda m: m.update(user_tags={"sn": 7}))
+    with pytest.raises(CaptureFileError, match="user_tags"):
+        read_capture(path)
+
+
+# -- back-pressure, and failures that must not pass silently -------------
+
+
+def test_a_producer_that_outruns_the_disk_is_made_to_wait_rather_than_buffer(tmp_path, monkeypatch):
+    """The queue depth is load-bearing in both directions.
+
+    Unbounded, a disk that falls behind the instrument is paid for in RAM at
+    4 MB a chunk with nothing to stop the growth, and a long capture dies of
+    memory instead of slowing down. Bounded at one, the producer waits on
+    every single chunk and the stall this arrangement exists to remove is
+    back. Two lets it run a little ahead and no further.
+    """
+    import threading
+    import time
+
+    from ppk2lab.capture.model import CaptureMeta
+
+    write_s = 0.3
+    chunk = 100
+    monkeypatch.setattr(artifact_module, "CHUNK_SAMPLES", chunk)
+    writer = ArtifactWriter(tmp_path / "cap.ppk2a", CaptureMeta())
+
+    writing = threading.Event()
+    release = threading.Event()
+    real_writestr = writer._zip.writestr
+
+    def slow_writestr(name, data):
+        if name.startswith("chunks/"):
+            writing.set()
+            release.wait(write_s)
+        return real_writestr(name, data)
+
+    monkeypatch.setattr(writer._zip, "writestr", slow_writestr)
+
+    writer.add_block(_one_block(chunk))
+    assert writing.wait(5.0), "the writer thread never took the first chunk"
+
+    # The writer is now busy and the queue is empty, so what follows measures
+    # the queue's capacity and nothing else.
+    handover_s = []
+    for i in range(1, 4):
+        started = time.monotonic()
+        writer.add_block(_one_block(chunk, start_index=i * chunk))
+        handover_s.append(time.monotonic() - started)
+    release.set()
+
+    assert handover_s[0] < write_s / 3, f"the queue took only one chunk ({handover_s})"
+    assert handover_s[1] < write_s / 3, f"the queue took only one chunk ({handover_s})"
+    assert handover_s[2] > write_s / 3, f"the queue was never bounded ({handover_s})"
+
+    # Waiting is not dropping: everything handed over is in the container.
+    writer.finalize(complete=True)
+    assert ArtifactReader(tmp_path / "cap.ppk2a").stored_count == 4 * chunk
+
+
+def test_a_chunk_that_could_not_be_written_leaves_no_capture_and_no_debris(
+    tmp_path, capture, monkeypatch
+):
+    """A manifest describes the chunk table it was told about, so a swallowed
+    write failure produces a file that claims samples the container does not
+    hold — and passes every integrity check the reader knows how to run,
+    because the chunk it would have checked is simply not listed as missing.
+    The failure has to reach the caller, and the half-written temp file has to
+    go with it."""
+
+    monkeypatch.setattr(artifact_module, "CHUNK_SAMPLES", 200)
+    real_writestr = zipfile.ZipFile.writestr
+
+    def refuse(self, name, data, *args, **kwargs):
+        label = name if isinstance(name, str) else name.filename
+        if label.startswith("chunks/"):
+            raise OSError("disk went away")
+        return real_writestr(self, name, data, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", refuse)
+
+    path = tmp_path / "cap.ppk2a"
+    with pytest.raises(OSError, match="disk went away"):
+        write_capture(capture, path)
+    monkeypatch.undo()
+    assert list(tmp_path.iterdir()) == []
+
+
+# -- artifacts written before these fields existed ------------------------
+#
+# `format_version` was deliberately not bumped for `user_tags`,
+# `scheduled_actions` or warning categories: they are additions a 0.2.0 reader
+# ignores, so refusing to open a 0.2.0 artifact over them would be the only
+# breakage the change caused.
+
+
+def test_a_manifest_without_the_new_provenance_blocks_still_opens(tmp_path, capture):
+    """Every capture recorded by released 0.2.0 lacks both keys. Reading them
+    with `[...]` instead of `.get(...)` would make each one unopenable."""
+
+    def strip(manifest):
+        del manifest["user_tags"]
+        del manifest["scheduled_actions"]
+
+    path = tmp_path / "cap.ppk2a"
+    capture.save(str(path))
+    _rewrite_manifest(path, strip)
+    loaded = read_capture(path)
+    assert loaded.meta.user_tags == {}
+    assert loaded.meta.scheduled_actions == []
+
+
+def test_a_stored_warning_written_before_categories_reads_back_with_one(tmp_path, capture):
+    """A caller iterating `capture.warnings` must not have to handle two
+    shapes in one list: the warnings the artifact carries and the ones reading
+    it raised go through the same normalizer, and a code the catalog knows
+    gets its category filled in rather than published as null."""
+    path = tmp_path / "cap.ppk2a"
+    capture.save(str(path))
+    _rewrite_manifest(path, lambda m: [stored.pop("category", None) for stored in m["warnings"]])
+    loaded = read_capture(path)
+    assert loaded.warnings, "the fixture capture really does carry warnings"
+    assert all(set(w) == {"code", "message", "category"} for w in loaded.warnings)
+    categories = {w["code"]: w["category"] for w in loaded.warnings}
+    assert categories["W_SAMPLE_GAPS"] == "capture integrity"
+
+
+# -- durability ----------------------------------------------------------
+#
+# `os.replace` is atomic for the directory entry only. Without a sync the name
+# can reach stable storage ahead of the bytes, and a power loss leaves a
+# full-length `.ppk2a` that fails its own SHA-256 — a capture the operator was
+# told had been written. Bench time is not re-acquirable; one sync is cheap
+# against it. Durability itself cannot be tested from user space, so these pin
+# the calls and their order.
+
+
+def _fsync_events(monkeypatch):
+    """Record every fsync and rename a write performs, in order.
+
+    An fsync is identified by what it synced rather than by which descriptor
+    number it got: `os.replace` preserves the inode, so the destination's
+    inode afterwards names the handle that became this artifact.
+    """
+    events: list[tuple] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd):
+        st = os.fstat(fd)
+        events.append(("fsync", stat.S_ISDIR(st.st_mode), st.st_ino, st.st_size))
+        return real_fsync(fd)
+
+    def spy_replace(src, dst, **kwargs):
+        events.append(("replace", src, dst))
+        return real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+    return events
+
+
+def test_the_capture_bytes_are_fsynced_before_the_capture_takes_its_name(
+    tmp_path, capture, monkeypatch
+):
+    events = _fsync_events(monkeypatch)
+    path = tmp_path / "cap.ppk2a"
+    capture.save(str(path))
+
+    inode = path.stat().st_ino
+    synced = [i for i, e in enumerate(events) if e[0] == "fsync" and not e[1] and e[2] == inode]
+    renamed = [i for i, e in enumerate(events) if e[0] == "replace"]
+    assert synced, "the capture was renamed into place without being flushed"
+    assert renamed and synced[0] < renamed[0]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no directory handle to sync")
+def test_the_directory_entry_is_fsynced_after_the_capture_is_renamed_into_place(
+    tmp_path, capture, monkeypatch
+):
+    """Syncing the file is only half of it: the new name lives in the parent
+    directory, and an unsynced directory can come back without it."""
+    events = _fsync_events(monkeypatch)
+    path = tmp_path / "cap.ppk2a"
+    capture.save(str(path))
+
+    parent = tmp_path.stat().st_ino
+    synced = [i for i, e in enumerate(events) if e[0] == "fsync" and e[1] and e[2] == parent]
+    renamed = [i for i, e in enumerate(events) if e[0] == "replace"]
+    assert synced, "the directory entry was never flushed"
+    assert renamed and synced[-1] > renamed[-1]
+
+
+def test_the_whole_finished_artifact_is_flushed_not_only_what_was_written_so_far(
+    tmp_path, capture, monkeypatch
+):
+    """The tail of a zip is its central directory, and it is written by
+    `close()`. Syncing before that leaves the one structure without which the
+    file is not a zip at all sitting in the page cache — so the loss the sync
+    exists to prevent still happens, and lands on a capture that then cannot
+    even be opened to be diagnosed."""
+    events = _fsync_events(monkeypatch)
+    path = tmp_path / "cap.ppk2a"
+    capture.save(str(path))
+
+    inode = path.stat().st_ino
+    flushed = max(e[3] for e in events if e[0] == "fsync" and not e[1] and e[2] == inode)
+    assert flushed == path.stat().st_size

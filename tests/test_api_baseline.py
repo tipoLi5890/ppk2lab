@@ -13,6 +13,7 @@ it is absent rather than failing an install-tree test run.
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 import pathlib
 import re
@@ -195,3 +196,101 @@ def test_subpackage_level_names_resolve():
             pass
         obj = importlib.import_module(module)
         assert hasattr(obj, attribute), f"docs/api-baseline.md section 4b names missing {dotted}"
+
+
+#: The module-level functions the baseline spells out as a full call form. An
+#: explicit list beats a general parser: prose around these rows changes often,
+#: and a parser that swallows a sentence would fail for a reason nobody can act
+#: on. `PPK2.open` is here because every other constructor documented in the
+#: file defers to its keywords.
+_DOCUMENTED_CALLS = (
+    "discover",
+    "read_capture",
+    "write_capture",
+    "decode_capture",
+    "read_window",
+    "compute_stats",
+    "PPK2.open",
+)
+
+
+def _resolve(name: str):
+    from ppk2lab.capture import read_window
+    from ppk2lab.capture.stats import compute_stats
+    from ppk2lab.device import PPK2
+
+    return {
+        "discover": ppk2lab.discover,
+        "read_capture": ppk2lab.read_capture,
+        "write_capture": ppk2lab.write_capture,
+        "decode_capture": ppk2lab.decode_capture,
+        "read_window": read_window,
+        "compute_stats": compute_stats,
+        "PPK2.open": PPK2.open,
+    }[name]
+
+
+def _backticked_spans(text: str) -> list[str]:
+    """Every inline code span, fence lines excluded."""
+    return [
+        match.group(1)
+        for line in text.splitlines()
+        if not line.startswith("```")
+        for match in _BACKTICKED.finditer(line)
+    ]
+
+
+def _documented_parameters(name: str) -> list[str]:
+    """The parameter tokens of the backticked `name(...)` form in the baseline.
+
+    Scanning line by line, because a fenced block leaves an odd number of
+    backticks behind and pairing them across the whole document then reads
+    prose as code for everything after it.
+    """
+    for span in _backticked_spans(_doc()):
+        if not span.startswith(f"{name}("):
+            continue
+        inside = span[len(name) + 1 : span.index(")")]
+        assert "(" not in inside, f"nested call in the documented form of {name}: {span!r}"
+        return [token.strip() for token in inside.split(",") if token.strip()]
+    raise AssertionError(f"docs/api-baseline.md no longer states a call form for `{name}(...)`")
+
+
+@pytest.mark.parametrize("name", _DOCUMENTED_CALLS)
+def test_documented_signature_matches_the_code(name):
+    """A documented default is a promise about behaviour, not decoration.
+
+    `discover(*, simulate=False)` outlived the default becoming `None`, and
+    nothing noticed: the names and counts pinned elsewhere in this file are
+    identical either way, while the documented promise ("does not simulate
+    unless asked") had become the opposite of what the code does.
+    """
+    documented = _documented_parameters(name)
+    actual = inspect.signature(_resolve(name)).parameters
+
+    names = [token.split("=", 1)[0] for token in documented if token != "*"]
+    assert names == list(actual), (
+        f"`{name}(...)` in docs/api-baseline.md takes {names}, the code takes {list(actual)}"
+    )
+
+    if "*" in documented:
+        after_star = documented[documented.index("*") + 1 :]
+        assert {token.split("=", 1)[0] for token in after_star} == {
+            parameter
+            for parameter, spec in actual.items()
+            if spec.kind is inspect.Parameter.KEYWORD_ONLY
+        }, f"`{name}(...)` documents the keyword-only boundary in the wrong place"
+
+    for token in documented:
+        parameter, _, shown = token.partition("=")
+        # `start_index=` documents *that* there is a default, not which -- only a
+        # spelled-out value is a claim this test can check.
+        if not shown:
+            continue
+        default = actual[parameter].default
+        assert default is not inspect.Parameter.empty, (
+            f"`{name}(...)` documents a default for {parameter}, which has none"
+        )
+        assert shown in {repr(default), str(default)}, (
+            f"docs/api-baseline.md says `{name}(..., {token})`, the code defaults it to {default!r}"
+        )

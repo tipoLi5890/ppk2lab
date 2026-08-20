@@ -373,8 +373,10 @@ class WindowStats:
     #: A mean answers "how much battery does this drain"; a median answers
     #: "what does this DUT actually draw", and on a duty-cycled load those are
     #: different questions with different answers.
+    p5_ua: float | None = None
     p50_ua: float | None = None
     p90_ua: float | None = None
+    p95_ua: float | None = None
     p99_ua: float | None = None
     p999_ua: float | None = None
     #: Valid samples at or below the grid floor (200 nA), where a quantile can
@@ -547,8 +549,15 @@ class WindowStats:
 
     #: The quantiles ``to_json`` publishes, with the level each one reports.
     QUANTILE_LEVELS: ClassVar[tuple[tuple[str, float], ...]] = (
+        # p5 and p95 are here because they are the conventional floor and
+        # burst statistics in power work, and because a fixed published set
+        # keeps the rule that everything except --state-threshold is collected
+        # unconditionally: an offline measurement of a window can never
+        # disagree with what the same window recorded live.
+        ("p5", 0.05),
         ("p50", 0.5),
         ("p90", 0.9),
+        ("p95", 0.95),
         ("p99", 0.99),
         ("p999", 0.999),
     )
@@ -591,8 +600,10 @@ class WindowStats:
                 "min": self.min_ua,
                 "max": self.max_ua,
                 "peak_index": self.peak_index,
+                "p5": self.p5_ua,
                 "p50": self.p50_ua,
                 "p90": self.p90_ua,
+                "p95": self.p95_ua,
                 "p99": self.p99_ua,
                 "p999": self.p999_ua,
             },
@@ -975,8 +986,10 @@ class StatsAccumulator:
             range_switches=self.range_switches,
             unaccounted_samples_estimate=estimate,
             unaccounted_loss_is_capture_level=above_floor,
+            p5_ua=self.quantile(0.05),
             p50_ua=self.quantile(0.50),
             p90_ua=self.quantile(0.90),
+            p95_ua=self.quantile(0.95),
             p99_ua=self.quantile(0.99),
             p999_ua=self.quantile(0.999),
             below_grid_samples=self.bins[0],

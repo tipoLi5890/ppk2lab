@@ -49,7 +49,7 @@ Four checks decide how a diagnosis should be worded:
 | Random digital noise | Floating unconnected inputs — expected, not a fault |
 | Current ~0 in source mode | Almost always an unpowered DUT, and the reading is plausible enough to be believed by mistake. If power was enabled by a separate `configure --dut-power on --apply`, it was already gone: measured off in every trial 500 ms after the port closed. Re-measure inside one open session (capture.md). Power state has no readback, so the current is the only evidence either way |
 | `doctor` warns `calibrated_flag` | Expected; the measured unit reports `Calibrated: 0` with all five ranges calibrated. Not a fault and not a reason to stop — see above |
-| A few gaps per minute, all `host_overflow` | Normal: 0.43% over 60 s on an idle macOS host, 1.08% under CPU and disk load. Close other software or move off an unpowered hub if it matters; report the loss either way. Investigate the physical path only when the reason is `counter_skip`, `stream_desync` or `usb_stall` |
+| A few gaps per minute, all `host_overflow` | Worth investigating; it is no longer the expected condition. Through `0.2.0` this was this project's own artifact writer compressing each 10-second chunk on the sample thread — one gap per chunk boundary, 0.43% over 60 s on an idle macOS host and 1.08% under CPU and disk load, with load making the gaps *larger* rather than more numerous. Fixed (capture.md); captures on that same host now record every sample. So `host_overflow` today means the host really did fall behind: close other software, move off an unpowered hub, and report the loss either way. Investigate the physical path when the reason is `counter_skip`, `stream_desync` or `usb_stall` |
 | `interruption.reason: keyboard_interrupt` | A `SIGTERM` from a process manager produces this string too. The wording is imprecise and known to be — don't report that an operator interrupted the run unless something independent says so |
 | `session_recovery` warning at open | The *previous* session was killed mid-stream; this open discarded its leftovers (17,412 stale bytes after a `SIGKILL`, measured) and read metadata cleanly. Nothing to repair in this run |
 | `W_CLIPPED` / `saturated_samples > 0` | The ADC sat on its full-scale code: the reading was pinned, not measured. In the top range the load exceeded the instrument's 1 A span — stop and inspect physically. In a lower range (`saturated_ranges` names it) the auto-range switch had not completed, which is a transient, not a DUT fault |
@@ -84,6 +84,7 @@ usually the fastest route to the physical cause.
 
 Done when: the symptom is attached to specific evidence, each candidate
 cause names what would distinguish it, and anything that only *looks* like
-a fault — a `calibrated_flag` warning, host-overflow gaps, negative
-readings at very low current — has been named as expected behaviour rather
-than escalated.
+a fault — a `calibrated_flag` warning, negative readings at very low
+current — has been named as expected behaviour rather than escalated.
+`host_overflow` gaps are not on that list any more: they used to be this
+project's own bug and are now evidence about the host.

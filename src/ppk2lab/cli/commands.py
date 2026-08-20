@@ -22,6 +22,7 @@ from ..analysis.assertions import (
     junit_report,
     parse_rule,
 )
+from ..analysis.compare import compare_stats, summarize_side
 from ..analysis.measure import (
     load_annotations_jsonl,
     measure_annotations,
@@ -31,7 +32,7 @@ from ..analysis.measure import (
 from ..capture.artifact import ArtifactReader, read_window
 from ..capture.model import MAX_LOAD_SAMPLES, Capture
 from ..capture.runner import DEFAULT_IN_MEMORY_LIMIT_SAMPLES
-from ..capture.stats import format_with_uncertainty
+from ..capture.stats import WindowStats, format_with_uncertainty
 from ..decoders.base import decode_capture
 from ..decoders.registry import decoder_capabilities
 from ..decoders.spi import SPIDecoder
@@ -46,6 +47,7 @@ from ..diagnostics import (
     W_DUT_POWER_TRANSIENT,
     W_GAP_TABLE_TRUNCATED,
     W_GENERIC,
+    W_INSTRUMENT_MISMATCH,
     W_INTERRUPTED,
     W_METADATA,
     W_NOT_CALIBRATED,
@@ -53,7 +55,9 @@ from ..diagnostics import (
     W_SAMPLE_GAPS,
     W_SESSION_RECOVERED,
     W_STATE_UNVERIFIED,
+    W_VOLTAGE_ASSUMED,
     Diagnostic,
+    as_json,
     gap_reason_catalog,
     interruption_reason_catalog,
     warn,
@@ -209,14 +213,19 @@ def _fmt_stats(stats: dict[str, Any]) -> str:
             f"  current: mean {mean} uA, "
             f"min {format_si(current['min'], 'A')}, max {format_si(current['max'], 'A')}"
         )
-        if current.get("p50") is not None:
-            # A quantile served from the grid floor bounds the true value from
-            # above; the sign says so rather than letting it read as measured.
-            at_floor = set((stats.get("distribution") or {}).get("quantiles_at_floor") or ())
-            parts = [
-                f"{name} {'<=' if name in at_floor else ''}{format_si(current[name], 'A')}"
-                for name in ("p50", "p90", "p99")
-            ]
+        # A quantile served from the grid floor bounds the true value from
+        # above; the sign says so rather than letting it read as measured.
+        # Driven by QUANTILE_LEVELS rather than a hardcoded tuple: the list was
+        # p50/p90/p99, and quantiles_at_floor is monotone in rank, so once p5
+        # was published there was a whole band -- 5% to 50% below floor -- in
+        # which the warning named a quantile the line never printed.
+        at_floor = set((stats.get("distribution") or {}).get("quantiles_at_floor") or ())
+        parts = [
+            f"{name} {'<=' if name in at_floor else ''}{format_si(current[name], 'A')}"
+            for name, _level in WindowStats.QUANTILE_LEVELS
+            if current.get(name) is not None
+        ]
+        if parts:
             lines.append("  distribution: " + ", ".join(parts))
     if stats.get("charge_uc") is not None:
         charge = format_with_uncertainty(stats["charge_uc"], uncertainty.get("charge_uc_typical"))
@@ -751,11 +760,36 @@ def _spi_config_from_args(args: Any) -> dict[str, Any]:
     return config
 
 
+def _parse_tags(pairs: Sequence[str] | None) -> dict[str, str]:
+    """Turn repeated ``KEY=VALUE`` arguments into a tag mapping.
+
+    Splits on the first ``=`` only, so a value may contain one.
+    """
+    tags: dict[str, str] = {}
+    for pair in pairs or []:
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            raise UsageError(
+                f"--tag expects KEY=VALUE, got {pair!r}",
+                remediation="Write it as --tag sn=POD01. Quote the whole argument when the "
+                "value contains spaces.",
+            )
+        if key in tags:
+            raise UsageError(
+                f"--tag {key}= was given more than once",
+                remediation="A key records one fact. Use distinct keys.",
+            )
+        tags[key] = value
+    return tags
+
+
 def cmd_capture(args: Any) -> Outcome:
     parse_channel_set(args.digital)  # validate the channel spec early
     duration_s = parse_duration_s(args.duration) if args.duration else None
     if duration_s is None and args.samples is None and args.trigger is None:
         raise UsageError("capture needs --duration, --samples, or --trigger")
+    # Parsed before the device is touched: a malformed tag must not cost a run.
+    tags = _parse_tags(getattr(args, "tag", None))
 
     device = _open_device(args)
     try:
@@ -789,6 +823,7 @@ def cmd_capture(args: Any) -> Outcome:
             trigger_timeout_s=trigger_timeout_s,
             assume_voltage_mv=args.assume_voltage_mv,
             in_memory_limit_samples=None if args.in_memory else DEFAULT_IN_MEMORY_LIMIT_SAMPLES,
+            tags=tags,
         )
     finally:
         device.close()
@@ -835,6 +870,7 @@ def cmd_inspect(args: Any) -> Outcome:
         # a truncated table or an unknown-size gap makes the span a floor.
         span_is_lower_bound = bool(gaps_truncated or unknown_gaps)
         interruption = manifest.get("interruption")
+        meta = reader.read_meta()
         result: dict[str, Any] = {
             "path": str(reader.path),
             "format": manifest.get("format"),
@@ -843,6 +879,8 @@ def cmd_inspect(args: Any) -> Outcome:
             "created_utc": manifest.get("created_utc"),
             "device": manifest.get("device", {}),
             "configuration": manifest.get("configuration", {}),
+            "user_tags": meta.user_tags,
+            "scheduled_actions": meta.scheduled_actions,
             "timeline": manifest.get("timeline", {}),
             "duration_s": (stored + missing_known) / reader.sample_rate_hz,
             "duration_is_lower_bound": span_is_lower_bound,
@@ -863,7 +901,10 @@ def cmd_inspect(args: Any) -> Outcome:
             "interruption": interruption,
             "calibration": manifest.get("calibration"),
             "stats": manifest.get("stats"),
-            "warnings": list(manifest.get("warnings", [])),
+            # Normalized rather than passed through: an artifact written
+            # before `category` existed must not report a different warning
+            # shape than one written today.
+            "warnings": as_json(manifest.get("warnings", [])),
         }
 
     warnings: list[Diagnostic | str] = []
@@ -936,12 +977,23 @@ def cmd_decode(args: Any) -> Outcome:
     warnings: list[Diagnostic | str] = (
         [warn(W_DECODER_RATE, text) for text in feasibility.warnings] if feasibility else []
     )
-    if not capture.complete:
+    # A code names one thing. An interrupted but gap-free capture is not a
+    # capture with sample gaps, and a caller branching on the code rather than
+    # reading the prose would have been told the wrong thing.
+    if capture.gaps:
         warnings.append(
             warn(
                 W_SAMPLE_GAPS,
-                "capture is incomplete; events touching missing data carry gap errors and "
-                "zero confidence",
+                f"capture records {len(capture.gaps)} sample gap(s); events touching missing "
+                "data carry gap errors and zero confidence",
+            )
+        )
+    if capture.interruption:
+        warnings.append(
+            warn(
+                W_INTERRUPTED,
+                "capture was interrupted; it ends earlier than requested and events near the "
+                "end may be truncated",
             )
         )
     annotations = decode_capture(capture, decoder)
@@ -1015,13 +1067,20 @@ def cmd_measure(args: Any) -> Outcome:
         "annotations": None,
         "groups": None,
     }
-    if not capture.complete:
+    if capture.gaps:
         warnings.append(
             warn(
                 W_SAMPLE_GAPS,
-                "capture is incomplete (sample gaps, an interruption, or both); a window "
-                "that overlaps missing data or extends past the stored samples reports "
-                "complete=false and its charge/energy are lower bounds",
+                f"capture records {len(capture.gaps)} sample gap(s); a window that overlaps "
+                "missing data reports complete=false and its charge/energy are lower bounds",
+            )
+        )
+    if capture.interruption:
+        warnings.append(
+            warn(
+                W_INTERRUPTED,
+                "capture was interrupted; a window that extends past the stored samples "
+                "reports complete=false and its charge/energy are lower bounds",
             )
         )
     human_parts: list[str] = []
@@ -1158,6 +1217,103 @@ def cmd_assert(args: Any) -> Outcome:
     return Outcome(result, warnings, "\n".join(lines), exit_code=exit_code)
 
 
+def cmd_compare(args: Any) -> Outcome:
+    """Difference two captures on one metric, and say what the number is worth."""
+    max_samples = _parse_max_samples(getattr(args, "max_samples", None))
+    warnings: list[Diagnostic | str] = []
+    sides = {}
+    for key, path in (("a", args.baseline), ("b", args.candidate)):
+        capture = Capture.load(path, max_samples=max_samples)
+        stats = measure_window(capture, assume_voltage_mv=args.assume_voltage_mv)
+        sides[key] = (capture, stats)
+        # A floor-served quantile, a clipped maximum or an unenumerated gap
+        # table makes an operand a bound rather than a measurement, and a
+        # difference of two bounds is not a measurement either. `measure`
+        # surfaces these for exactly that reason; dropping them here let
+        # compare report a delta of 0.0 between two medians that differ 3x.
+        # Re-wrapped with the path because two sides at the floor would
+        # otherwise emit the same sentence twice with nothing to tell them
+        # apart.
+        warnings.extend(warn(d.code, f"{path}: {d.message}") for d in stats.diagnostics())
+        if capture.gaps:
+            warnings.append(
+                warn(
+                    W_SAMPLE_GAPS,
+                    f"{path} records {len(capture.gaps)} sample gap(s); its statistics "
+                    "describe the samples that survived",
+                )
+            )
+        if capture.interruption:
+            warnings.append(warn(W_INTERRUPTED, f"{path} was interrupted before it finished"))
+
+    (cap_a, stats_a), (cap_b, stats_b) = sides["a"], sides["b"]
+    # The gain-error cancellation is a claim about one physical shunt, so it
+    # needs one physical instrument. Unknown is not the same as different: an
+    # unidentified pair keeps the tighter bar but says the premise is
+    # unverified, rather than being priced as two independent units.
+    serial_a = (cap_a.meta.device or {}).get("serial_number")
+    serial_b = (cap_b.meta.device or {}).get("serial_number")
+    same_instrument = serial_a == serial_b if serial_a and serial_b else None
+    if same_instrument is False:
+        warnings.append(
+            warn(
+                W_INSTRUMENT_MISMATCH,
+                f"the two captures came from different instruments ({serial_a} and "
+                f"{serial_b}); their gain errors are independent, so the delta gets no "
+                "cancellation and the bar is no tighter than the two absolute figures",
+            )
+        )
+    comparison = compare_stats(
+        stats_a, stats_b, metric=args.metric, same_instrument=same_instrument
+    )
+    voltage = comparison.get("voltage")
+    if voltage and voltage["differs"]:
+        warnings.append(
+            warn(
+                W_VOLTAGE_ASSUMED,
+                f"energy was computed at {voltage['a']} mV on one side and "
+                f"{voltage['b']} mV on the other ({voltage['basis']['a']} / "
+                f"{voltage['basis']['b']}), so the delta includes the supply change and "
+                "not only the DUT's; pass --assume-voltage-mv to price both sides alike",
+            )
+        )
+    if voltage and comparison["delta"] is None:
+        notes = " / ".join(str(n) for n in (voltage["note"]["a"], voltage["note"]["b"]) if n)
+        if notes:
+            warnings.append(warn(W_VOLTAGE_ASSUMED, f"energy is not available here: {notes}"))
+    result: dict[str, Any] = {
+        "a": {"path": str(args.baseline), **summarize_side(cap_a, stats_a)},
+        "b": {"path": str(args.candidate), **summarize_side(cap_b, stats_b)},
+        **comparison,
+    }
+
+    unit = comparison["unit"]
+    delta = comparison["delta"]
+    lines = [f"compare {args.metric} (candidate - baseline)"]
+    if delta is None:
+        lines.append("  delta: not computable from these captures")
+    else:
+        bar = (comparison["uncertainty"] or {}).get("delta_typical")
+        lines.append(f"  delta: {format_with_uncertainty(delta, bar)} {unit}")
+        if comparison["relative"] is not None:
+            lines.append(f"  relative: {comparison['relative'] * 100:+.2f}%")
+    lines.append(f"  basis: {comparison['basis']}")
+    if comparison["uncertainty"]:
+        lines.append(f"  {comparison['uncertainty']['note']}")
+        # Mirrors _fmt_stats. delta_typical is a systematic gain specification;
+        # the stderr says how settled these two particular means are, and they
+        # can disagree by an order of magnitude. Printing only the first made a
+        # delta indistinguishable from zero read as a confident result.
+        stderr = comparison["uncertainty"].get("delta_batch_stderr")
+        note = "typical, per-range; not guaranteed"
+        if stderr is not None:
+            note += f"; batch stderr of the delta {format_si(stderr, 'A')}"
+        lines.append(f"  uncertainty: {note}")
+    elif comparison.get("uncertainty_note"):
+        lines.append(f"  {comparison['uncertainty_note']}")
+    return Outcome(result=result, warnings=warnings, human="\n".join(lines))
+
+
 def cmd_export(args: Any) -> Outcome:
     warnings: list[Diagnostic | str] = []
     window = None
@@ -1190,6 +1346,15 @@ def cmd_export(args: Any) -> Outcome:
         bucket_samples = bucket_samples_for_ms(
             args.bucket_ms, sample_rate_hz=capture.sample_rate_hz
         )
+    comments = list(getattr(args, "comment", None) or [])
+    if comments and args.export_format != "csv":
+        # Dropping them silently would produce a file the caller believes is
+        # annotated. VCD has its own comment syntax and JSONL has no comment
+        # line at all; neither is a `# ` prefix.
+        raise UsageError(
+            f"--comment is CSV only; {args.export_format} has no comment line",
+            remediation="Export CSV, or record the provenance beside the file.",
+        )
     if bucket_samples is not None and args.export_format == "vcd":
         raise UsageError(
             "--decimate/--bucket-ms summarize the current series; VCD carries only the "
@@ -1205,10 +1370,18 @@ def cmd_export(args: Any) -> Outcome:
         channels = parse_channel_set(args.channels)
         records = export_vcd(capture.iter_events(), args.output, channels)
     elif bucket_samples is not None:
-        exporter = export_decimated_csv if args.export_format == "csv" else export_decimated_jsonl
-        records = exporter(
-            capture, args.output, bucket_samples=bucket_samples, overwrite=args.overwrite
-        )
+        if args.export_format == "csv":
+            records = export_decimated_csv(
+                capture,
+                args.output,
+                bucket_samples=bucket_samples,
+                overwrite=args.overwrite,
+                comments=comments,
+            )
+        else:
+            records = export_decimated_jsonl(
+                capture, args.output, bucket_samples=bucket_samples, overwrite=args.overwrite
+            )
         warnings.append(
             warn(
                 W_DECIMATED,
@@ -1219,7 +1392,11 @@ def cmd_export(args: Any) -> Outcome:
         )
     elif args.export_format == "csv":
         records = export_csv(
-            capture, args.output, include_filtered=args.filtered, overwrite=args.overwrite
+            capture,
+            args.output,
+            include_filtered=args.filtered,
+            overwrite=args.overwrite,
+            comments=comments,
         )
     else:
         records = export_samples_jsonl(capture, args.output, overwrite=args.overwrite)

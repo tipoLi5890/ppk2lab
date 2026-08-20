@@ -30,6 +30,8 @@ W_IMPLAUSIBLE_SAMPLES = "W_IMPLAUSIBLE_SAMPLES"
 W_NO_SAMPLES = "W_NO_SAMPLES"
 #: The stream was interrupted; partial data was preserved.
 W_INTERRUPTED = "W_INTERRUPTED"
+W_SCHEDULED_ACTION = "W_SCHEDULED_ACTION"
+W_PROGRESS_CALLBACK = "W_PROGRESS_CALLBACK"
 #: Wall-clock elapsed time accounts for more samples than the timeline does,
 #: by more than the anchoring and clock-rate floor can explain.
 W_UNACCOUNTED_SAMPLES = "W_UNACCOUNTED_SAMPLES"
@@ -47,6 +49,9 @@ W_PARTIAL_INTEGRITY = "W_PARTIAL_INTEGRITY"
 # -- measurement trust -------------------------------------------------------
 #: Energy could not be derived because no defensible supply voltage is known.
 W_VOLTAGE_ASSUMED = "W_VOLTAGE_ASSUMED"
+#: Two captures being differenced came from different instruments, so the
+#: shared-shunt premise the tighter delta bar rests on does not hold.
+W_INSTRUMENT_MISMATCH = "W_INSTRUMENT_MISMATCH"
 #: The device reports it is not calibrated.
 W_NOT_CALIBRATED = "W_NOT_CALIBRATED"
 #: Calibration constants are missing for one or more measurement ranges.
@@ -93,7 +98,16 @@ class Diagnostic:
     message: str
 
     def to_json(self) -> dict[str, Any]:
-        return {"code": self.code, "message": self.message}
+        # The category ships with the warning rather than only in the
+        # capabilities catalog: every consumer was otherwise obliged to fetch
+        # that catalog and join on the code just to know which part of the
+        # result a warning is about. It is deliberately not a severity — see
+        # WARNING_CATEGORY.
+        return {
+            "code": self.code,
+            "message": self.message,
+            "category": WARNING_CATEGORY.get(self.code),
+        }
 
     def __str__(self) -> str:  # human output and log lines
         return self.message
@@ -113,6 +127,12 @@ WARNING_CATALOG: dict[str, str] = {
     ),
     W_NO_SAMPLES: "The capture stored no samples at all.",
     W_INTERRUPTED: "The stream was interrupted; partial data was preserved.",
+    W_SCHEDULED_ACTION: (
+        "A scheduled action did not run as asked: it raised during the capture, or the "
+        "capture ended before its delay came due. The capture continued either way and "
+        "the reason is recorded against the action."
+    ),
+    W_PROGRESS_CALLBACK: ("The progress callback raised and was disabled; the capture continued."),
     W_UNACCOUNTED_SAMPLES: (
         "Wall-clock elapsed time accounts for more samples than the timeline does, by more "
         "than host anchoring and clock rate can explain. The loss is real but belongs to the "
@@ -144,6 +164,11 @@ WARNING_CATALOG: dict[str, str] = {
     W_VOLTAGE_ASSUMED: (
         "Energy could not be derived because no defensible supply voltage is known. Pass "
         "the DUT's real supply voltage to compute it."
+    ),
+    W_INSTRUMENT_MISMATCH: (
+        "The two captures being differenced came from different instruments. A gain error "
+        "is one unit's unknown, so it does not cancel across two of them and the delta is "
+        "priced no tighter than the two absolute figures."
     ),
     W_NOT_CALIBRATED: "The device reports it is not calibrated; absolute accuracy is unconfirmed.",
     W_CALIBRATION_INCOMPLETE: (
@@ -198,6 +223,8 @@ WARNING_CATEGORY: dict[str, str] = {
     W_IMPLAUSIBLE_SAMPLES: "capture integrity",
     W_NO_SAMPLES: "capture integrity",
     W_INTERRUPTED: "capture integrity",
+    W_SCHEDULED_ACTION: "device state",
+    W_PROGRESS_CALLBACK: "analysis",
     W_UNACCOUNTED_SAMPLES: "capture integrity",
     W_WINDOW_UNPOPULATED: "capture integrity",
     W_GAP_TABLE_TRUNCATED: "capture integrity",
@@ -205,6 +232,7 @@ WARNING_CATEGORY: dict[str, str] = {
     W_MANIFEST_IMPLAUSIBLE: "capture integrity",
     W_PARTIAL_INTEGRITY: "capture integrity",
     W_VOLTAGE_ASSUMED: "measurement trust",
+    W_INSTRUMENT_MISMATCH: "measurement trust",
     W_NOT_CALIBRATED: "measurement trust",
     W_CALIBRATION_INCOMPLETE: "measurement trust",
     W_USER_GAIN: "measurement trust",
@@ -329,6 +357,12 @@ def as_json(warnings: Sequence[Any]) -> list[dict[str, Any]]:
 
     Plain strings are accepted so that call sites can be migrated gradually;
     they surface as :data:`W_GENERIC`.
+
+    Every branch emits the same three keys, so this is idempotent and a stored
+    capture stays as branchable as a live result. Rebuilding only
+    ``{code, message}`` here is what stripped ``category`` on the way into a
+    manifest, leaving `capture --json` and `inspect --json` disagreeing about
+    the shape of the same warning.
     """
     out: list[dict[str, Any]] = []
     for item in warnings:
@@ -336,7 +370,17 @@ def as_json(warnings: Sequence[Any]) -> list[dict[str, Any]]:
             out.append(item.to_json())
         elif isinstance(item, dict) and "code" in item and "message" in item:
             # Already in contract form (e.g. read back from a capture file).
-            out.append({"code": str(item["code"]), "message": str(item["message"])})
+            # A capture written before `category` existed carries no such key;
+            # look it up rather than publishing None for a code we do know.
+            code = str(item["code"])
+            category = item["category"] if "category" in item else WARNING_CATEGORY.get(code)
+            out.append({"code": code, "message": str(item["message"]), "category": category})
         else:
-            out.append({"code": W_GENERIC, "message": str(item)})
+            out.append(
+                {
+                    "code": W_GENERIC,
+                    "message": str(item),
+                    "category": WARNING_CATEGORY.get(W_GENERIC),
+                }
+            )
     return out

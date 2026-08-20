@@ -54,6 +54,7 @@ def test_capabilities_lists_every_command(capsys):
         "decode",
         "measure",
         "assert",
+        "compare",
         "export",
     }
     configure = next(c for c in payload["result"]["commands"] if c["name"] == "configure")
@@ -103,7 +104,7 @@ def test_configure_voltage_refused(capsys):
 def test_device_not_found_exit_code(capsys, monkeypatch):
     import ppk2lab.device
 
-    monkeypatch.setattr(ppk2lab.device, "discover", lambda: [])
+    monkeypatch.setattr(ppk2lab.device, "discover", lambda **_kw: [])
     code, payload = run_json(capsys, "--json", "info")
     assert code == 3
     assert payload["error"]["code"] == "DEVICE_NOT_FOUND"
@@ -687,3 +688,558 @@ def test_enabling_dut_power_says_it_will_not_outlive_the_command(capsys):
     assert "W_DUT_POWER_TRANSIENT" not in {w["code"] for w in dry["warnings"]}
     _, off = run_json(capsys, "--simulate", "--json", "configure", "--dut-power", "off", "--apply")
     assert "W_DUT_POWER_TRANSIENT" not in {w["code"] for w in off["warnings"]}
+
+
+# -- exit 6 end to end ---------------------------------------------------
+#
+# The library decides `incomplete`; the CLI turns it into exit 6, and a CI
+# gate reads that number and nothing else. That mapping had no end-to-end
+# test, so nothing stopped a refactor from reporting an unevaluated rule as
+# a pass.
+
+
+def _gappy_capture(tmp_path):
+    from ppk2lab.testing.profiles import ConstantProfile
+
+    from .conftest import capture_of
+
+    capture = capture_of(ConstantProfile(50.0), samples=2000, gaps={900: 40})
+    path = tmp_path / "gappy.ppk2a"
+    capture.save(str(path))
+    return path
+
+
+def test_assert_over_a_gap_exits_six_and_names_the_reason(tmp_path, capsys):
+    path = _gappy_capture(tmp_path)
+    code, payload = run_json(capsys, "--json", "assert", str(path), "--rule", "avg_current < 1A")
+    assert code == 6, "an unevaluated rule must not leave the gate green"
+    jsonschema.validate(payload["result"], get_schema("assert-result"))
+    outcome = payload["result"]["outcomes"][0]
+    assert outcome["status"] == "incomplete"
+    assert outcome["observations"][0]["reason_code"] == "sample_gaps"
+    assert payload["result"]["passed"] is False
+
+
+def test_incomplete_outranks_a_real_failure_in_the_exit_code(tmp_path, capsys):
+    """A build that is both unevaluated and failing reports the harder one."""
+    path = _gappy_capture(tmp_path)
+    code, _ = run_json(
+        capsys,
+        "--json",
+        "assert",
+        str(path),
+        "--rule",
+        "avg_current < 1A",
+        "--rule",
+        "avg_current < 1nA",
+    )
+    assert code == 6
+
+
+def test_inspect_of_a_gappy_capture_still_exits_zero(tmp_path, capsys):
+    """Looking at a damaged capture is what inspect is for; it must not fail."""
+    path = _gappy_capture(tmp_path)
+    code, payload = run_json(capsys, "--json", "inspect", str(path))
+    assert code == 0
+    assert payload["result"]["complete"] is False
+    assert payload["result"]["gap_count"] == 1
+
+
+def _interrupted_but_gap_free_capture(tmp_path):
+    from ppk2lab.capture.model import Capture
+    from ppk2lab.testing.profiles import ConstantProfile
+
+    from .conftest import capture_of
+
+    base = capture_of(ConstantProfile(50.0), samples=2000)
+    capture = Capture(
+        base.meta,
+        base.words,
+        [],
+        complete=False,
+        interruption={"reason": "keyboard_interrupt"},
+    )
+    path = tmp_path / "interrupted.ppk2a"
+    capture.save(str(path))
+    return path
+
+
+def _codes_of(payload):
+    return {w["code"] for w in payload["warnings"]}
+
+
+def test_an_interrupted_capture_is_not_reported_as_having_sample_gaps(tmp_path, capsys):
+    """A code names one thing; branching on it must not be misled."""
+    path = _interrupted_but_gap_free_capture(tmp_path)
+    _, payload = run_json(capsys, "--json", "measure", str(path))
+    assert "W_INTERRUPTED" in _codes_of(payload)
+    assert "W_SAMPLE_GAPS" not in _codes_of(payload)
+
+    _, payload = run_json(capsys, "--json", "decode", str(path), "--uart", "D0", "--baud", "9600")
+    assert "W_INTERRUPTED" in _codes_of(payload)
+    assert "W_SAMPLE_GAPS" not in _codes_of(payload)
+
+
+def test_a_gappy_capture_still_reports_sample_gaps(tmp_path, capsys):
+    path = _gappy_capture(tmp_path)
+    _, payload = run_json(capsys, "--json", "measure", str(path))
+    assert "W_SAMPLE_GAPS" in _codes_of(payload)
+    assert "W_INTERRUPTED" not in _codes_of(payload)
+
+
+# -- provenance on the command line --------------------------------------
+
+
+def test_capture_tags_round_trip_through_inspect(tmp_path, capsys):
+    path = tmp_path / "tagged.ppk2a"
+    code, _ = run_json(
+        capsys,
+        "--simulate",
+        "--json",
+        "capture",
+        "--duration",
+        "100ms",
+        "--output",
+        str(path),
+        "--tag",
+        "sn=POD01",
+        "--tag",
+        "fw=0.3.0+g1a2b3c",
+        "--tag",
+        "note=has=an=equals",
+    )
+    assert code == 0
+    code, payload = run_json(capsys, "--json", "inspect", str(path))
+    assert code == 0
+    assert payload["result"]["user_tags"] == {
+        "sn": "POD01",
+        "fw": "0.3.0+g1a2b3c",
+        "note": "has=an=equals",
+    }
+
+
+@pytest.mark.parametrize("bad", ["justkey", "=novalue"])
+def test_a_malformed_tag_is_a_usage_error(tmp_path, capsys, bad):
+    code, payload = run_json(
+        capsys,
+        "--simulate",
+        "--json",
+        "capture",
+        "--duration",
+        "50ms",
+        "--output",
+        str(tmp_path / "x.ppk2a"),
+        "--tag",
+        bad,
+    )
+    assert code == 2
+    assert not payload["ok"]
+
+
+def test_the_same_tag_key_twice_is_refused(tmp_path, capsys):
+    code, _ = run_json(
+        capsys,
+        "--simulate",
+        "--json",
+        "capture",
+        "--duration",
+        "50ms",
+        "--output",
+        str(tmp_path / "x.ppk2a"),
+        "--tag",
+        "sn=A",
+        "--tag",
+        "sn=B",
+    )
+    assert code == 2
+
+
+def _capture_file(tmp_path, name, current_ua):
+    from ppk2lab.testing.profiles import ConstantProfile
+
+    from .conftest import capture_of
+
+    path = tmp_path / name
+    capture_of(ConstantProfile(current_ua), samples=3000).save(str(path))
+    return path
+
+
+def test_compare_reports_a_same_range_delta_with_a_tighter_bar(tmp_path, capsys):
+    a = _capture_file(tmp_path, "a.ppk2a", 197.0)
+    b = _capture_file(tmp_path, "b.ppk2a", 251.0)
+    code, payload = run_json(capsys, "--json", "compare", str(a), str(b))
+    assert code == 0
+    jsonschema.validate(payload["result"], get_schema("compare-result"))
+    result = payload["result"]
+    assert result["basis"] == "same_range"
+    assert result["uncertainty"]["gain_error_cancels"] is True
+    assert result["delta"] == pytest.approx(54.0, abs=1.0)
+    assert result["a"]["path"].endswith("a.ppk2a")
+
+
+def test_compare_carries_both_sides_provenance_and_loss(tmp_path, capsys):
+    a = _capture_file(tmp_path, "a.ppk2a", 197.0)
+    gappy = _gappy_capture(tmp_path)
+    code, payload = run_json(capsys, "--json", "compare", str(a), str(gappy))
+    assert code == 0
+    assert payload["result"]["b"]["complete"] is False
+    assert payload["result"]["b"]["gap_count"] == 1
+    assert "W_SAMPLE_GAPS" in _codes_of(payload)
+
+
+def test_compare_refuses_an_unknown_metric(tmp_path, capsys):
+    a = _capture_file(tmp_path, "a.ppk2a", 197.0)
+    code, _ = run_json(capsys, "--json", "compare", str(a), str(a), "--metric", "temperature")
+    assert code == 2
+
+
+# -- compare: what each side is worth before its difference means anything --
+
+
+def _capture_file_of(tmp_path, name, profile, *, samples=2000, **simulator):
+    """A saved capture from a simulator configured for this test.
+
+    ``_capture_file`` covers the constant-current case; this one exists for the
+    comparisons whose point is that the two sides ran on different *settings* —
+    a different supply voltage, a different mode — which only the simulator's
+    own constructor can vary.
+    """
+    from .conftest import open_simulated
+
+    device = open_simulated(profile, **simulator)
+    try:
+        result = device.capture(sample_limit=samples)
+    finally:
+        device.close()
+    path = tmp_path / name
+    result.capture.save(str(path))
+    return path
+
+
+def _floor_capture_file(tmp_path, name):
+    """A capture straddling the 200 nA grid floor, so its low quantiles are bounds.
+
+    Straddling is the load-bearing part: with the whole distribution below the
+    floor the [min, max] clamp pulls the quantile back to a measured value, and
+    nothing would be at the floor to report.
+    """
+    from ppk2lab.testing.profiles import StepProfile
+
+    return _capture_file_of(tmp_path, name, StepProfile([(1400, 0.05, 0), (600, 0.5, 0)]))
+
+
+def test_compare_names_the_measurement_floor_on_each_side(tmp_path, capsys):
+    """Two floor-served quantiles differ by 0.0 for a reason that is not the DUT.
+
+    The delta is the grid floor minus the grid floor. Without both warnings a
+    reader sees "no change" and has nothing to tell it apart from a measured
+    agreement between two sleeping boards.
+    """
+    a = _floor_capture_file(tmp_path, "a.ppk2a")
+    b = _floor_capture_file(tmp_path, "b.ppk2a")
+    code, payload = run_json(capsys, "--json", "compare", str(a), str(b), "--metric", "p5_current")
+    assert code == 0
+    jsonschema.validate(payload["result"], get_schema("compare-result"))
+    floor = [w for w in payload["warnings"] if w["code"] == "W_BELOW_MEASUREMENT_FLOOR"]
+    assert len(floor) == 2, "one warning cannot say which side it is about"
+    # Each side is named, so two identically worded sentences stay distinguishable.
+    assert floor[0]["message"].startswith(f"{a}: ")
+    assert floor[1]["message"].startswith(f"{b}: ")
+    assert payload["result"]["delta"] == 0.0
+    assert payload["result"]["a"]["quantiles_at_floor"] == ["p5", "p50"]
+
+
+def test_compare_says_when_a_charge_operand_is_only_a_lower_bound(tmp_path, capsys):
+    """Two saturated captures also difference to 0.0, and for the same reason.
+
+    Both integrals stop at the same ceiling, so a 1.5x load difference reports
+    as no difference at all.
+    """
+    from ppk2lab.testing.profiles import ConstantProfile
+
+    a = _capture_file_of(tmp_path, "a.ppk2a", ConstantProfile(2_000_000.0))
+    b = _capture_file_of(tmp_path, "b.ppk2a", ConstantProfile(3_000_000.0))
+    code, payload = run_json(capsys, "--json", "compare", str(a), str(b), "--metric", "charge")
+    assert code == 0
+    assert "W_CLIPPED" in _codes_of(payload)
+    assert payload["result"]["b"]["charge_is_lower_bound"] is True
+    assert payload["result"]["b"]["saturated_samples"] > 0
+    assert payload["result"]["delta"] == 0.0
+
+
+def test_an_unclipped_compare_claims_no_lower_bound(tmp_path, capsys):
+    """False-alarm guard: a caveat that always fires carries no information."""
+    a = _capture_file(tmp_path, "a.ppk2a", 197.0)
+    b = _capture_file(tmp_path, "b.ppk2a", 251.0)
+    _code, payload = run_json(capsys, "--json", "compare", str(a), str(b), "--metric", "charge")
+    assert "W_CLIPPED" not in _codes_of(payload)
+    assert payload["result"]["a"]["charge_is_lower_bound"] is False
+    assert payload["result"]["b"]["charge_is_lower_bound"] is False
+
+
+def _restamp_serial_number(path, serial_number):
+    """Rewrite a stored artifact's recorded instrument.
+
+    Two simulated captures otherwise carry one serial, and the claim under test
+    is about what the manifests say, not about which device object produced
+    them.
+    """
+    import zipfile
+
+    with zipfile.ZipFile(path) as archive:
+        members = [(info, archive.read(info.filename)) for info in archive.infolist()]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info, data in members:
+            if info.filename == "manifest.json":
+                manifest = json.loads(data)
+                manifest["device"]["serial_number"] = serial_number
+                data = json.dumps(manifest).encode()
+            archive.writestr(info, data)
+
+
+def test_compare_names_the_instrument_on_each_side(tmp_path, capsys):
+    """The gain-error cancellation is one physical shunt's unknown.
+
+    Same range index on two units is not the same shunt, so the basis stays
+    `same_range` — a true statement about the ranges — while the cancellation
+    that would have halved the error bar is withdrawn.
+    """
+    a = _capture_file(tmp_path, "a.ppk2a", 197.0)
+    b = _capture_file(tmp_path, "b.ppk2a", 251.0)
+    _restamp_serial_number(b, "PPK2-OTHER")
+    code, payload = run_json(capsys, "--json", "compare", str(a), str(b))
+    assert code == 0
+    result = payload["result"]
+    assert result["a"]["device"]["serial_number"] != result["b"]["device"]["serial_number"]
+    assert "W_INSTRUMENT_MISMATCH" in _codes_of(payload)
+    assert result["basis"] == "same_range"
+    assert result["same_instrument"] is False
+    assert result["uncertainty"]["gain_error_cancels"] is False
+
+
+def test_compare_of_energy_says_when_the_two_supplies_disagree(tmp_path, capsys):
+    """Energy is charge x V, and V came from each capture's own supply.
+
+    The two currents are identical here, so every microjoule of the delta is
+    the setpoint change. Reporting that as a result about the DUT is the
+    failure this warning exists to prevent.
+    """
+    from ppk2lab.testing.profiles import ConstantProfile
+
+    a = _capture_file_of(tmp_path, "a.ppk2a", ConstantProfile(200.0), initial_vdd_mv=3000)
+    b = _capture_file_of(tmp_path, "b.ppk2a", ConstantProfile(200.0), initial_vdd_mv=1800)
+    code, payload = run_json(capsys, "--json", "compare", str(a), str(b), "--metric", "energy")
+    assert code == 0
+    jsonschema.validate(payload["result"], get_schema("compare-result"))
+    assert "W_VOLTAGE_ASSUMED" in _codes_of(payload)
+    voltage = payload["result"]["voltage"]
+    assert voltage["differs"] is True
+    assert (voltage["a"], voltage["b"]) == (3000, 1800)
+
+
+def test_compare_of_energy_explains_itself_when_energy_is_not_computable(tmp_path, capsys):
+    """A null delta must say why, or it reads as a bug rather than a refusal.
+
+    In ampere mode the device's voltage field is a source setpoint the DUT
+    never ran from, so there is no supply to multiply charge by.
+    """
+    from ppk2lab.testing.profiles import ConstantProfile
+    from ppk2lab.types import Mode
+
+    a = _capture_file_of(tmp_path, "a.ppk2a", ConstantProfile(200.0), initial_mode=Mode.AMPERE)
+    b = _capture_file_of(tmp_path, "b.ppk2a", ConstantProfile(250.0), initial_mode=Mode.AMPERE)
+    code, payload = run_json(capsys, "--json", "compare", str(a), str(b), "--metric", "energy")
+    assert code == 0
+    assert payload["result"]["delta"] is None
+    assert payload["result"]["voltage"]["differs"] is False
+    explanations = [w["message"] for w in payload["warnings"] if w["code"] == "W_VOLTAGE_ASSUMED"]
+    assert explanations, "a null delta with no warning is silence"
+    assert "ampere mode" in explanations[0]
+
+
+def test_compare_reports_an_interrupted_side_without_calling_it_a_gap(tmp_path, capsys):
+    """A stopped capture lost no sample it recorded; a gappy one did.
+
+    `compare` reports both sides' loss, and it must keep the two apart for the
+    same reason `measure` does: an agent branches on the code.
+    """
+    a = _capture_file(tmp_path, "a.ppk2a", 197.0)
+    interrupted = _interrupted_but_gap_free_capture(tmp_path)
+    code, payload = run_json(capsys, "--json", "compare", str(a), str(interrupted))
+    assert code == 0
+    assert "W_INTERRUPTED" in _codes_of(payload)
+    assert "W_SAMPLE_GAPS" not in _codes_of(payload)
+    assert payload["result"]["b"]["complete"] is False
+
+
+def test_compare_prints_the_deltas_own_stderr_beside_the_typical_bar(tmp_path, capsys):
+    """The two numbers answer different questions and can differ by orders.
+
+    `delta_typical` is a gain specification; the batch stderr says how settled
+    these two particular means are. Printing only the first showed
+    `delta: -300 +/- 37 uA` for a delta whose own stderr was 299 uA — a result
+    indistinguishable from zero, rendered as a confident one.
+    """
+    a = _capture_file(tmp_path, "a.ppk2a", 197.0)
+    b = _capture_file(tmp_path, "b.ppk2a", 251.0)
+    code = main(["compare", str(a), str(b), "--metric", "mean_current"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "not guaranteed" in out
+    assert "batch stderr" in out
+
+
+# -- the printed statistics line -----------------------------------------
+
+
+def _stats_json(profile, samples=2000):
+    from ppk2lab.analysis.measure import measure_window
+
+    from .conftest import capture_of
+
+    return measure_window(capture_of(profile, samples=samples)).to_json()
+
+
+def test_a_floor_served_quantile_is_marked_in_the_printed_distribution():
+    """`quantiles_at_floor` is monotone in rank, so the marking has to be too.
+
+    With 30% of samples under the floor, p5 is the floor and p50 is measured.
+    While the printed line was a fixed p50/p90/p99 tuple there was a whole band
+    in which the warning named a quantile the line never showed.
+    """
+    from ppk2lab.cli.commands import _fmt_stats
+    from ppk2lab.testing.profiles import StepProfile
+
+    stats = _stats_json(StepProfile([(600, 0.05, 0), (1400, 100.0, 0)]))
+    assert stats["distribution"]["quantiles_at_floor"] == ["p5"]
+    text = _fmt_stats(stats)
+    assert "p5 <=" in text
+    assert "p50 <=" not in text
+
+
+def test_a_measured_distribution_is_printed_without_a_bound_marker():
+    """False-alarm guard: an always-on marker would say nothing at all."""
+    from ppk2lab.cli.commands import _fmt_stats
+    from ppk2lab.testing.profiles import ConstantProfile
+
+    stats = _stats_json(ConstantProfile(1000.0))
+    assert stats["distribution"]["quantiles_at_floor"] == []
+    assert "<=" not in _fmt_stats(stats)
+
+
+# -- export provenance comments ------------------------------------------
+
+
+def test_export_csv_writes_the_provenance_comments_above_the_header(flow, tmp_path, capsys):
+    """A derived file usually outlives the session that made it.
+
+    Asserted on bytes because the line ending is the point: csv.writer runs
+    under `newline=""` and emits CRLF, so a comment terminated with a bare LF
+    left a file an RFC 4180 reader parses as one record — the whole preamble
+    glued onto the header.
+    """
+    cap, _ = flow
+    out = tmp_path / "annotated.csv"
+    code, payload = run_json(
+        capsys,
+        "--json",
+        "export",
+        str(cap),
+        "--format",
+        "csv",
+        "--output",
+        str(out),
+        "--comment",
+        "sn: POD01",
+        "--comment",
+        "build: 42",
+    )
+    assert code == 0
+    jsonschema.validate(payload["result"], get_schema("export-result"))
+    data = out.read_bytes()
+    lines = data.split(b"\r\n")
+    assert lines[0] == b"# sn: POD01"
+    assert lines[1] == b"# build: 42"
+    assert lines[2].startswith(b"timeline_index,")
+    # No bare LF anywhere: comment lines and data rows end alike.
+    assert data.count(b"\n") == data.count(b"\r\n")
+
+
+@pytest.mark.parametrize("fmt", ["vcd", "jsonl"])
+def test_a_comment_is_refused_by_a_format_that_has_no_comment_line(flow, tmp_path, capsys, fmt):
+    """Dropping the flag silently would hand back a file the caller believes
+    is annotated, and the refusal has to come before anything is written."""
+    cap, _ = flow
+    out = tmp_path / f"o.{fmt}"
+    code, payload = run_json(
+        capsys,
+        "--json",
+        "export",
+        str(cap),
+        "--format",
+        fmt,
+        "--output",
+        str(out),
+        "--comment",
+        "sn: POD01",
+    )
+    assert code == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "INVALID_ARGUMENT"
+    assert not out.exists()
+
+
+# -- provenance the capture hands straight back ---------------------------
+
+
+def test_a_capture_result_carries_the_tags_it_was_given(tmp_path, capsys):
+    """Tagging a capture should not force a reopen to read the tags back.
+
+    docs/api-baseline.md lists `user_tags` on capture-result; the field was
+    absent, so the documented contract and the payload disagreed.
+    """
+    path = tmp_path / "tagged.ppk2a"
+    code, payload = run_json(
+        capsys,
+        "--simulate",
+        "--json",
+        "capture",
+        "--duration",
+        "50ms",
+        "--output",
+        str(path),
+        "--tag",
+        "sn=POD01",
+        "--tag",
+        "build=42",
+    )
+    assert code == 0
+    jsonschema.validate(payload["result"], get_schema("capture-result"))
+    assert payload["result"]["user_tags"] == {"sn": "POD01", "build": "42"}
+
+
+def test_a_warning_has_the_same_shape_live_stored_and_on_inspect(tmp_path, capsys):
+    """One warning, three readers, one shape.
+
+    `category` was stripped on the way into the manifest, so a capture and a
+    later `inspect` of the same file reported differently shaped warnings and a
+    reader keying on `category` saw it appear and disappear.
+    """
+    import zipfile
+
+    path = tmp_path / "warned.ppk2a"
+    code, payload = run_json(
+        capsys, "--simulate", "--json", "capture", "--duration", "50ms", "--output", str(path)
+    )
+    assert code == 0
+    live = payload["result"]["warnings"]
+    assert live, "this test says nothing unless the capture actually warned"
+
+    with zipfile.ZipFile(path) as archive:
+        stored = json.loads(archive.read("manifest.json"))["warnings"]
+
+    _code, inspected = run_json(capsys, "--json", "inspect", str(path))
+
+    assert live == stored == inspected["result"]["warnings"]
+    for warning in live:
+        assert set(warning) == {"code", "message", "category"}

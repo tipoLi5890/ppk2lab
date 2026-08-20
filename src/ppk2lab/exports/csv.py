@@ -21,13 +21,14 @@ from __future__ import annotations
 import csv as _csv
 import math
 import os
+from collections.abc import Sequence
 from typing import Any
 
 from ..calibration import SpikeFilter
 from ..capture.model import Capture
 from ..errors import CaptureFileError
 from ..protocol.samples import GapEvent
-from ._atomic import atomic_write
+from ._atomic import atomic_write, write_comments
 
 
 def csv_header(*, include_filtered: bool = False) -> list[str]:
@@ -131,6 +132,7 @@ def export_csv(
     *,
     include_filtered: bool = False,
     overwrite: bool = False,
+    comments: Sequence[str] | None = None,
 ) -> int:
     """Write the capture as CSV; returns the number of sample rows.
 
@@ -138,6 +140,7 @@ def export_csv(
     samples, so a consumer counting lines may see more rows than this.
     """
     with atomic_write(path, overwrite=overwrite, newline="", encoding="utf-8") as fh:
+        write_comments(fh, comments)
         rows = write_csv(capture, fh, include_filtered=include_filtered)
         if rows != capture.stored_count:
             # Raised inside the block on purpose: aborting here leaves any

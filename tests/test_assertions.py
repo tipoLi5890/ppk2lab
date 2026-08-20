@@ -407,3 +407,62 @@ def test_a_distribution_wholly_below_the_floor_measures_again():
     observation = evaluate_assertion(capture, parse_rule("p50_current < 100nA")).observations[0]
     assert observation["observed"] == pytest.approx(0.05, rel=0.2)
     assert observation["status"] == "passed"
+
+
+def test_every_assertable_quantile_is_registered_for_floor_protection():
+    """A quantile metric missing from _QUANTILE_FIELDS parses and evaluates
+    fine while silently skipping the measurement-floor protection every other
+    quantile gets — a sleep-current rule passing on a number that was the grid
+    floor. Stated as an invariant rather than as a list of the quantiles that
+    exist today, so registering a new `pN_current` without its floor entry
+    fails here instead of shipping.
+    """
+    from ppk2lab.analysis.assertions import _METRICS, _QUANTILE_FIELDS
+    from ppk2lab.capture.stats import WindowStats
+
+    assert parse_rule("p95_current < 15mA").metric == "p95_ua"
+    assert parse_rule("p5_current > 1uA").metric == "p5_ua"
+
+    assertable_quantiles = {
+        stats_field
+        for stats_field, kind in _METRICS.values()
+        if kind == "current" and re.fullmatch(r"p\d+_ua", stats_field)
+    }
+    assert assertable_quantiles == set(_QUANTILE_FIELDS)
+    # The other half of the join: a registered field whose reported name is not
+    # one WindowStats publishes can never appear in `quantiles_at_floor`, so the
+    # protection would be wired to a name that is never raised.
+    assert set(_QUANTILE_FIELDS.values()) == {name for name, _level in WindowStats.QUANTILE_LEVELS}
+
+
+def test_the_floor_evidence_is_carried_on_every_observation():
+    """`quantiles_at_floor` / `below_grid_fraction` describe the window, not the
+    rule: a rule reading a quantile that is fine still needs to show that the
+    window it read was one where quantiles bottom out, or its author has to run
+    `measure` separately to learn it.
+    """
+    capture = floor_capture()
+
+    # p50 sits inside the below-floor bin (1400 of 2000 samples), so this rule
+    # is the affected one and cannot be decided.
+    affected = evaluate_assertion(capture, parse_rule("p50_current < 100nA")).observations[0]
+    assert affected["status"] == "incomplete"
+    assert affected["reason_code"] == "metric_at_measurement_floor"
+    assert affected["quantiles_at_floor"] == ["p5", "p50"]
+    assert affected["below_grid_fraction"] == pytest.approx(0.7)
+
+    # p90's own rank is above the floor, so it decides normally — and still
+    # reports the same evidence about the window it was measured over.
+    unaffected = evaluate_assertion(capture, parse_rule("p90_current < 1uA")).observations[0]
+    assert unaffected["status"] == "passed"
+    assert "reason_code" not in unaffected
+    assert unaffected["quantiles_at_floor"] == affected["quantiles_at_floor"]
+    assert unaffected["below_grid_fraction"] == affected["below_grid_fraction"]
+
+
+def test_a_window_clear_of_the_grid_floor_reports_no_floor_evidence():
+    """False-alarm guard: the fields must distinguish, not decorate."""
+    capture = capture_of(ConstantProfile(1000.0), samples=2000)
+    observation = evaluate_assertion(capture, parse_rule("p50_current < 2mA")).observations[0]
+    assert observation["quantiles_at_floor"] == []
+    assert observation["below_grid_fraction"] == 0.0

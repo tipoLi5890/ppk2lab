@@ -33,6 +33,13 @@ Verify each configure change's `after` state; relay any
 capture result: `complete`, stored/missing samples, mean/peak current,
 charge/energy, path, `capture_sha256`.
 
+`--tag KEY=VALUE` (repeatable) records what the capture is *of* — board
+serial, firmware build, experiment id — inside the artifact. It comes back
+verbatim as `user_tags` on the capture result itself, so a script that just
+tagged a run does not have to reopen the file to read them back, and
+`inspect --json` returns the same map later. Nothing interprets a tag;
+values are strings and are never coerced.
+
 `complete: false` (exit 6): data is preserved with loss markers — report
 the gap table and interruption reason; offer a retry with lower system
 load or shorter duration. On session close the library restores the
@@ -71,6 +78,52 @@ The session restores the power state it found on close. There is no
 readback for DUT power on this hardware, so the measured current is the
 only verification available: a plausible non-zero draw is the evidence
 that power was on, and nothing else is.
+
+## Scheduled stimulus and live progress (Python only)
+
+Neither has a CLI flag, and `at=` deliberately does not: `capture` never
+enables DUT power and has no option that would, so scheduling something
+that does is an explicit Python act.
+
+```python
+result = dev.capture(
+    duration_s=10.0,
+    output="inrush.ppk2a",
+    at=[(2.0, lambda: dev.set_dut_power(True), "dut_power_on")],
+    on_progress=lambda p: print(p["stored"], p["gap_count"]),
+)
+```
+
+- Each `at=` entry is `(delay_s, callable[, label])`, measured from the
+  first sample, and fires *between* two sample blocks at a sample index the
+  manifest records (`scheduled_actions[].fired_index`). A `delay_s` that is
+  negative, NaN or infinite is a usage error before the capture starts.
+- **`at=` cannot be combined with a trigger** — `UsageError`
+  (`INVALID_ARGUMENT`), raised before the capture starts rather than
+  attempted. A triggered capture's timeline begins `pre_samples` before the
+  trigger fires, so a delay measured from the first sample cannot be
+  honoured and the recorded `fired_index` would predate the action. Run the
+  stimulus before the capture, or use `duration_s=`/`sample_limit=`.
+- **An action that never came due is still recorded** — same entry, with
+  `fired_index: null`, `fired_s: null` and an `error` saying when the
+  capture ended — plus one `W_SCHEDULED_ACTION` for the whole set. So "the
+  stimulus never happened" is visible in the artifact instead of looking
+  like a capture that scheduled nothing. Check it before reporting an
+  inrush that is not in the samples.
+- If the callable raises, the capture continues, the failure lands in that
+  entry's `error`, and `W_SCHEDULED_ACTION` says so. Samples already taken
+  are not worth losing to a bad callback.
+- `on_progress` is called at most every 0.25 s with
+  `{stored, elapsed_s, gap_count, sample_limit}`, and now also **during a
+  trigger wait** — which is the 90 s unattended capture the callback exists
+  for. A callback that raises is disabled once, with
+  `W_PROGRESS_CALLBACK`; the capture continues.
+- **Both callables run on the thread consuming samples.** That thread
+  drains a queue budgeted at `queue_bytes` (4 MB by default) — at 100 kS/s
+  x 4 bytes, about ten seconds of stream — so a callable returning well
+  inside that costs nothing, and one that does not drops samples.
+  Stalling that thread is exactly the fault that produced a gap at every
+  chunk boundary through `0.2.0` (below). Do the slow part afterwards.
 
 ## The timeline block
 
@@ -113,8 +166,13 @@ What one hardware session established about those fields:
 
 ## How much loss to expect
 
-Gaps are the normal condition, not a defect. Measured over 60 s at
-100 kS/s on one macOS host:
+Little to none. The table below is the `0.2.0` behaviour and is kept because
+it is what the bug looked like: the artifact writer compressed each 4 MB
+chunk on the thread consuming samples, so a 60 s capture — five chunk
+boundaries crossed — lost exactly five gaps, and host load lengthened each
+stall rather than adding gaps. Fixed in Unreleased; on the same host, 5 x 30 s
+and 1 x 60 s captures now record every sample. Measured over 60 s at
+100 kS/s on one macOS host, before the fix:
 
 | host state | missing | share | gaps | gap sizes (samples) |
 |---|---|---|---|---|

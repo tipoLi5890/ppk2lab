@@ -2,7 +2,9 @@
 
 Every command accepts the global flags `--json` (emit the envelope contract)
 and `--simulate` (use the built-in simulated PPK2), before or after the
-subcommand. `PPK2LAB_SIMULATE=1` is equivalent to `--simulate`. Exit codes
+subcommand. `PPK2LAB_SIMULATE=1` is equivalent to `--simulate`, and the Python
+API honours it too — `PPK2.open()` and `discover()` read it when `simulate` is
+left unset, so a script and a command behave the same way under it. Exit codes
 are documented in `docs/SPEC.md`. `ppk2lab capabilities --json` is the
 machine-readable version of this page, generated from the live parser.
 
@@ -74,9 +76,18 @@ Checks Python, pyserial, enumeration, device selection, device open,
 interrupted-session recovery, metadata, the firmware fingerprint, the
 `Calibrated` flag, user gains, and calibration constants. `--stream-check`
 opts into a short measurement (start/stop only — never DUT power) verifying
-the 100 kS/s rate. It reports gaps but can only `warn` about them: sample loss
-over USB happens on an idle host — 0.43% over 60 s in the one session measured
-— so a gap is information about the host, not a failed check.
+the 100 kS/s rate. It reports gaps but can only `warn` about them, because a
+gap here is information about the host rather than a failed check. It is not
+the expected background this page used to call it, though: the 0.43% lost over
+60 s that `0.2.0` measured came from this project's own artifact writer
+compressing each chunk on the thread consuming the stream, which is why that
+run's loss arrived as exactly five gaps, one per chunk boundary crossed.
+`--stream-check` writes no file at all — it captures into RAM, the one shape
+that already came back gap-free before that fix — so the figure never
+described this check in the first place. Those measurements stand as
+observations, with their periodic component now attributed to the bug; what an
+idle host costs on its own was never separated out and is unquantified. Treat
+a gap here as something to look into rather than as the normal state.
 
 `session_recovery` warns, rather than passing quietly, when the previous
 session left the device streaming; it names the exact number of stale stream
@@ -148,7 +159,7 @@ ppk2lab capture --device SERIAL (--duration 5s | --samples N | --trigger SPEC)
                 [--output run.ppk2a] [--overwrite] [--digital D0-D7]
                 [--pre 100ms] [--post 1s] [--trigger-timeout 30s]
                 [--trigger-hold N] [--allow-experimental] [--spi-* ...]
-                [--assume-voltage-mv MV] [--in-memory]
+                [--assume-voltage-mv MV] [--in-memory] [--tag KEY=VALUE ...]
 ```
 
 `--assume-voltage-mv` supplies the DUT supply voltage the meter cannot
@@ -156,6 +167,14 @@ measure, which is what makes energy computable for an Ampere-mode capture;
 the result records it as an explicit assumption. Without `--output` the
 capture is buffered in RAM and is refused beyond 60 s unless `--in-memory`
 confirms that is intended.
+
+`--tag KEY=VALUE` records provenance inside the capture — board serial,
+firmware build, experiment id — and may be repeated. ppk2lab never interprets
+a tag; `inspect --json` gives them back under `user_tags`, unchanged. Raw
+samples are the source of truth, so what a capture is *of* belongs in the
+capture rather than only in a filename or a spreadsheet beside it. Values are
+strings and are never coerced: pass `--tag voltage=3.7`, not a number, so the
+text that comes back is the text that went in.
 
 The result also carries a `timeline` block cross-checking the sample
 timeline against the wall clock; a capture that advanced far slower than
@@ -256,13 +275,17 @@ The window block also carries:
   loaded input: over 60 s with nothing drawing current, 69-71% of samples read
   below the 200 nA floor, so `p50` was the floor and not a measurement. Use
   the mean, the minimum, or charge in that regime.
-- `current_ua.p50/p90/p99/p999` alongside mean/min/max, plus a `distribution`
-  block naming the log-spaced grid they came from (`bins_per_decade`,
-  `grid_min_ua`, `grid_max_ua`, `quantile_half_width_fraction`, and the
-  samples that fell off either end). A mean alone cannot describe a
-  duty-cycled load: on the simulated demo profile the mean is 1806.72 uA — a
-  value the DUT never draws for a single sample — while `p50` sits on the
-  6 uA sleep current;
+- `current_ua.p5/p50/p90/p95/p99/p999` alongside mean/min/max, plus a
+  `distribution` block naming the log-spaced grid they came from
+  (`bins_per_decade`, `grid_min_ua`, `grid_max_ua`,
+  `quantile_half_width_fraction`, and the samples that fell off either end).
+  The human `distribution:` line prints all six, from that same published
+  list, so a quantile the floor warning names is always one the line showed —
+  it used to print p50/p90/p99 only, leaving a band between p5 and p50 in
+  which the warning could name a number the reader never saw. A mean alone
+  cannot describe a duty-cycled load: on the simulated demo profile the mean
+  is 1806.72 uA — a value the DUT never draws for a single sample — while
+  `p50` sits on the 6 uA sleep current;
 - `samples_per_range`, `charge_per_range_uc`, `range_switches`,
   `range_switch_rate_hz`, `saturated_samples` and `saturated_ranges`. A
   sample pinned on the ADC's full-scale code is a ceiling, not a
@@ -297,10 +320,11 @@ ppk2lab assert run.ppk2a \
 Rule DSL: `[after <event>,] [within <duration>,] <metric> <op> <value>`.
 Events: `uart("TEXT"[, D2])`, `spi(0x9f, 0x00)`, `digital(D3 rising)`.
 Metrics: `avg_current`/`mean_current`, `max_current`/`peak_current`,
-`min_current`, `p50_current`/`median_current`, `p90_current`, `p99_current`,
-`p999_current`, `charge`, `energy`. Values need explicit units (`10uA`,
-`5uC`, `1mJ`). Exit codes: 0 all passed; 1 failed, or the `after` event was
-not found; 6 a window could not be evaluated as written.
+`min_current`, `p5_current`, `p50_current`/`median_current`, `p90_current`,
+`p95_current`, `p99_current`, `p999_current`, `charge`, `energy`. Values need
+explicit units (`10uA`, `5uC`, `1mJ`). Exit codes: 0 all passed; 1 failed, or
+the `after` event was not found; 6 a window could not be evaluated as
+written.
 
 **Prefer `p99_current` to `max_current` for a CI threshold.** `max` is one
 sample: every range switch adds a transient, so the observed maximum drifts
@@ -330,6 +354,95 @@ two CS transactions is not evidence of one exchange. Such occurrences are
 rejected, with a warning naming how many and why; if none survive, the
 outcome is `no_event` (exit 1) rather than a pass on stitched evidence.
 
+## compare — offline
+
+```bash
+ppk2lab compare BASELINE.ppk2a CANDIDATE.ppk2a [--metric mean_current]
+                [--assume-voltage-mv MV] [--max-samples N|none]
+```
+
+The difference is `candidate - baseline`: the change from the first capture to
+the second, which is the order the arguments are given in.
+
+A power question is usually a difference — what does this rail cost, what did
+this firmware change — and answering it by quoting two absolute numbers from a
++/-10% instrument throws away the reason the paired measurement was made. That
++/-10% is a *gain* error: the same fraction of reading for every sample taken
+through that shunt. Two captures through the same shunt share it, so it scales
+the difference instead of each reading.
+
+| `basis` | what it means | gain term |
+|---|---|---|
+| `same_range` | both captures stayed in one shunt range | `accuracy x abs(delta)` — the shared factor cancels |
+| `cross_range` | each capture sat in a different range | the two gains are independent and add; no tighter than the absolute figures |
+| `mixed` | at least one capture switched ranges, so no single gain factor describes it | added, conservatively |
+
+On a 54 uA difference between two ~200 uA readings in one range that is an
+error bar of about +/-6 uA rather than +/-45 uA. The resolution term is always
+added: it bounds an offset per sample rather than scaling a reading, and
+claiming it cancels would claim more than the model supports.
+
+`same_range` is not "mostly one range". A capture qualifies only when 99.5% of
+its valid samples **and** 99.5% of its absolute charge sit in the same shunt,
+because the figures being differenced are charge-weighted and a sample count is
+not: a duty-cycled load can put almost all of its *samples* in the microamp
+range and almost all of its *charge* in the milliamp one, and pricing that
+delta with the sleepy range's accuracy publishes a sentence about the hardware
+that is not true. A capture with no per-range charge breakdown claims no
+dominant range at all.
+
+The cancellation further assumes **one instrument**: a gain error is one
+physical shunt's residual, so two units carry two independent unknowns and the
+same range *index* on each is not the same shunt. `compare` therefore checks
+the `serial_number` each capture recorded. When both are present and differ,
+the result carries `same_instrument: false` and a `W_INSTRUMENT_MISMATCH`
+warning, and the bar is no tighter than the two absolute figures — `basis`
+still reads `same_range`, because that stays a true statement about the ranges;
+only the cancellation is withdrawn. When either side names no serial,
+`same_instrument` is `null`: the tighter bar is kept and its note ends
+"the shared-shunt premise is unverified", because unknown is not the same as
+different.
+
+`relative` is `delta / abs(baseline)`, never `delta / baseline`. This
+instrument legitimately reads below zero on an unloaded input, and a signed
+denominator turned a rise against a negative baseline into a reported fall.
+
+`uncertainty` is `null` for metrics the model does not price (percentiles,
+`max_current`, `min_current`, `energy`); the difference is still reported, with
+`uncertainty_note` saying why there is no bar. `guaranteed` is always `false`,
+for the same reason it is everywhere else: these are Nordic's *typical*
+figures, not limits. Where there is a bar, the human output prints
+`delta_typical` beside the delta and then a separate `uncertainty:` line
+carrying `delta_batch_stderr` where there is one — it exists for a mean
+comparison whose two windows each held enough batches to have a spread. That
+is the same pair `measure` prints, answering the same two different questions
+(is the instrument reading true; would this delta move if the windows moved),
+and they must not be added. They can differ by an order of magnitude, so
+printing only the first let a delta indistinguishable from zero read as a
+confident result.
+
+Both sides report their own `device` (serial number and firmware version),
+`complete`, `covered_fraction`, `user_tags`, `quantiles_at_floor`,
+`saturated_samples`, `charge_is_lower_bound`, `source_voltage_mv`,
+`voltage_basis` and `energy_note`, so comparing against a lossy capture is
+visible rather than silent. The window diagnostics of **both** sides are
+surfaced as warnings too, each prefixed with the path it came from so two
+identical sentences can be told apart. That is the point: a delta of 0.0
+between two medians served from the 200 nA grid floor says nothing about the
+DUT, and neither does a delta between two clipped maxima. Whatever `measure`
+would have told you about one of these captures, `compare` tells you about
+both.
+
+`--assume-voltage-mv` prices both sides at the same supply voltage, which is
+what makes `--metric energy` answerable for an Ampere-mode capture at all
+(docs/energy-analysis.md). An energy comparison also publishes a `voltage`
+block — each side's voltage and `voltage_basis`, each side's `energy_note`, and
+a `differs` flag — because energy is charge times a voltage that came from each
+capture's own supply rather than from the meter. When the two supplies differ,
+the delta contains the setpoint change as well as the DUT's behaviour, and
+`W_VOLTAGE_ASSUMED` says so; when energy came out `null`, the same code carries
+the two `energy_note` strings explaining why.
+
 ## export — offline
 
 ```bash
@@ -357,6 +470,38 @@ All three formats are written to a temp file beside `--output` and moved into
 place, so an export that fails part-way — running out of space is the ordinary
 case at raw CSV's 52.1 bytes per sample, measured on a real capture — leaves
 any previous file at that path untouched.
+
+### `--comment TEXT` — provenance in the file
+
+Writes a `# TEXT` line before the header; repeatable. CSV only — VCD has its
+own comment syntax and JSONL has no comment line, so asking for one there is
+refused rather than dropped. A derived file usually outlives the session that
+produced it, and a reader who finds one wants to know which board, which
+build, which run:
+
+```bash
+ppk2lab export run.ppk2a --format csv --bucket-ms 1 --output run.csv \
+  --comment "sn: POD01" --comment "fw: 0.3.0+g1a2b3c"
+```
+
+Each line ends with CRLF, the same terminator `csv.writer` puts on every data
+row, so the preamble and the body agree: an RFC 4180 reader splitting on CRLF
+sees the comments as their own records instead of gluing the whole preamble
+onto the header.
+
+Two things are refused rather than accepted quietly. A comment containing a
+newline exits 2 — it would silently become two lines, the second of which is
+not a comment and would be read as data. And one bare string where a sequence
+belongs is refused: `comments="sn: POD01"` satisfies `Sequence[str]` for a type
+checker, so nothing but a runtime check stops it being iterated character by
+character into `# s`, `# n`, `# :`. Pass `comments=["sn: POD01"]`. An element
+that is not a string is refused on the same grounds — convert it yourself, so
+the text recorded is the text you meant rather than whatever `str()` made of
+it.
+
+The same is available as `comments=[...]` on `export_csv` and
+`export_decimated_csv`, which keeps the atomic write and the row-count check
+that hand-rolling the preamble would give up.
 
 ### `--window START:END` — export a slice
 

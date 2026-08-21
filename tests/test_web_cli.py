@@ -153,3 +153,52 @@ def test_a_real_server_serves_the_console_and_shuts_down_cleanly(tmp_path):
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=10)
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGUSR1"), reason="needs a spare catchable signal to stand in"
+)
+def test_ctrl_break_is_made_to_raise_the_way_ctrl_c_does(monkeypatch):
+    """The mechanism behind a clean Windows shutdown, exercised anywhere.
+
+    uvicorn restores the handler that was installed before it and then
+    re-raises the signal, so whether `serve` gets its `KeyboardInterrupt`
+    depends entirely on what that restored handler does. On SIGINT it is
+    Python's `default_int_handler` and it raises. `SIGBREAK` has no such
+    handler -- Python leaves it at the C runtime's default, which terminates
+    the process with exit code 3 -- so a console stopped with Ctrl-Break died
+    before it could print the session's audit record.
+
+    `SIGBREAK` only exists on Windows, so the substitution is what makes this
+    checkable on the platforms most of the work happens on: the helper reads
+    the name off the `signal` module, and any catchable signal proves the same
+    sequence. The real thing is covered on Windows by the end-to-end test
+    above, which is where the bug was found.
+    """
+    from ppk2lab_web import server
+
+    monkeypatch.setattr(signal, "SIGBREAK", signal.SIGUSR1, raising=False)
+    original = signal.getsignal(signal.SIGUSR1)
+    try:
+        with server._ctrl_break_raises_keyboard_interrupt():
+            assert signal.getsignal(signal.SIGUSR1) is signal.default_int_handler
+            # Not just the assignment: the sequence uvicorn actually performs.
+            with pytest.raises(KeyboardInterrupt):
+                signal.raise_signal(signal.SIGUSR1)
+        # And it puts back what it found, so nothing outside this server's run
+        # inherits an interrupt handler it never asked for.
+        assert signal.getsignal(signal.SIGUSR1) is original
+    finally:
+        signal.signal(signal.SIGUSR1, original)
+
+
+def test_without_the_signal_the_helper_does_nothing(monkeypatch):
+    """On a platform with no `SIGBREAK` -- every one but Windows -- it is a
+    no-op rather than an error, and it never touches `SIGINT`."""
+    from ppk2lab_web import server
+
+    monkeypatch.delattr(signal, "SIGBREAK", raising=False)
+    before = signal.getsignal(signal.SIGINT)
+    with server._ctrl_break_raises_keyboard_interrupt():
+        assert signal.getsignal(signal.SIGINT) is before
+    assert signal.getsignal(signal.SIGINT) is before

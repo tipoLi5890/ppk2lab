@@ -226,6 +226,28 @@ over SSH.
   allowlist, so nothing was hiding; what was wrong was the audit's completeness,
   which is the only property that makes it worth running.
 
+- **On Windows, stopping the console with Ctrl-Break threw away its audit
+  record.** uvicorn handles every signal in `HANDLED_SIGNALS` -- which on
+  Windows includes `SIGBREAK` -- shuts down gracefully, restores the handler
+  that was installed before it, and re-raises the signal. That last step is why
+  `serve` catches `KeyboardInterrupt`: on SIGINT the restored handler is
+  Python's `default_int_handler`, which raises one. `SIGBREAK` has no such
+  handler. Python installs `default_int_handler` for `SIGINT` only and leaves
+  `SIGBREAK` at the C runtime's default, which terminates the process rather
+  than raising anything. So `ppk2lab web` exited 3 instead of 0 and printed
+  nothing, on a command whose deliverable is the record it prints when it
+  stops. The device was never at risk: it is
+  closed by the lifespan hook, well before the re-raise. The server now
+  installs `default_int_handler` for `SIGBREAK` itself, so the handler uvicorn
+  restores is one that raises and both keys reach the same `except`. Found by
+  CI on all four Windows jobs the first time this branch ran there.
+
+- **A test took whatever binary frame arrived first and assumed it was
+  samples.** Two kinds share the socket, and the histogram is published on its
+  own timer, so on a loaded runner it can beat the first bucket batch out --
+  `not a bucket frame: tag 0x02`, on Python 3.14 under CI load. The test now
+  matches on the tag, the way the histogram test beside it already did.
+
 ## [0.4.0] — 2026-08-21
 
 A minor release that adds a second shipped package and no new behaviour to the

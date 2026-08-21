@@ -100,8 +100,15 @@ def test_a_socket_starts_with_hello_and_then_samples(harness):
 
         for _ in range(80):
             message = ws.receive()
-            if message.get("bytes"):
-                batch = protocol.unpack_buckets(message["bytes"])
+            frame = message.get("bytes")
+            # Two kinds of binary frame share this socket and neither is
+            # promised first: the histogram is published on its own timer, so
+            # on a loaded machine it can beat the first bucket batch out. Match
+            # on the tag rather than taking whatever arrives, which is what
+            # `test_a_console_that_attaches_late_is_sent_the_histogram` below
+            # already does.
+            if frame and frame[0] == protocol.TAG_BUCKETS:
+                batch = protocol.unpack_buckets(frame)
                 assert batch["count"] >= 1
                 return
         pytest.fail("no bucket frame arrived")

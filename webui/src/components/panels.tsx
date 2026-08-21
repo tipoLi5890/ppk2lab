@@ -10,7 +10,7 @@ import {
 } from "../core/constants";
 import { fmtCurrent, fmtInt, fmtPercent } from "../core/format";
 import { histQuantile } from "../core/histogram";
-import type { DataSource, DeviceSnapshot } from "../data/source";
+import { ControlRejected, type DataSource, type DeviceSnapshot, type RecordResult } from "../data/source";
 import { useTicker } from "../hooks";
 import { useI18n, type MessageKey } from "../i18n";
 import { Mode } from "../types";
@@ -481,11 +481,35 @@ function parseDuration(s: string): number | null {
   return m[2] === "ms" ? v / 1000 : m[2] === "m" ? v * 60 : v;
 }
 
-export function RecordPanel({ unlocked }: { unlocked: boolean }) {
+export function RecordPanel({
+  unlocked,
+  source,
+}: {
+  unlocked: boolean;
+  source: DataSource;
+}) {
   const { t } = useI18n();
   const [duration, setDuration] = useState("30s");
+  const [output, setOutput] = useState("run.ppk2a");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<RecordResult | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
   const seconds = parseDuration(duration) ?? 30;
   const plain = (k: MessageKey) => t(k).replace(/<[^>]+>/g, "");
+  const recorder = source.recorder;
+
+  const start = () => {
+    if (!recorder || busy) return;
+    setBusy(true);
+    setFailure(null);
+    recorder
+      .start({ durationS: seconds, output })
+      .then(setResult)
+      .catch((err: unknown) =>
+        setFailure(err instanceof ControlRejected ? t(err.code as MessageKey, ...err.args) : String(err)),
+      )
+      .finally(() => setBusy(false));
+  };
 
   return (
     <div className="cols">
@@ -500,12 +524,26 @@ export function RecordPanel({ unlocked }: { unlocked: boolean }) {
           </div>
           <Field label={t("rc_or")} defaultValue="" type="number" />
         </div>
-        <Field label={t("rc_out")} defaultValue="run.ppk2a" />
-        <Field label={t("rc_tags")} defaultValue="sn=POD01, fw=0.3.0" />
-        {unlocked ? (
-          <button type="button" className="btn primary" style={{ marginTop: 6 }}>
+        <div className="field">
+          <span className="lbl">{t("rc_out")}</span>
+          <input type="text" value={output} onChange={(e) => setOutput(e.target.value)} />
+        </div>
+        <Field label={t("rc_tags")} defaultValue="" />
+        {/* A recording cannot be stopped once it starts, so the operator is
+            told that before the button rather than after it. */}
+        <p className="note" dangerouslySetInnerHTML={{ __html: t("rc_nocancel") }} />
+        {!recorder ? (
+          <p className="note" dangerouslySetInnerHTML={{ __html: t("rc_needs_server") }} />
+        ) : unlocked ? (
+          <button
+            type="button"
+            className="btn primary"
+            style={{ marginTop: 6 }}
+            disabled={busy}
+            onClick={start}
+          >
             <Icon name="record" />
-            <span>{t("rc_start")}</span>
+            <span>{busy ? t("rc_running", duration) : t("rc_start")}</span>
           </button>
         ) : (
           <p className="lockedhint">
@@ -513,6 +551,7 @@ export function RecordPanel({ unlocked }: { unlocked: boolean }) {
             <span>{t("rc_locked")}</span>
           </p>
         )}
+        {failure && <p className="note badish">{failure}</p>}
       </div>
 
       <div>
@@ -530,6 +569,19 @@ export function RecordPanel({ unlocked }: { unlocked: boolean }) {
 
       <div>
         <span className="lbl">{t("rc_recent")}</span>
+        {result ? (
+          <p
+            className="note"
+            dangerouslySetInnerHTML={{
+              __html: t(
+                "rc_done",
+                result.path ?? "—",
+                fmtInt(result.stored_samples),
+                result.gap_count,
+              ),
+            }}
+          />
+        ) : null}
         <dl className="kv">
           <dt>—</dt>
           <dd>{t("rc_none")}</dd>

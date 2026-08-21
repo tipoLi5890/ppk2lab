@@ -21,6 +21,9 @@ import {
   type DeviceConfig,
   type DeviceSnapshot,
   type PlanPreview,
+  type RecordOptions,
+  type RecordResult,
+  type Recorder,
 } from "./source";
 
 /**
@@ -306,11 +309,15 @@ export class WebSocketSource implements DataSource {
     return result.steps;
   }
 
-  async record(options: Record<string, unknown>): Promise<Record<string, unknown>> {
-    // A recording writes an artifact and cannot be interrupted, so it is bound
-    // by a duration the operator chose and waited for in full.
-    return (await this.command("record", { options }, 0)) as Record<string, unknown>;
-  }
+  /**
+   * A recording writes an artifact and cannot be interrupted, so it is bound by
+   * a duration the operator chose and is waited for in full. No timeout: the
+   * request outlives every other one by design.
+   */
+  readonly recorder: Recorder = {
+    start: async (options: RecordOptions): Promise<RecordResult> =>
+      (await this.command("record", { options }, 0)) as RecordResult,
+  };
 
   private async command(
     op: string,

@@ -85,7 +85,7 @@ export function Inspector({ source, snapshot, events, readStats, controlUnlocked
           {open === "events" && <EventsPanel events={events} />}
           {open === "trig" && <TriggerPanel />}
           {open === "dec" && <DecoderPanel />}
-          {open === "rec" && <RecordPanel unlocked={controlUnlocked} />}
+          {open === "rec" && <RecordPanel unlocked={controlUnlocked} source={source} />}
           {open === "caps" && <CapabilitiesPanel />}
         </div>
       )}

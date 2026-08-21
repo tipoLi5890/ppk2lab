@@ -319,4 +319,8 @@ export const zhHans: Record<MessageKey, string> = {
   ev_desync: "这个浏览器跟不上，{0} 个样本被丢弃而非缓冲。这不是仪器遗失——设备有送出，是这个主控台没收到。",
   cfg_checking: "检查中…",
   ap_dryrun_confirmed: "已询问设备，它回复了 {0} 个步骤且全部 <code>applied: false</code>。目前没有任何东西被改变。",
+  rc_needs_server: "录制会写出 <code>.ppk2a</code> 文件，因此需要那个持有设备的服务器。模拟主控台没有东西可写。",
+  rc_running: "录制中……无法中断，会在 {0} 结束。",
+  rc_done: "已写出 <code>{0}</code>——{1} 个样本，{2} 个缺口。",
+  rc_nocancel: "录制一旦开始就无法停止：它会持有设备直到你设定的时间跑完。",
 };

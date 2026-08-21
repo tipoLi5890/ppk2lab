@@ -317,6 +317,10 @@ export const en = {
   ev_desync: "This browser fell behind and {0} samples were discarded rather than buffered. Not instrument loss — the device delivered them; this console did not receive them.",
   cfg_checking: "Checking…",
   ap_dryrun_confirmed: "The device was asked, and returned {0} step(s) with <code>applied: false</code>. Nothing has been changed.",
+  rc_needs_server: "Recording writes a <code>.ppk2a</code> artifact, so it needs the server that owns the device. The simulated console has nothing to write.",
+  rc_running: "Recording… it cannot be interrupted, and ends at {0}.",
+  rc_done: "Wrote <code>{0}</code> — {1} samples, {2} gap(s).",
+  rc_nocancel: "A recording cannot be stopped once it starts: it holds the device until the duration you set runs out.",
 } as const;
 
 /** Every string the console can show. Adding one here obliges the other three. */

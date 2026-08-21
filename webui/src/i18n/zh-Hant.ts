@@ -319,4 +319,8 @@ export const zhHant: Record<MessageKey, string> = {
   ev_desync: "這個瀏覽器跟不上，{0} 個樣本被丟棄而非緩衝。這不是儀器遺失——裝置有送出，是這個主控台沒收到。",
   cfg_checking: "檢查中…",
   ap_dryrun_confirmed: "已詢問裝置，它回覆了 {0} 個步驟且全部 <code>applied: false</code>。目前沒有任何東西被改變。",
+  rc_needs_server: "錄製會寫出 <code>.ppk2a</code> 檔案，因此需要那個持有裝置的伺服器。模擬主控台沒有東西可寫。",
+  rc_running: "錄製中……無法中斷，會在 {0} 結束。",
+  rc_done: "已寫出 <code>{0}</code>——{1} 個樣本，{2} 個缺口。",
+  rc_nocancel: "錄製一旦開始就無法停止：它會持有裝置直到你設定的時間跑完。",
 };

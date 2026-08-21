@@ -8,7 +8,7 @@ import { Inspector } from "./components/Inspector";
 import { Rail } from "./components/Rail";
 import { StatusBar, type DrawerPane } from "./components/StatusBar";
 import { errorMessage } from "./data/codes";
-import { SimulatedSource } from "./data/simulated";
+import { getSource } from "./data/select";
 import { ApplyDialog } from "./components/ApplyDialog";
 import {
   ControlRejected,
@@ -22,13 +22,15 @@ import { I18nContext, detectLanguage, translate, type MessageKey } from "./i18n"
 import { Mode } from "./types";
 
 /**
- * Pick the source once.
+ * Pick the source once per tab.
  *
- * Today it is always the simulated device; when the Python supervisor lands, a
- * `WebSocketSource` slots in here and nothing below this line changes.
+ * Memoised at module scope inside `select.ts` rather than here: React Fast
+ * Refresh remounts this component on every edit to it, and a fresh source
+ * means a fresh socket against a server whose whole premise is that one
+ * process owns the port.
  */
 function createSource(): DataSource {
-  return new SimulatedSource();
+  return getSource();
 }
 
 export default function App() {
@@ -123,10 +125,19 @@ export default function App() {
     [lang],
   );
 
-  /** Stage the draft for confirmation. Nothing is sent until the dialog resolves. */
+  const [staging, setStaging] = useState(false);
+
+  /**
+   * Stage the draft for confirmation.
+   *
+   * The dialog says "no byte has reached the wire", and now that is a fact
+   * about the device rather than about this component: the plan is sent as a
+   * dry run first, and what the dialog shows is the before and after the
+   * device itself projected, with the warnings it raised. Nothing is applied.
+   */
   const proposeDraft = useCallback(() => {
-    if (diff.length === 0) return;
-    setPlan({
+    if (diff.length === 0 || staging) return;
+    const staged: ApplyPlan = {
       changes: diff.map((d) =>
         d.field === "mode"
           ? { kind: "mode" as const, mode: draft.mode }
@@ -137,8 +148,16 @@ export default function App() {
       stopOutputFirst: outputOn,
       restartOutput: false,
       interruptsStream: true,
-    });
-  }, [diff, draft, outputOn]);
+    };
+    setStaging(true);
+    source
+      .previewPlan(staged)
+      .then((preview) =>
+        setPlan({ ...staged, interruptsStream: preview.interruptsStream, preview }),
+      )
+      .catch(reject)
+      .finally(() => setStaging(false));
+  }, [diff, draft, outputOn, source, reject, staging]);
 
   /**
    * Arming asks; disarming does not.
@@ -153,13 +172,19 @@ export default function App() {
       source.apply({ kind: "dut-power", on: false }).catch(reject);
       return;
     }
-    setPlan({
+    const staged: ApplyPlan = {
       changes: [{ kind: "dut-power", on: true }],
       diff: [{ field: "dut_power", from: "false", to: "true" }],
       stopOutputFirst: false,
       restartOutput: false,
       interruptsStream: false,
-    });
+    };
+    setStaging(true);
+    source
+      .previewPlan(staged)
+      .then((preview) => setPlan({ ...staged, preview }))
+      .catch(reject)
+      .finally(() => setStaging(false));
   }, [outputOn, source, reject]);
 
   const commitPlan = useCallback(
@@ -172,6 +197,11 @@ export default function App() {
     [plan, source, reject],
   );
 
+    const connection = snapshot.connection;
+  // Connected means this console can see the device. It is not the same as the
+  // device measuring, and the difference is exactly what an operator needs
+  // when a link drops: the trace freezes, and the instrument does not.
+  const connected = connection.phase === "simulated" || connection.phase === "open";
   const streaming = snapshot.state.measuring;
 
   // Why energising VOUT right now would be pointless, or impossible to verify.
@@ -191,8 +221,12 @@ export default function App() {
         <Rail
           info={snapshot.info}
           simulated={source.simulated}
+          connection={connection}
+          connected={connected}
           streaming={streaming}
-          onToggleStream={() => (streaming ? source.stopStream() : source.startStream())}
+          onToggleStream={() =>
+            void (streaming ? source.stopStream() : source.startStream()).catch(reject)
+          }
           controlUnlocked={controlUnlocked}
           onToggleControl={() => setControlUnlocked((v) => !v)}
           onToggleTheme={toggleTheme}
@@ -200,6 +234,7 @@ export default function App() {
           onToggleOutput={toggleOutput}
           outputCaveat={outputCaveat}
           dirtyCount={diff.length}
+          staging={staging}
           onApplyDraft={proposeDraft}
           onRevertDraft={() => setDraft(applied)}
         />

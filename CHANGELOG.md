@@ -170,6 +170,23 @@ stays `1`: nothing was removed, renamed, or given a new meaning, and every
 
 ### Fixed
 
+- **A device another process was holding was reported as missing.** With a real
+  PPK2 attached and one of its two ports held by another application, the
+  port-role probe tried both, collected what each said, and raised
+  `DEVICE_NOT_FOUND` (exit 3) — contradicting the `discover()` that had just
+  found the device by serial, and sending a reader to check a cable that was
+  fine. The failures are now told apart: a port the host refused to hand over
+  raises `PORT_BUSY` (exit 4) with a message that says the device *is* present
+  and a remediation about closing the other application, while ports that
+  simply never answered still raise `DEVICE_NOT_FOUND`. Both ports are still
+  named with their own reason either way; only the classification changed.
+
+  `docs/agent-interface.md` tells an agent to branch on `code`, so the
+  difference between "not there" and "someone else has it" has to survive into
+  the code and not only into the prose.
+
+  Found and verified on hardware.
+
 - **A stream gave the device back before it had stopped using it.** The
   teardown in `PPK2.stream()` cleared the claim first and only then stopped the
   reader, stopped the measurement and drained the port. `_require_no_active_stream`

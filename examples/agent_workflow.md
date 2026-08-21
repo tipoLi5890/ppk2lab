@@ -254,5 +254,6 @@ known-load check used a ±5% resistor, which rules out a gross error and
 nothing finer), Windows or Linux, a second unit, UART or SPI on real signals
 (there is no MCU fixture, so no decoder error rate has been measured), hot
 unplug, multi-device sessions, a load at a range boundary, and any run longer
-than 60 s. When a conclusion depends on one of those, report it as unmeasured
-rather than assumed.
+than 60 s. The browser console that `ppk2lab web` serves belongs on the same
+list — it has never driven a physical device. When a conclusion depends on one
+of those, report it as unmeasured rather than assumed.

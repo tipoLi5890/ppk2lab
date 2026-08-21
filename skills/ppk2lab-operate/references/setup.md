@@ -36,7 +36,9 @@ Nothing here changes hardware state.
    - `PERMISSION_DENIED` (Linux): add user to dialout/uucp or install the
      udev rule for VID 1915 / PID c00a, then replug.
    - `PORT_BUSY`: close the official Power Profiler app or other serial
-     clients.
+     clients — including a `ppk2lab web` server of your own, which holds the
+     device for the whole life of the process. A device that is attached but
+     held reports `PORT_BUSY`, not `DEVICE_NOT_FOUND`.
    - `DEVICE_NOT_FOUND`: reseat cable, then `ppk2lab discover --json`.
    - Port roles `unknown`: expected on macOS, which exposes no USB
      interface numbers — both CDC ports of the measured unit reported

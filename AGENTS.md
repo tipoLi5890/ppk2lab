@@ -32,6 +32,17 @@ pytest                       # 100% pass, no hardware required
 ruff check src tests && ruff format --check src tests
 mypy
 ppk2lab --simulate doctor    # CLI smoke test
+ppk2lab --simulate web --http-port 0   # the console; Ctrl-C exits 0
+```
+
+Touching `webui/` adds a second loop, and the rebuilt bundle has to be
+committed with the change. Nothing rebuilds it at install time, so CI compares
+the shipped bundle against its sources and fails when they disagree — a stale
+console would otherwise ship with every other check green:
+
+```bash
+cd webui && npm run typecheck && npm test && npm run build
+git status --porcelain -- ../src/ppk2lab_web/static   # commit what changed
 ```
 
 A change is complete only when code, tests, schemas, docs, error behavior,

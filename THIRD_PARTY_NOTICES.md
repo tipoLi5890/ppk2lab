@@ -17,8 +17,9 @@ release gate.
   (for example `attrs`, `jsonschema-specifications`, `referencing`, `rpds-py`
   behind `jsonschema`; `iniconfig`, `packaging`, `pluggy`, `pygments` behind
   `pytest`; `pathspec`, `mypy_extensions`, `typing_extensions`, `ast-serialize`,
-  `librt` behind `mypy`), since none of those are shipped with `ppk2lab` and
-  none are runtime dependencies of the published package.
+  `librt` behind `mypy`; `httpcore2` and `truststore` behind `httpx2`), since
+  none of those are shipped with `ppk2lab` and none are runtime dependencies
+  of the published package.
 - **Allowlist policy**: MIT, BSD (2-Clause or 3-Clause), Apache-2.0, and
   PSF-compatible licenses are pre-approved for both runtime and development
   use. Any dependency outside this allowlist requires explicit review before
@@ -73,12 +74,20 @@ Installed only via the `dev` extra (`pip install "ppk2lab[dev]"`) for
 contributors and CI. These are build/test/lint tooling and are **not
 distributed with the `ppk2lab` package** on PyPI.
 
+The `dev` extra also installs `ppk2lab[web]`, so the `web` table above covers a
+development environment too. It is there deliberately: without it mypy would
+type every Starlette symbol in `ppk2lab_web` as `Any` and the server tests
+would have to skip -- a suite that reports green while proving nothing about
+half the release. `httpx2` is in the same position for
+`starlette.testclient`, which raises at import time without it.
+
 | Package | Declared constraint | License (as verified) | Project URL | Allowlist verdict |
 |---|---|---|---|---|
 | pytest | `>=8` | MIT (metadata `License-Expression: MIT`) — verified from `pytest-9.1.1.dist-info/METADATA` (installed: 9.1.1) | https://docs.pytest.org/en/latest/ | Allowed (MIT) |
 | ruff | `>=0.6` | MIT (metadata `License-Expression: MIT`) — verified from `ruff-0.16.3.dist-info/METADATA` (installed: 0.16.3) | https://docs.astral.sh/ruff | Allowed (MIT) |
 | mypy | `>=1.10` | MIT (metadata `License-Expression: MIT`) — verified from `mypy-2.3.1.dist-info/METADATA` (installed: 2.3.1) | https://www.mypy-lang.org/ | Allowed (MIT) |
 | jsonschema | `>=4.21` | MIT (metadata `License-Expression: MIT`) — verified from `jsonschema-4.26.0.dist-info/METADATA` (installed: 4.26.0) | https://github.com/python-jsonschema/jsonschema | Allowed (MIT) |
+| httpx2 | `>=2` | BSD-3-Clause (metadata `License-Expression: BSD-3-Clause`) — verified from `httpx2-2.12.0.dist-info/METADATA` (installed: 2.12.0) | https://github.com/encode/httpx | Allowed (BSD) |
 
 ## Bundled frontend dependencies
 

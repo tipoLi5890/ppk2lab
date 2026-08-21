@@ -187,6 +187,45 @@ over SSH.
   handled that way now; anything after it runs the full shutdown, which
   restores the power state the session started with.
 
+- **The documented exit-4 set had grown past the sentence describing it.**
+  `docs/SPEC.md` said `PERMISSION_DENIED`, `PORT_BUSY`, `TRANSPORT_ERROR` and
+  `STREAM_STALLED` were "all four" of exit 4 and all meant "the host cannot
+  talk to this device right now". `LISTEN_ADDRESS_IN_USE` makes five, and it
+  is `ppk2lab web` finding its TCP port taken -- which says nothing about the
+  instrument. The exit code did not change; the reading of it did, and a
+  frozen-contract document is the wrong place to be one release behind.
+
+- **`tests/test_docs_cli_surface.py` never read `INSTALL.md`.** The test runs
+  every documented `ppk2lab` invocation against the real parser, which is what
+  keeps a renamed flag from surviving in prose -- and `ROADMAP.md` gate 2 names
+  `INSTALL.md` in the same breath as the README. But the file was not in the
+  glob list, so its seven commands, the first ones anyone runs, went unchecked.
+  It now reads `INSTALL.md` and the three working-agreement files whose
+  verification loops a contributor or an agent executes verbatim; 26 previously
+  unverified invocations came under the test. `CHANGELOG.md` stays out on
+  purpose: it records what past releases did, so a since-renamed flag is
+  correct there and would fail there.
+
+- **The translated READMEs were missing the console.** `README.md`'s install
+  block gained three lines for `pip install 'ppk2lab[web]'` and
+  `ppk2lab --simulate web`; the Traditional Chinese, Simplified Chinese and
+  Japanese READMEs did not, so the one command that runs this release's
+  headline feature appeared in one language out of four.
+
+- **Two working agreements documented a verification loop that could not
+  catch a stale console.** `AGENTS.md`, `CONTRIBUTING.md` and the pull-request
+  template each listed pytest, ruff, mypy and a CLI smoke test, and stopped
+  there. The frontend build is committed and CI fails when it disagrees with
+  its sources, so anyone following those files could edit `webui/`, see four
+  green checks, and be rejected by CI for a reason none of them mentioned.
+
+- **`THIRD_PARTY_NOTICES.md` did not list a declared dependency.** `httpx2`
+  has been in the `dev` extra since `0.5.0` -- `starlette.testclient` raises at
+  import time without it -- and the audit that claims to cover everything
+  `pyproject.toml` declares had no row for it. It is BSD-3-Clause and on the
+  allowlist, so nothing was hiding; what was wrong was the audit's completeness,
+  which is the only property that makes it worth running.
+
 ## [0.4.0] — 2026-08-21
 
 A minor release that adds a second shipped package and no new behaviour to the

@@ -92,11 +92,11 @@ Reproduce the README quickstart commands with `--simulate` /
 Re-run the dependency license scan and confirm `THIRD_PARTY_NOTICES.md`
 matches the current dependency set against the MIT/BSD/Apache-2.0 allowlist,
 each row verified from installed metadata — `ROADMAP.md` gate 6 and
-gating-audit gate 6. Three scopes: the core's runtime dependency (`pyserial`), the `web` extra
-(Starlette, uvicorn, websockets and their transitive set), **and** the npm
-packages compiled into `ppk2lab_web/static/app.js`, which no Python metadata
-mentions at all. Confirm their
-notices survived minification:
+gating-audit gate 6. Two scopes, as those gates define them. The Python one now
+has two halves: the core's runtime dependency (`pyserial`) and the `web` extra
+(Starlette, uvicorn, websockets and their transitive set). The second scope is
+the npm packages compiled into `ppk2lab_web/static/app.js`, which no Python
+metadata mentions at all. Confirm their notices survived minification:
 
 ```bash
 grep -c "@license" src/ppk2lab_web/static/app.js   # must be > 0

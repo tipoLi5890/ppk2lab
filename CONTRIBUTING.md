@@ -10,11 +10,26 @@ nothing claims to work without evidence.
 git clone https://github.com/tipoLi5890/ppk2lab
 cd ppk2lab
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev]"   # pulls the web extra too, so nothing skips
 pytest                # must pass without hardware
 ruff check src tests
 ruff format --check src tests
 mypy
+ppk2lab --simulate doctor --json
+ppk2lab --simulate web --http-port 0   # the browser console; Ctrl-C exits 0
+```
+
+The browser console's sources live in `webui/` (React, TypeScript, Vite) and
+its build is **committed** to `src/ppk2lab_web/static/`, so installing from
+PyPI never needs a Node toolchain. The cost is that the two can drift, so if
+you touch `webui/`, rebuild and commit the bundle in the same change — CI
+rebuilds it on every push and fails when the result differs:
+
+```bash
+cd webui
+npm install
+npm run typecheck && npm test && npm run build
+git status --porcelain -- ../src/ppk2lab_web/static   # commit what changed
 ```
 
 ## Ground rules

@@ -24,6 +24,10 @@ pytest
 ruff check src tests && ruff format --check src tests
 mypy
 ppk2lab --simulate doctor --json
+ppk2lab --simulate web --http-port 0
+
+# only if this change touches webui/:
+cd webui && npm run typecheck && npm test && npm run build
 ```
 
 <!-- If the change affects hardware behavior: which PPK2 firmware, OS, and
@@ -49,6 +53,9 @@ ppk2lab --simulate doctor --json
       annotations are emitted wherever data can drop).
 - [ ] JSON schemas, error codes, exit codes, and docs updated together with
       the change; CHANGELOG entry added for contract changes.
+- [ ] If `webui/` changed, the rebuilt bundle under `src/ppk2lab_web/static/`
+      is committed with it — CI fails when the shipped console and its
+      sources disagree.
 - [ ] New dependencies (if any) are MIT/BSD/Apache-2.0-compatible.
 - [ ] Commit messages follow Conventional Commits (e.g. `fix:`, `feat:`,
       `docs:`).

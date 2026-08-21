@@ -72,10 +72,21 @@ class Connection:
         return True
 
     def offer_data(self, frame: bytes) -> None:
-        """Queue a bucket frame, discarding rather than buffering without end."""
+        """Queue a sample frame, discarding rather than buffering without end."""
         if self._try_put(frame):
             return
-        self._discard_backlog()
+        kept = self._discard_backlog()
+        # The distribution is absolute state, not a stretch of timeline, so
+        # there is nothing to report about having dropped it and nothing gained
+        # by doing so -- one grid is 1.4 kB against a bucket stream that
+        # overflowed a hundred frames. Dropping it anyway is what made the
+        # panel freeze: under sustained back-pressure every periodic grid went
+        # into a discard, so "absolute values heal on the next frame" was true
+        # of every frame except the ones that never arrived. The newest survives
+        # the discard; the console assigns rather than accumulates, so a stale
+        # one landing before a newer one is harmless.
+        if kept is not None:
+            self._try_put(kept)
         self._try_put(frame)
 
     def _try_put(self, frame: bytes) -> bool:
@@ -85,13 +96,19 @@ class Connection:
             return False
         return True
 
-    def _discard_backlog(self) -> None:
+    def _discard_backlog(self) -> bytes | None:
+        """Empty the queue, returning the newest frame worth keeping."""
+        kept: bytes | None = None
         while True:
             try:
                 frame = self.data.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            if frame and frame[0] == protocol.TAG_HISTOGRAM:
+                kept = frame
+                continue
             self._note_discarded(frame)
+        return kept
 
     def _note_discarded(self, frame: bytes) -> None:
         if not frame or frame[0] != protocol.TAG_BUCKETS:

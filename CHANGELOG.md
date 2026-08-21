@@ -248,6 +248,26 @@ over SSH.
   `not a bucket frame: tag 0x02`, on Python 3.14 under CI load. The test now
   matches on the tag, the way the histogram test beside it already did.
 
+- **Back-pressure discarded the distribution grid, silently and permanently.**
+  When a console falls behind, its queued sample frames are dropped rather than
+  buffered, and it is told which stretch of the timeline it will not receive.
+  The drop emptied the whole queue, grids included -- and a grid is absolute
+  state, not a stretch of timeline, so nothing was reported about losing one.
+  The justification for sending absolute values, that the next frame heals a
+  dropped one, held for every frame except the ones that never arrived: under
+  sustained back-pressure every periodic grid went into a discard and the panel
+  sat frozen at whatever it held when the console attached, with the rest of
+  the screen still moving. Measured on the simulator at full tilt, one grid
+  survived per 120 messages -- the attach frame, and nothing after it. The
+  newest grid now survives the discard: three or four per 120 messages, which
+  is the 1 Hz cadence over the same four seconds. Sample frames are still
+  dropped and still reported, exactly as before.
+
+  Real hardware does not reach this. 100 kS/s is about 20 frames a second at
+  24 bytes a bucket, which a browser on loopback absorbs without noticing; it
+  takes a simulator with its rate limit removed to sustain the overflow. That
+  is what CI was running when it found this.
+
 ## [0.4.0] — 2026-08-21
 
 A minor release that adds a second shipped package and no new behaviour to the

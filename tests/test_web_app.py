@@ -7,6 +7,8 @@ no port, no flake. The device underneath is the simulator.
 from __future__ import annotations
 
 import asyncio
+import time
+from array import array
 from typing import Any
 
 import pytest
@@ -20,7 +22,7 @@ from ppk2lab_web import protocol, static_dir
 from ppk2lab_web.app import create_app
 from ppk2lab_web.buckets import Tier0Accumulator
 from ppk2lab_web.hub import DATA_QUEUE, Connection, Hub
-from ppk2lab_web.supervisor import Supervisor
+from ppk2lab_web.supervisor import HISTOGRAM_INTERVAL_S, Supervisor
 
 ORIGIN = "http://test.local"
 
@@ -417,6 +419,48 @@ def test_a_slow_console_is_told_exactly_what_it_missed():
     assert asyncio.run(scenario())
 
 
+def test_the_distribution_survives_a_discard():
+    """Dropping it buys nothing and costs a whole panel.
+
+    Sample frames are a stretch of timeline: dropping one is reportable, the
+    console draws it as a display gap, and the next frame carries the next
+    stretch. The distribution grid is absolute state -- there is no stretch to
+    report, and its "the next one heals it" argument is only true if a next one
+    arrives. Under sustained back-pressure none did: every periodic grid went
+    into a discard, and the panel sat frozen at whatever it held when the
+    console attached, with nothing on screen to say so.
+
+    Measured on the simulator at full tilt: one grid per 120 messages before,
+    which was the attach frame and nothing after it; three or four after, which
+    is the 1 Hz cadence over the same four seconds.
+    """
+
+    async def scenario():
+        connection = Connection("c1")
+        grid = protocol.pack_histogram(array("d", [7.0] * 170))
+        connection.offer_data(grid)
+        for i in range(DATA_QUEUE + 5):
+            connection.offer_data(_frame(i * 100, 1))
+
+        frames = []
+        while not connection.data.empty():
+            frames.append(connection.data.get_nowait())
+        kept = [f for f in frames if f[0] == protocol.TAG_HISTOGRAM]
+        assert len(kept) == 1, "the newest grid, and only it, should survive"
+        assert protocol.unpack_histogram(kept[0])[0] == 7.0
+
+        # And the sample frames it did drop are still reported: keeping the
+        # grid must not quietly absorb a real gap. The queue held the grid plus
+        # `DATA_QUEUE - 1` sample frames, and the grid is not one of them.
+        note = connection.take_desync()
+        assert note is not None
+        assert note["buckets_dropped"] == DATA_QUEUE - 1
+        assert note["from_index"] == 0
+        return True
+
+    assert asyncio.run(scenario())
+
+
 def test_control_messages_are_never_dropped():
     """A console that silently missed a state change would show hardware state
     that stopped being true."""
@@ -463,11 +507,20 @@ def test_a_console_that_attaches_late_is_sent_the_histogram(harness):
     rebuilt from buckets."""
     with TestClient(harness.app) as client, _open(harness, client) as ws:
         ws.receive_json()
-        for _ in range(120):
+        # Budgeted by the cadence rather than by a message count. The mix on
+        # this socket is not the test's to control -- the simulator here runs
+        # unthrottled, so a hundred sample frames can pass in the time one grid
+        # is due -- and counting messages made this depend on the attach frame
+        # in particular, which is one frame among a flood a slow reader may
+        # discard. Three intervals gives the periodic grid several turns.
+        deadline = time.monotonic() + 3 * HISTOGRAM_INTERVAL_S
+        seen = 0
+        while time.monotonic() < deadline and seen < 600:
             message = ws.receive()
+            seen += 1
             frame = message.get("bytes")
             if frame and frame[0] == protocol.TAG_HISTOGRAM:
                 bins = protocol.unpack_histogram(frame)
                 assert len(bins) == 169
                 return
-        pytest.fail("no histogram frame arrived")
+        pytest.fail(f"no histogram frame in {seen} messages")

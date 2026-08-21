@@ -112,6 +112,13 @@ gap and counts separately from instrument loss. A 400 kB/s producer against a
 slow consumer would otherwise be an OOM, and silently thinning a trace is the
 failure this project exists to prevent.
 
+Sample frames are the only thing discarded. The distribution grid is absolute
+state rather than a stretch of timeline, so there is nothing to report about
+dropping it and nothing saved by doing so; the newest one survives a discard.
+Control messages are never dropped at all — a console that silently missed a
+state change would show hardware state that had stopped being true, so past
+capacity the connection is closed instead.
+
 **The exclusive session has a safety asymmetry worth stating twice.** The
 server holds the port for the life of the process, which is what makes a
 powered measurement possible from a UI at all — and it means **closing the

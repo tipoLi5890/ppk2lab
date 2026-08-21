@@ -88,6 +88,11 @@ instrument itself:
   instrument failed to deliver.** A slow link produces a hatched span like a
   sample gap does, but it is tallied separately, because letting one look like
   the other would let a busy laptop look like a lossy instrument.
+- **A slow link costs samples, never the distribution.** Only sample frames are
+  discarded when a console falls behind. The distribution grid is absolute
+  state, so the newest one survives the discard and the panel keeps updating
+  — a frozen one, with the rest of the screen moving, would read as a settled
+  measurement rather than as a frame that never arrived.
 
 ## Safety in a user interface
 

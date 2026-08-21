@@ -10,7 +10,7 @@ contracts that must not drift.
   package, Python import, and CLI executable.
 - License: MIT (`LICENSE`), covering this repository's original material
   only; trademark and firmware boundaries are in `NOTICE.md`.
-- Versioning: `0.4.0` is the current release; `0.2.0` was the project's
+- Versioning: `0.5.0` is the current release; `0.2.0` was the project's
   first stable version. Stable numbering covers the machine-readable
   contracts, not the hardware validation, which is partial and tracked in
   `ROADMAP.md`. Semantic versioning applies from `0.2.0` onward, so a
@@ -29,19 +29,22 @@ contracts that must not drift.
   100 kS/s stream parser, calibration, canonical `.ppk2a` capture artifact,
   D0-D7 logic analysis + VCD, streaming UART/SPI decoders with enforced
   rate tiers, software triggers, per-event energy analysis, assertion DSL
-  with JSON/JUnit reports, a 13-command CLI with `--simulate`, sync/async
+  with JSON/JUnit reports, a 14-command CLI with `--simulate`, sync/async
   Python APIs, and versioned JSON schemas.
 - Published: public GitHub repository with CI (Linux/macOS/Windows ×
   Python 3.11-3.14) and a PyPI development preview released through the
   trusted-publishing workflow.
-- `0.4.0` adds a second shipped package, `ppk2lab_web`: a built browser
-  console (React sources in `webui/`, build committed to
-  `src/ppk2lab_web/static/`) and **nothing that serves it**. No `web` extra,
-  no console script, no subcommand — the server that owns the one open
-  session is the next piece of work. `docs/webui.md` says what is there.
+- `0.5.0` adds the server the console needed. `ppk2lab web` is the fourteenth
+  subcommand; `pip install 'ppk2lab[web]'` brings Starlette, uvicorn and
+  websockets, and the core still resolves to `pyserial` alone. The server owns
+  one open `PPK2` for its lifetime, is a viewer unless `--allow-control`, binds
+  loopback only, and refuses `--allow-control` anywhere else. React sources
+  stay in `webui/` with the build committed to `src/ppk2lab_web/static/`.
+  Nothing behind it has run against a physical device. `docs/webui.md` is the
+  reference.
 - Still open: hardware validation gates — see `ROADMAP.md`. They did not
-  gate `0.2.0` and do not gate `0.4.0`; what has and has not been validated
-  is stated there and in the README.
+  gate `0.2.0` and do not gate `0.5.0`; what has and has not been validated
+  is stated there and in the README. The console is now on that list too.
 - The frozen public surface is `docs/api-baseline.md`; data model and
   stability policy are `docs/SPEC.md`.
 
@@ -67,7 +70,10 @@ contracts that must not drift.
 
 ## Engineering expectations
 
-- Python ≥ 3.11; the only runtime dependency is `pyserial`.
+- Python ≥ 3.11; the core's only runtime dependency is `pyserial`, and that is
+  a contract the build asserts. The `web` extra adds Starlette, uvicorn and
+  websockets for `ppk2lab_web` alone; nothing under `ppk2lab/` may import them,
+  and the import in `cmd_web` stays inside the function body.
 - Keep transport, protocol, calibration, capture, decoders, analysis, CLI,
   and agent adapters separated; unit tests use the mock transport and never
   require hardware. State-changing hardware tests stay separate.
@@ -107,6 +113,7 @@ pytest                                   # no hardware required
 ruff check src tests && ruff format --check src tests
 mypy
 ppk2lab --simulate doctor --json         # CLI smoke test
+ppk2lab --simulate web --http-port 0     # the console; Ctrl-C exits 0
 ```
 
 Touching `webui/` adds one more loop, and the build has to be committed with

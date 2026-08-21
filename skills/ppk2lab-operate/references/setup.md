@@ -4,7 +4,7 @@ Nothing here changes hardware state.
 
 1. `ppk2lab --version` — if missing, `pip install ppk2lab` (or
    `pip install -e ".[dev]"` from a checkout). Check the version before
-   trusting anything here: this skill describes `0.4.0`. `inspect`,
+   trusting anything here: this skill describes `0.5.0`. `inspect`,
    `--max-samples`, `--window` and `--state-threshold` arrived in `0.2.0`;
    `compare` and `--tag` arrived in `0.3.0`. On an older build they fail with
    a usage error rather than doing something surprising.

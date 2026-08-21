@@ -91,6 +91,13 @@ jobs:
           assert 'License-Expression: MIT' in meta, 'wheel does not declare License-Expression: MIT'
           for name in ('LICENSE', 'NOTICE.md'):
               assert 'License-File: ' + name in meta, 'wheel omits License-File: ' + name
+          # The promise a plain `pip install ppk2lab` makes. Re-checked here
+          # because this job builds its own dist/ and an upload cannot be undone.
+          base = [l for l in meta.splitlines()
+                  if l.startswith('Requires-Dist:') and 'extra ==' not in l]
+          assert base == ['Requires-Dist: pyserial>=3.5'], base
+          assert 'Provides-Extra: web' in meta, 'wheel does not declare the web extra'
+          assert 'ppk2lab_web/server.py' in names, 'wheel omits the server'
           "
       - uses: actions/upload-artifact@v4
         with:

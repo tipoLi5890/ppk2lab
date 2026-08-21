@@ -10,14 +10,21 @@ pipx install ppk2lab        # recommended for CLI use
 # or inside a virtual environment:
 python -m venv .venv && source .venv/bin/activate
 pip install ppk2lab
+
+# optional: the browser console and the server that runs it
+pip install 'ppk2lab[web]'
 ```
 
-> `0.4.0` is the current release and `0.2.0` was the first stable one, so plain
+> `0.5.0` is the current release and `0.2.0` was the first stable one, so plain
 > `pip install ppk2lab` resolves it. Stable numbering covers the machine-readable contracts, not the hardware
 > validation behind them: that is partial — one unit, macOS only, and no
 > decoder has read a real signal yet. `ROADMAP.md` names what is outstanding.
 > To follow work newer than the release, install from a source checkout
 > (below).
+>
+> `ppk2lab web` needs the `web` extra. Without it the command still exists —
+> it is in `--help` and in `capabilities` — and exits 7 (`WEB_EXTRA_MISSING`)
+> naming the package that is missing. Every other command works without it.
 
 From a development checkout:
 

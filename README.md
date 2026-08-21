@@ -24,12 +24,13 @@
 - work with hour-scale captures: read a manifest without its samples, read one window, or export a decimated summary;
 - trigger captures from current, digital state, UART content, or SPI transactions;
 - run reproducible power assertions in local automation and CI;
+- watch a live device in a browser: `ppk2lab web` serves a console with the current trace, D0-D7 on the same timeline, and — only with `--allow-control` — the controls that change device state;
 - say when the samples cannot support an answer — dropped samples, ADC saturation, a window with no data in it — instead of returning a confident number;
 - try everything without hardware via `--simulate`.
 
 ## Install
 
-The core package requires Python 3.11 or newer. `pyserial` is the only runtime dependency.
+The core package requires Python 3.11 or newer. `pyserial` is the only runtime dependency. The browser console needs a server, and that server is opt-in: `pip install 'ppk2lab[web]'`.
 
 ```bash
 pipx install ppk2lab        # recommended for the CLI
@@ -38,9 +39,13 @@ pip install ppk2lab
 
 ppk2lab --version
 ppk2lab doctor --json
+
+# optional: the browser console
+pip install 'ppk2lab[web]'
+ppk2lab --simulate web      # http://127.0.0.1:8765/, no hardware needed
 ```
 
-`0.4.0` is the current release and `0.2.0` was the first stable one, so a plain `pip install ppk2lab` resolves it. It is labelled experimental on purpose: the toolchain is heavily tested without hardware, and the properties that keep a measurement honest are enforced rather than assumed — but the hardware validation behind it is partial. One unit, macOS only, and no decoder has yet read a real signal. [Roadmap](#roadmap) says exactly what that covers and what it does not; read it before you trust a number.
+`0.5.0` is the current release and `0.2.0` was the first stable one, so a plain `pip install ppk2lab` resolves it. It is labelled experimental on purpose: the toolchain is heavily tested without hardware, and the properties that keep a measurement honest are enforced rather than assumed — but the hardware validation behind it is partial. One unit, macOS only, and no decoder has yet read a real signal. [Roadmap](#roadmap) says exactly what that covers and what it does not; read it before you trust a number.
 
 Run from a development checkout:
 
@@ -136,6 +141,7 @@ These commands are implemented today. Every JSON contract carries `schema_versio
 | `assert` | Apply reproducible power and protocol regression rules | Offline |
 | `compare` | Difference two captures on one metric, with an error bar that says whether the instrument's gain error cancelled | Offline |
 | `export` | Create CSV, VCD, JSONL, windowed, and decimated views without replacing raw evidence | Offline |
+| `web` | Serve the browser console on a local HTTP + WebSocket listener | Viewer; state-changing only with `--allow-control` |
 
 ## Scope and physical limits
 
@@ -171,6 +177,7 @@ Every capture reports the samples it lost. Most of the loss `0.2.0` measured tur
 - Mode changes, DUT power, source voltage, and reset operations report the previous and resulting state.
 - On completion or failure, the library attempts to restore the session's starting power state and records whether restoration succeeded.
 - No plugin hook or skill may automatically enable DUT power, change voltage, or reset a device.
+- `ppk2lab web` is a viewer unless `--allow-control` is given, binds `127.0.0.1`, and refuses `--allow-control` on any other address. It can never reset the device, set a user gain, choose which device to open, or raise the session's voltage ceiling. Because the server holds the port for its whole lifetime, **closing the browser tab does not de-energise VOUT — only stopping the server does.**
 
 ## Use with AI agents
 
@@ -239,7 +246,7 @@ See [docs/sources.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/sourc
 
 ## Roadmap
 
-`0.4.0` is released. What is still open is validation rather than implementation, and it is worth knowing which is which. One hardware session on 2026-08-20 ran the tool end to end on a single unit — firmware fingerprint `HW=49625 IA=59.0 keys=40 ports=2`, macOS on Apple silicon — covering discovery, metadata, calibrated capture at 100 kS/s, interruption recovery, and every offline command. These are **not** validated, and each needs hardware that session did not have:
+`0.5.0` is released. What is still open is validation rather than implementation, and it is worth knowing which is which. One hardware session on 2026-08-20 ran the tool end to end on a single unit — firmware fingerprint `HW=49625 IA=59.0 keys=40 ports=2`, macOS on Apple silicon — covering discovery, metadata, calibrated capture at 100 kS/s, interruption recovery, and every offline command. These are **not** validated, and each needs hardware that session did not have:
 
 - a physical pass on Windows and on Linux, where the OS reports the USB interface numbers macOS does not;
 - a second unit and a second firmware fingerprint, only one of each having been seen;
@@ -248,7 +255,7 @@ See [docs/sources.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/sourc
 - hot-unplug recovery, an 8-24 h soak run, and a multi-device session — plus a bandwidth sweep and a load that crosses a current-range boundary;
 - Claude Code and Codex skill installation verified against the current releases, and the documentation and examples reproduced from a clean environment.
 
-One thing `0.4.0` adds is finished but not yet usable: the wheel now carries a built browser console under `ppk2lab_web`, and nothing that serves it. There is no extra to install and no command to start it — the server that owns the PPK2 session is the next piece of work. [docs/webui.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/webui.md) says what is there and what it cannot do yet.
+The browser console `0.4.0` shipped without a server has one in `0.5.0`: `pip install 'ppk2lab[web]'` and `ppk2lab web`. It has not been run against a physical PPK2 either — every test behind it uses the simulator, which exercises the protocol and the state machine but not the instrument. [docs/webui.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/webui.md) says what it does, what it refuses to do, and what has not been proven.
 
 The decoder support tiers are named for the rate each was designed against, not for a measured error rate — nothing has been measured yet. Validation that needs hardware has no CI workflow and is not meant to, so the maintainer runs it on the bench and fills in the compatibility matrix as units and platforms are covered. See [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md) for that matrix and for what is deliberately not being built.
 
@@ -273,7 +280,7 @@ The decoder support tiers are named for the rate each was designed against, not 
 | [docs/energy-analysis.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/energy-analysis.md) | Charge, energy, peak-current, and latency definitions |
 | [docs/agent-interface.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/agent-interface.md) | JSON, tools, state-changing operations, and context budgets |
 | [docs/sources.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/sources.md) | Nordic official documentation and repository references |
-| [docs/webui.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/webui.md) | The browser console: what ships in 0.4.0, and what has no server yet |
+| [docs/webui.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/webui.md) | The browser console: running it, what `--allow-control` does and does not allow, and the wire it speaks |
 | [SECURITY.md](https://github.com/tipoLi5890/ppk2lab/blob/main/SECURITY.md) | Hardware, USB, file, and untrusted-input security model |
 
 ## Contact

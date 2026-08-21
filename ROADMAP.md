@@ -1,6 +1,6 @@
 # Roadmap
 
-`0.4.0` is the current release; `0.2.0` was the project's first stable version.
+`0.5.0` is the current release; `0.2.0` was the project's first stable version.
 Stable numbering puts the machine-readable contracts under the policy in
 [docs/SPEC.md](docs/SPEC.md#stability-policy); it is not a claim that the gates
 below have passed. Several need hardware this project has not had, and each
@@ -46,6 +46,15 @@ reference — so every other hardware gate below is still open.
   reference. (Running the same load through Nordic's official Power Profiler
   application answers a different question — whether this project's conversion
   path agrees with Nordic's, not what the instrument's error is.)
+- **The web console has never driven a physical device.** `0.5.0` ships the
+  server, and every test behind it uses the simulator — which exercises the
+  protocol, the supervisor and the state machine, but not the instrument.
+  Closing this needs a bench session that streams from a real PPK2 to a
+  browser, toggles DUT power mid-stream and sees the inrush on the trace,
+  applies a mode change and watches the stream break and resume, records a real
+  `.ppk2a` from the console, and pulls the cable while it is running. The
+  exclusive-session claim — that a second `ppk2lab` command gets `PORT_BUSY`
+  while the server holds the port — has the same status.
 - **Hot-unplug recovery.** The cable was never pulled mid-capture.
 - **8-24 h soak.** The longest capture so far is 60 s. Memory is no longer the
   obstacle; what this gate needs is bench time and disk.
@@ -55,12 +64,6 @@ reference — so every other hardware gate below is still open.
 
 ### Needs no hardware
 
-- **The web console has no server.** `0.4.0` ships the built console inside
-  `ppk2lab_web/static/` and nothing that serves it: no `web` extra, no console
-  script, no subcommand. Outstanding: the supervisor that owns the one open
-  `PPK2` session, a `WebSocketSource` to replace the browser-side simulation
-  the frontend runs against today, and evidence that a single session's
-  exclusive claim on the port behaves against a real device.
 - Codex plugin manifest verification against the current Codex release.
 - Docs/examples reproducibility check from a clean environment (gate 2).
 - Dependency license re-scan at tag time (audit in `THIRD_PARTY_NOTICES.md`).
@@ -104,7 +107,7 @@ Keyed on the firmware fingerprint that `ppk2lab info`, `doctor`, and every
 capture manifest record, because the measurement port reports no version
 string. One row per fingerprint actually attached; no row is written for a
 configuration nobody ran. The matrix covers the CLI and Python paths — the web
-console is not in it and cannot be until it has a server.
+console can be covered by it now, and no row records it yet.
 
 | Firmware fingerprint | Windows | macOS (Apple silicon) | macOS (Intel) | Linux | Multi-device | Hot unplug | 8-24 h soak |
 |---|---|---|---|---|---|---|---|
@@ -134,7 +137,9 @@ not applied; the measurements it does have are in `CHANGELOG.md`.
   across and past the 50 kHz Nyquist frequency. RMS and any high-frequency
   statistic wait on that answer.
 
-**Next.** The web console's server. Streaming decimation straight from an
+**Next.** Bench validation of the console against a real device. Coarse-tier
+backlog for a console that attaches to a session already running, so a second
+tab sees more than the last ten seconds. Streaming decimation straight from an
 artifact, without an in-memory capture. Battery-life estimation from the
 duty-cycle split — the deliverable is the caveat framework, not the arithmetic.
 
@@ -146,10 +151,12 @@ tolerance against a disciplined reference rather than against one host.
 **Explicitly not adopted.** A configurable acquisition rate — the hardware
 samples at 100 kS/s and decimation answers the real need. Smoothing by default
 — the raw series is the evidence and `--filtered` never replaces it. A second
-source of measurement logic — the console added in `0.4.0` reads the buckets
-the library produces and issues the state changes the CLI does; it will never
-compute its own answer, replace the raw artifact, or offer a route around the
-preview-then-apply gate. Automatic DUT power, forbidden by the safety contract
+source of measurement logic — the console reads the buckets the
+library produces and issues the state changes the CLI does. That is now
+enforced rather than intended: its decimation is a checked port of the
+frontend's, cross-verified by a shared vector; its recordings go through
+`run_capture`; and every state change goes through the same `set_*` method the
+CLI calls, after the same dry run. Automatic DUT power, forbidden by the safety contract
 and impossible anyway, since VOUT de-energizes within half a second of the USB
 host going away. Higher decoder tiers without fixture data.
 

@@ -23,7 +23,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: pip install -e ".[dev]"
+        # `dev` pulls in `web` itself, but naming it is where a reader looks:
+        # without it mypy types every Starlette symbol as Any and the server
+        # tests would skip -- a suite that reports green while proving nothing
+        # about half the release.
+        run: pip install -e ".[dev,web]"
       - name: Lint
         run: |
           ruff check src tests
@@ -42,6 +46,48 @@ jobs:
           ppk2lab --simulate capture --duration 200ms --output smoke.ppk2a --json > /dev/null
           ppk2lab decode smoke.ppk2a --uart D0 --baud 9600 --output smoke.jsonl --json > /dev/null
           ppk2lab assert smoke.ppk2a --rule "max_current < 1A" --json > /dev/null
+      - name: Web console smoke (simulated device, viewer only)
+        shell: bash
+        timeout-minutes: 5
+        # One inline Python block rather than a backgrounded shell job: kill and
+        # SIGINT semantics differ under Git-Bash on windows-latest, and a stray
+        # orphan would hang the runner.
+        run: |
+          python - <<'PY'
+          import json, os, signal, subprocess, sys, urllib.request
+
+          flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {}
+          proc = subprocess.Popen(
+              [sys.executable, "-m", "ppk2lab.cli.main", "--json", "--simulate",
+               "web", "--http-port", "0"],
+              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **flags)
+          try:
+              ready = None
+              for line in proc.stderr:
+                  if line.startswith("ppk2lab-web-ready "):
+                      ready = json.loads(line.split(" ", 1)[1])
+                      break
+              if ready is None:
+                  raise SystemExit("the server never announced a bound port")
+              assert ready["port"] != 0, "--http-port 0 did not report a real port"
+
+              with urllib.request.urlopen(ready["url"], timeout=10) as response:
+                  body = response.read()
+              assert response.status == 200 and b"app.js" in body, "the console was not served"
+
+              # Windows: uvicorn's HANDLED_SIGNALS includes SIGBREAK there.
+              sig = signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT
+              proc.send_signal(sig)
+              assert proc.wait(timeout=30) == 0, "a clean shutdown did not exit 0"
+              envelope = json.loads(proc.stdout.read())
+              assert envelope["ok"], envelope
+              assert envelope["result"]["control_enabled"] is False
+              assert envelope["result"]["simulated"] is True
+          finally:
+              if proc.poll() is None:
+                  proc.kill()
+                  proc.wait(timeout=10)
+          PY
       - name: Examples (simulated device)
         shell: bash
         run: |
@@ -102,6 +148,34 @@ jobs:
           /tmp/fresh/bin/pip install dist/*.whl
           /tmp/fresh/bin/ppk2lab --version
           PPK2LAB_SIMULATE=1 /tmp/fresh/bin/ppk2lab doctor --json > /dev/null
+      - name: A base install is still pyserial and nothing else
+        # Asserted from the artifact that would be uploaded, not from
+        # pyproject.toml: this is the promise a `pip install ppk2lab` makes,
+        # and it cannot be fixed after an upload.
+        run: |
+          /tmp/fresh/bin/python -c "
+          from importlib.metadata import metadata
+          m = metadata('ppk2lab')
+          base = [r for r in (m.get_all('Requires-Dist') or []) if 'extra ==' not in r]
+          assert base == ['pyserial>=3.5'], base
+          assert sorted(m.get_all('Provides-Extra') or []) == ['dev', 'web'], m.get_all('Provides-Extra')
+          import sys, ppk2lab
+          assert 'starlette' not in sys.modules, 'importing ppk2lab pulled in the web extra'
+          "
+      - name: '`ppk2lab web` exists without its extra and says what is missing'
+        # The highest-value check here: from the wheel that actually ships, the
+        # subcommand is present in a base install, exits 7, and names the
+        # remedy -- so `--help` and `capabilities` are honest whatever is
+        # installed.
+        shell: bash
+        run: |
+          set +e
+          /tmp/fresh/bin/ppk2lab --json web > web-missing.json
+          code=$?
+          set -e
+          test "$code" = "7" || { echo "::error::expected exit 7, got $code"; cat web-missing.json; exit 1; }
+          grep -q '"WEB_EXTRA_MISSING"' web-missing.json
+          grep -q "ppk2lab\[web\]" web-missing.json
       - name: Installed wheel carries the web console
         run: |
           python -c "

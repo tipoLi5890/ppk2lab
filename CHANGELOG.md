@@ -6,7 +6,17 @@ project uses semantic versioning once released.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.5.0] — 2026-08-21
+
 The console can be served against a real device.
+
+Stable numbering still covers the machine-readable contracts rather than the
+hardware validation behind them, and the console is now on the list of things
+that have never driven a physical PPK2: every test behind it uses the
+simulator, which exercises the protocol, the supervisor and the state machine
+but not the instrument. `ROADMAP.md` says what closing that takes.
 
 ### Added
 

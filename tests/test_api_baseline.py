@@ -185,7 +185,12 @@ def test_subpackage_level_names_resolve():
     "stable but not in __all__", so this catches a rename or removal, not an
     undocumented addition.
     """
-    for dotted in _table_names(_section("4b")):
+    # Both tables, because the second package's names live in 4a and only
+    # there. Iterating 4b alone made the `ppk2lab_web.` arm below unreachable:
+    # the prefix filter was fixed in 0.4.0, but the section it filters was
+    # never one that contains a `ppk2lab_web.` row, so `static_dir` went
+    # unchecked while the test reported green.
+    for dotted in _table_names(_section("4a")) + _table_names(_section("4b")):
         # `ppk2lab_web.` has to be listed explicitly: it does not start with
         # `ppk2lab.`, so the obvious prefix test would skip every entry for the
         # second package while still reporting green.

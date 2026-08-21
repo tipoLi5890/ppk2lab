@@ -36,7 +36,12 @@ from ppk2lab.diagnostics import (
     as_json,
 )
 from ppk2lab.discovery import _classify, _interface_number
-from ppk2lab.errors import CaptureFileError, UsageError, VoltageRangeError
+from ppk2lab.errors import (
+    CaptureFileError,
+    StreamStalledError,
+    UsageError,
+    VoltageRangeError,
+)
 from ppk2lab.exports import export_csv
 from ppk2lab.protocol.samples import (
     ADC_FULL_SCALE,
@@ -362,6 +367,70 @@ def test_silent_device_ends_the_capture_instead_of_hanging():
     assert result.interruption is not None
     assert result.interruption["reason"] == "stream_stalled"
     assert not result.complete
+
+
+def _muted_device():
+    """A device that keeps answering commands but never delivers samples --
+    the shape of a stall, as opposed to an unplug."""
+    simulator = SimulatedPPK2()
+    original_read = simulator.read
+
+    def mute(max_bytes, timeout_s=0.1):
+        original_read(max_bytes, timeout_s)  # keep command handling alive
+        return b""
+
+    device = PPK2.open(transport=MockTransport(simulator), simulate=True)
+    simulator.read = mute
+    return device
+
+
+def test_a_caller_can_set_its_own_idle_budget():
+    """`stream()` reaches the idle budget it was always subject to.
+
+    The budget is what stops a device that goes quiet with the port still open
+    from blocking a consumer forever, but until now `stream()` never passed it
+    on, so every caller was pinned to the library default. A supervisor that
+    wants a short liveness tick, or one with its own liveness signal, could
+    not say so.
+    """
+    from ppk2lab.session import DEFAULT_IDLE_TIMEOUT_S
+
+    device = _muted_device()
+    started = time.monotonic()
+    try:
+        with pytest.raises(StreamStalledError) as excinfo:
+            with device.stream(sample_limit=1_000_000, idle_timeout_s=0.15) as events:
+                for _event in events:
+                    pass
+    finally:
+        device.close()
+    elapsed = time.monotonic() - started
+
+    assert "no data from the device for 0.15 s" in str(excinfo.value)
+    # The point of the parameter: it fires on the caller's budget, not on the
+    # library's, which is 5 s.
+    assert elapsed < DEFAULT_IDLE_TIMEOUT_S
+
+
+def test_the_idle_budget_can_be_disabled_and_the_wall_budget_still_holds():
+    """`idle_timeout_s=None` is for a caller with its own liveness signal. It
+    removes the silence check, not every bound -- the wall budget still ends
+    the stream, so disabling one does not produce a consumer that hangs."""
+    device = _muted_device()
+    try:
+        with pytest.raises(StreamStalledError) as excinfo:
+            with device.stream(
+                sample_limit=1_000_000, wall_timeout_s=0.3, idle_timeout_s=None
+            ) as events:
+                for _event in events:
+                    pass
+    finally:
+        device.close()
+
+    # The wall budget, not the idle one -- they raise the same class and are
+    # told apart by what they say.
+    assert "wall-clock timeout" in str(excinfo.value)
+    assert "no data from the device" not in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -1402,6 +1471,53 @@ def test_progress_updates_are_throttled_and_carry_a_stable_payload():
     stamps = [stamp for stamp, _ in calls]
     intervals = [b - a for a, b in itertools.pairwise(stamps)]
     assert all(interval >= PROGRESS_INTERVAL_S * 0.9 for interval in intervals)
+
+
+def test_on_block_sees_exactly_what_the_artifact_stores():
+    """A live view has to be fed from the capture itself.
+
+    One device owns one stream, so a console that wants to keep drawing while
+    it records cannot open a second one -- and `on_progress` carries counters,
+    not samples. `on_block` hands the caller the same events the writer
+    receives, which is what makes the two incapable of disagreeing.
+    """
+    seen: list[object] = []
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2(gaps={500: 64})), simulate=True)
+    try:
+        result = device.capture(
+            sample_limit=4000, in_memory_limit_samples=None, on_block=seen.append
+        )
+    finally:
+        device.close()
+
+    blocks = [e for e in seen if isinstance(e, SampleBlock)]
+    gaps = [e for e in seen if isinstance(e, GapEvent)]
+    assert blocks, "no blocks were observed"
+    # The same events, not a recomputation of them.
+    assert sum(len(b) for b in blocks) == result.stats.stored_samples
+    assert len(gaps) == result.stats.gap_count
+    assert [g.missing for g in gaps] == [g["missing"] for g in result.stats.gaps]
+
+
+def test_a_failing_block_callback_is_disabled_not_fatal():
+    """The artifact is the deliverable; a watcher is not. A callback that
+    raises is dropped, said once, and the capture still completes."""
+    calls: list[object] = []
+
+    def cb(event):
+        calls.append(event)
+        raise ValueError("watcher is broken")
+
+    device = PPK2.open(transport=MockTransport(SimulatedPPK2()), simulate=True)
+    try:
+        result = device.capture(sample_limit=4000, in_memory_limit_samples=None, on_block=cb)
+    finally:
+        device.close()
+
+    assert len(calls) == 1, "a broken callback must not be called again"
+    assert "W_PROGRESS_CALLBACK" in _codes(result.warnings)
+    assert result.complete
+    assert result.stats.stored_samples == 4000
 
 
 def test_a_failing_progress_callback_is_disabled_not_fatal():

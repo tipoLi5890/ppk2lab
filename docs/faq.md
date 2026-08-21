@@ -531,6 +531,16 @@ now also reports while a triggered capture is waiting to fire, and a callback
 that raises is disabled once with `W_PROGRESS_CALLBACK` instead of ending the
 capture.
 
+`on_block` is the third of these and the one that needs the most care. It is
+handed every `SampleBlock` and `GapEvent` the artifact receives, unthrottled,
+so it is a data path rather than a report: everything in the paragraph about
+`at=` applies to it with more force. It exists because one device owns one
+stream, so anything that wants to watch a capture as it happens — a live view,
+for instance — cannot open a second one, and `on_progress` carries counters
+rather than samples. The events are the same objects the writer stores; treat
+them as read-only. A callback that raises is disabled once, like
+`on_progress`, because the artifact is the deliverable and a watcher is not.
+
 There is deliberately no CLI flag for this. `capture` never enables DUT power
 and has no option that would; scheduling one is an explicit, Python-only act.
 

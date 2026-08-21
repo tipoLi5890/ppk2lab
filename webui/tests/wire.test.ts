@@ -8,10 +8,14 @@ import { WebSocketSource } from "../src/data/websocket";
 /**
  * A bucket frame, built here rather than by the decoder's own helpers.
  *
- * Deliberately a second implementation of the layout: a round trip through one
- * codec proves only that it is self-consistent, and the thing that matters is
- * that it agrees with `src/ppk2lab_web/protocol.py`. This mirrors that packer
- * field for field.
+ * This is for *shaping* frames a test needs — a wrong version byte, a NaN, a
+ * truncation — which a fixture cannot do. It is a second implementation of the
+ * layout, so on its own it proves only that the two halves written in this
+ * language agree with each other.
+ *
+ * The claim that matters, that the decoder agrees with
+ * `src/ppk2lab_web/protocol.py`, is checked in `decimation.test.ts` against
+ * bytes Python actually packed.
  */
 function packBuckets(
   buckets: Array<{

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { ERROR_KEYS, WARNING_KEYS, errorMessage, warningMessage } from "../src/data/codes";
+import {
+  ERROR_KEYS,
+  WARNING_KEYS,
+  errorMessage,
+  rejectionMessage,
+  warningMessage,
+} from "../src/data/codes";
 import { en } from "../src/i18n/en";
 import { translate } from "../src/i18n";
 
@@ -69,6 +75,41 @@ describe("warning and error codes", () => {
     expect(errorMessage("VOLTAGE_OUT_OF_RANGE", [4200, 3600], "SESSION_CEILING").key).toBe(
       "er_ceiling",
     );
+  });
+
+  it("renders a rejection's own key rather than passing it through the raw table", () => {
+    // `ControlRejected.code` is already a message key: the server picks it, and
+    // the simulated source raises one directly. Feeding it to `errorMessage` --
+    // which maps *raw* codes -- finds nothing and falls through to
+    // `er_unknown`, printing the key as the visible first argument. That was
+    // exactly the bare-identifier-where-a-sentence-belongs failure this module
+    // was written to end, reintroduced at the call site.
+    for (const code of [
+      "er_range",
+      "er_ceiling",
+      "er_locked",
+      "er_held",
+      "er_offline",
+      "er_busy",
+      "er_timeout",
+      "er_disconnected",
+      "er_state_moved",
+      "er_recording",
+    ]) {
+      const { key, args } = rejectionMessage(code, []);
+      expect(key, code).toBe(code);
+      const rendered = translate("en", key, ...args);
+      expect(rendered, code).not.toBe(code);
+      expect(rendered, code).not.toContain(code);
+      // And the raw-code table would have got it wrong, which is the point.
+      expect(errorMessage(code, []).key).toBe("er_unknown");
+    }
+  });
+
+  it("does not invent a key for a rejection the catalogue never defined", () => {
+    const { key, args } = rejectionMessage("er_something_added_later", ["detail"]);
+    expect(key).toBe("er_unknown");
+    expect(translate("en", key, ...args)).toContain("er_something_added_later");
   });
 
   it("falls back to a readable sentence for an unmapped rejection", () => {

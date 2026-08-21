@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { SAMPLE_RATE_HZ, SAMPLES_PER_BUCKET } from "../src/core/constants";
 import { Decimator } from "../src/core/decimator";
+import { decodeFrame } from "../src/data/protocol";
 import { histAdd, newHistogram } from "../src/core/histogram";
 import goldenJson from "../../tests/vectors/decimation-golden.json";
 
@@ -39,6 +40,11 @@ type GoldenEvent =
 
 interface Golden {
   samples_per_bucket: number;
+  wire: {
+    buckets_b64: string;
+    histogram_b64: string;
+    histogram_nonzero: Record<string, number>;
+  };
   events: GoldenEvent[];
   buckets: GoldenBucket[];
   counters: {
@@ -172,6 +178,64 @@ describe("decimation agrees with the Python server", () => {
     // one transition there, which is invisible in aggregate and wrong.
     const seamBucket = golden.buckets[1]!;
     expect(seamBucket.edges).toBeGreaterThan(0);
+  });
+});
+
+describe("the wire, against bytes Python actually wrote", () => {
+  /**
+   * The decoder is checked against a frame `src/ppk2lab_web/protocol.py` packed,
+   * not against an encoder written beside it. A round trip through one codec
+   * only proves that codec is self-consistent, which is exactly the claim that
+   * does not matter: what matters is that the two languages agree.
+   */
+  function bytes(b64: string): ArrayBuffer {
+    const binary = atob(b64);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out.buffer;
+  }
+
+  it("decodes a bucket frame the server packed", () => {
+    const frame = decodeFrame(bytes(golden.wire.buckets_b64));
+    expect(frame.kind).toBe("buckets");
+    if (frame.kind !== "buckets") return;
+
+    expect(frame.count).toBe(golden.buckets.length);
+    expect(frame.firstIndex).toBe(golden.buckets[0]!.start_index);
+    expect(frame.discontinuity).toBe(true);
+
+    // Every field, against the values the Python side recorded separately --
+    // so a layout change that happened to survive its own round trip still
+    // fails here.
+    let index = frame.firstIndex;
+    for (let i = 0; i < frame.count; i++) {
+      const want = golden.buckets[i]!;
+      expect(index, `bucket ${i} start_index`).toBe(want.start_index);
+      expect(frame.sum[i], `bucket ${i} sum`).toBe(want.sum);
+      expect(frame.min[i], `bucket ${i} min`).toBe(want.min);
+      expect(frame.max[i], `bucket ${i} max`).toBe(want.max);
+      expect(frame.n[i], `bucket ${i} n`).toBe(want.n);
+      expect(frame.gap[i], `bucket ${i} gap`).toBe(want.gap);
+      expect(frame.excluded[i], `bucket ${i} excluded`).toBe(want.excluded);
+      expect(frame.rangeMask[i], `bucket ${i} rangeMask`).toBe(want.rangeMask);
+      expect(frame.logicAny[i], `bucket ${i} logicAny`).toBe(want.logicAny);
+      expect(frame.logicAll[i], `bucket ${i} logicAll`).toBe(want.logicAll);
+      expect(frame.edges[i], `bucket ${i} edges`).toBe(want.edges);
+      index += frame.n[i]! + frame.gap[i]! + frame.excluded[i]!;
+    }
+  });
+
+  it("decodes a histogram frame the server packed, exactly", () => {
+    const frame = decodeFrame(bytes(golden.wire.histogram_b64));
+    expect(frame.kind).toBe("histogram");
+    if (frame.kind !== "histogram") return;
+    expect(frame.bins.length).toBe(169);
+    for (const [bin, value] of Object.entries(golden.wire.histogram_nonzero)) {
+      expect(frame.bins[Number(bin)], `bin ${bin}`).toBe(value);
+    }
+    // 1e9 is past float32's exact-integer range; the grid is float64 for that
+    // reason and this is where it would show.
+    expect(frame.bins[37]).toBe(1e9);
   });
 });
 

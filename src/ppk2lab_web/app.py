@@ -195,15 +195,37 @@ class Console:
                 task.cancel()
 
     async def _reader(self, ws: WebSocket, connection: Any) -> None:
-        while True:
-            try:
-                raw = await ws.receive_json()
-            except WebSocketDisconnect:
-                return
-            except Exception:  # a malformed frame ends the socket
-                return
-            if not isinstance(raw, dict):
-                continue
+        """Read commands, and never stop reading because one is slow.
+
+        Each command runs as its own task. Awaiting them in turn meant a
+        recording -- which is bounded only by the duration its operator chose,
+        and cannot be cancelled -- blocked this loop for its whole length: the
+        socket would not even *read* a request to de-energise VOUT until the
+        recording finished. Replies carry the request id, so they may arrive in
+        any order.
+        """
+        inflight: set[asyncio.Task[None]] = set()
+        try:
+            while True:
+                try:
+                    raw = await ws.receive_json()
+                except WebSocketDisconnect:
+                    return
+                except Exception:  # a malformed frame ends the socket
+                    return
+                if not isinstance(raw, dict):
+                    continue
+                task = asyncio.ensure_future(self._guarded(ws, connection, raw))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
+        finally:
+            for task in inflight:
+                task.cancel()
+
+    async def _guarded(self, ws: WebSocket, connection: Any, raw: dict[str, Any]) -> None:
+        """Run one command without letting its failure escape as an unhandled
+        task exception -- a socket that closed under a reply is ordinary."""
+        with contextlib.suppress(WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
             await self._handle(ws, connection, raw)
 
     async def _handle(self, ws: WebSocket, connection: Any, raw: dict[str, Any]) -> None:
@@ -228,7 +250,9 @@ class Console:
             await ws.send_json(protocol.result(request_id=request_id, ok=True, held=False))
             return
 
-        future = self.supervisor.submit(str(op), payload, origin=connection.id)
+        future = self.supervisor.submit(
+            str(op), payload, origin=connection.id, urgent=_is_urgent(op, payload)
+        )
         try:
             value = await asyncio.wrap_future(future)
         except BaseException as exc:  # reported to the caller, never swallowed
@@ -266,6 +290,25 @@ class Console:
         if op == "record":
             return _record_kwargs(raw.get("options") or {})
         return None
+
+
+def _is_urgent(op: Any, payload: Any) -> bool:
+    """Does this command jump the queue?
+
+    "Arming asks, disarming does not" is a rule about dialogs in the console;
+    on the server it is a scheduling property. De-energising VOUT and stopping
+    the stream must not sit behind a saga that stops a stream, writes several
+    commands and reopens one -- and above all not behind a recording, during
+    which the supervisor thread services *only* this lane.
+
+    The Supervisor has had the urgent lane and `request_power_off` since it was
+    written; until this was wired up here, nothing but a test ever used them.
+    """
+    if op == "stop_stream":
+        return True
+    if op == "apply" and isinstance(payload, ControlRequest):
+        return payload.kind == "dut-power" and payload.on is False
+    return False
 
 
 def _record_kwargs(options: dict[str, Any]) -> dict[str, Any]:

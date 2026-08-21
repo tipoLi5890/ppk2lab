@@ -261,11 +261,23 @@ class Supervisor:
     def _run(self) -> None:
         try:
             self.device = self._open_device()
+        except BaseException as exc:
+            # Nothing was opened, so there is nothing to close.
+            self._ready.set_exception(exc)
+            return
+
+        # From here the handle is live, so every exit runs the shutdown --
+        # including a failure in the startup work below. Reporting the failure
+        # and returning would leave an open device with its power untouched,
+        # and `shutdown()` could not recover it: by then this thread is gone,
+        # so its join is a no-op and nothing calls close().
+        try:
             self.device_present = True
             self._acc = Tier0Accumulator(start_index=0)
             self._republish_snapshot()
         except BaseException as exc:
             self._ready.set_exception(exc)
+            self._shutdown()
             return
         self._ready.set_result(None)
 
@@ -614,6 +626,12 @@ class Supervisor:
         self.device_present = False
         self._streaming = False
         self._session, self._events = None, None
+        # Samples that were converted but not yet sent are still measurements.
+        # Dropping them here would lose the moment before the cable came out,
+        # which is the part of an unplug anyone would want to look at.
+        for bucket in self._acc.flush():
+            self._pending.append(bucket)
+        self._flush(force=True)
         self._warn("W_INTERRUPTED", str(exc))
         self._publish(protocol.error(rejection(exc)))
         self._publish(protocol.stream(running=False, phase="stopped", reason="device_lost"))
@@ -709,10 +727,14 @@ class Supervisor:
                 currents = calibration.convert_block(event, self._vdd_mv)
             self._pending.extend(self._acc.add_samples(currents, event.ranges, event.logic))
             return
+        # Taken before add_gap, and from the accumulator rather than the event:
+        # a recording drives its own stream whose indices restart at zero, so
+        # `event.index` would place the gap somewhere this console never was.
+        at = self._acc.position
         self._pending.extend(self._acc.add_gap(event.missing))
         self._publish(
             protocol.gap(
-                index=event.index,
+                index=at,
                 missing=event.missing,
                 reason=event.reason,
                 ambiguous=event.ambiguous,

@@ -7,7 +7,7 @@ import { IconSprite } from "./components/Icons";
 import { Inspector } from "./components/Inspector";
 import { Rail } from "./components/Rail";
 import { StatusBar, type DrawerPane } from "./components/StatusBar";
-import { errorMessage } from "./data/codes";
+import { rejectionMessage } from "./data/codes";
 import { getSource } from "./data/select";
 import { ApplyDialog } from "./components/ApplyDialog";
 import {
@@ -115,7 +115,10 @@ export default function App() {
       // state change that silently did not happen. Silence is worse than a
       // crash for a control surface.
       if (err instanceof ControlRejected) {
-        const { key, args } = errorMessage(err.code, err.args);
+        // `code` is already a message key -- not a raw library code -- so it is
+        // checked against the catalogue rather than mapped through the
+        // raw-code table, which would find nothing and print the key.
+        const { key, args } = rejectionMessage(err.code, err.args);
         setRejection(translate(lang, key, ...args));
         return;
       }

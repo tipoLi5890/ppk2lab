@@ -452,6 +452,54 @@ def test_a_hot_unplug_keeps_the_server_up_and_closes_the_device():
         sup.shutdown()
 
 
+def test_a_failure_after_the_device_opens_still_closes_it(monkeypatch):
+    """The shutdown guarantee has to cover the startup path too.
+
+    Reporting the failure and returning would leave a live handle with its
+    power untouched, and `shutdown()` cannot recover that: by then the thread
+    has exited, so its join is a no-op and nothing calls close().
+    """
+    sink = Sink()
+    sim = SimulatedPPK2(profile=ConstantProfile(100.0))
+    opened: list[PPK2] = []
+
+    def opener() -> PPK2:
+        device = PPK2.open(transport=MockTransport(sim), simulate=True)
+        opened.append(device)
+        return device
+
+    sup = Supervisor(open_device=opener, publish=sink, autostart=False)
+    monkeypatch.setattr(
+        Supervisor,
+        "_republish_snapshot",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    with pytest.raises(RuntimeError, match="boom"):
+        sup.start()
+
+    assert opened, "the device was never opened, so this proves nothing"
+    assert opened[0].transport.is_open is False, "a failed startup left the device open"
+
+
+def test_a_hot_unplug_keeps_the_samples_it_had_already_converted():
+    """The moment before the cable came out is the part anyone would look at."""
+    sink = Sink()
+    sup, sim = make_supervisor(sink)
+    sup.start()
+    try:
+        wait_for(lambda: sink.buckets(), what="a bucket frame")
+        before = sum(b["count"] for b in sink.buckets())
+        sim.unplug()
+        wait_for(lambda: sink.json("error"), what="the failure to be reported", timeout=10)
+        after = sum(b["count"] for b in sink.buckets())
+        # Whatever had been accumulated is flushed rather than dropped. The
+        # count can only grow; a strict check on the difference would be a
+        # check on timing.
+        assert after >= before
+    finally:
+        sup.shutdown()
+
+
 @pytest.mark.parametrize("how", ["stop", "unplug"])
 def test_shutdown_always_closes_the_device(how):
     """A DUT left energised is the most damaging thing this project can do."""

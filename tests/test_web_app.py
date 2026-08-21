@@ -110,16 +110,30 @@ def test_a_socket_starts_with_hello_and_then_samples(harness):
 
 
 @pytest.mark.parametrize("origin", ["http://evil.example", None])
-def test_a_page_this_server_did_not_hand_out_is_refused(harness, origin):
+def test_a_socket_from_anywhere_else_is_refused(harness, origin):
     """A WebSocket is not subject to the same-origin policy: any page can open
-    one and the browser will not stop it. And a local process that opens a raw
-    socket sends no Origin at all. Both are refused here."""
+    one and the browser will not stop it. A local process opening a raw socket
+    sends no Origin at all. Neither gets one here, because this is where the
+    control token is handed out."""
     headers = {"Origin": origin} if origin else {}
     with TestClient(harness.app) as client:
-        assert client.get("/api/session", headers=headers).status_code == 403
         with pytest.raises(Exception):  # noqa: B017 - starlette raises on a 1008 close
             with client.websocket_connect("/ws", headers=headers) as ws:
                 ws.receive_json()
+
+
+def test_a_foreign_page_cannot_read_the_snapshot_but_a_script_can(harness):
+    """The threat is a page on another site, and a page always sends an Origin.
+
+    A caller with none is a local script, which gains nothing here it could not
+    get from `ppk2lab info` when the server is not holding the port -- and
+    refusing it would leave no way at all to read device state while it is.
+    """
+    with TestClient(harness.app) as client:
+        assert (
+            client.get("/api/session", headers={"Origin": "http://evil.example"}).status_code == 403
+        )
+        assert client.get("/api/session").status_code == 200
 
 
 def test_a_command_without_this_connection_s_token_is_refused(harness):

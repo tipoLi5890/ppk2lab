@@ -22,6 +22,8 @@ from .discovery import discover, simulated_device_info
 from .errors import (
     DeviceNotFoundError,
     MetadataError,
+    PermissionDeniedError,
+    PortBusyError,
     UsageError,
     VoltageRangeError,
 )
@@ -340,6 +342,11 @@ class PPK2:
                 candidates = [measurement.path]
 
         failures: list[str] = []
+        # A port the host refused to hand over is a different answer from a
+        # port that answered nothing, and only the first one is fixed by
+        # closing another application. Remembered here because the probe tries
+        # several ports and the last failure is not necessarily the telling one.
+        withheld: PortBusyError | PermissionDeniedError | None = None
         for path in candidates:
             transport = _transport_factory(path)
             device = cls(transport, info, max_voltage_mv=max_voltage_mv)
@@ -354,8 +361,21 @@ class PPK2:
                 if not probing:
                     raise
                 failures.append(f"{path}: {exc}")
+                if withheld is None and isinstance(exc, PortBusyError | PermissionDeniedError):
+                    withheld = exc
+        detail = "; ".join(failures)
+        if withheld is not None:
+            # `discover()` just found this device, so reporting DEVICE_NOT_FOUND
+            # would contradict it and send a reader to check the cable. The
+            # device is there; something else has it, or the host will not give
+            # it to us -- and a caller branching on `code` has to be able to
+            # tell those apart.
+            raise type(withheld)(
+                f"device {info.serial_number} is present but no port could be opened ({detail})",
+                remediation=withheld.remediation,
+            ) from withheld
         raise DeviceNotFoundError(
-            f"no port of {info.serial_number} answered the metadata probe ({'; '.join(failures)})",
+            f"no port of {info.serial_number} answered the metadata probe ({detail})",
             remediation="Check the USB connection and close other apps using the "
             "device, then retry; or pass the measurement port explicitly with --port.",
         )

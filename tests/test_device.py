@@ -6,7 +6,13 @@ import gc
 import pytest
 
 from ppk2lab import device as device_module
-from ppk2lab.errors import TransportError, UsageError, VoltageRangeError
+from ppk2lab.errors import (
+    DeviceNotFoundError,
+    PortBusyError,
+    TransportError,
+    UsageError,
+    VoltageRangeError,
+)
 from ppk2lab.protocol.samples import SampleBlock
 from ppk2lab.types import DeviceState, GapEvent, Mode, VoltageBasis
 
@@ -321,6 +327,145 @@ def test_the_claim_is_given_back_only_after_the_stop_and_the_drain(monkeypatch):
     device.close()
 
 
+def test_a_port_another_process_holds_is_not_reported_as_a_missing_device(monkeypatch):
+    """Found on hardware: a real PPK2, present and enumerated, with one port
+    held by another application.
+
+    The probe tries every port and reports what happened, but it used to
+    flatten every outcome into DEVICE_NOT_FOUND -- which contradicts the
+    `discover()` that had just found the device, and sends a reader to check a
+    cable that is fine. `docs/agent-interface.md` tells an agent to branch on
+    `code`, so the difference between "not there" and "someone else has it" has
+    to survive into the code and not only into the prose.
+    """
+
+    from ppk2lab.device import PPK2
+    from ppk2lab.types import DeviceInfo, PortInfo, PortRole
+
+    class Held:
+        def __init__(self, path):
+            self.path = path
+
+        def open(self):
+            raise PortBusyError(f"port {self.path} is busy: [Errno 35] resource unavailable")
+
+        def close(self):
+            pass
+
+        @property
+        def description(self):
+            return self.path
+
+    class Silent:
+        """Answers commands but never returns metadata -- the other port of a
+        PPK2, which is what the probe exists to tell apart."""
+
+        def __init__(self, path):
+            self.path = path
+            self._open = False
+
+        def open(self):
+            self._open = True
+
+        def close(self):
+            self._open = False
+
+        def write(self, data):
+            pass
+
+        def read(self, max_bytes, timeout_s=0.1):
+            return b""
+
+        def flush(self):
+            pass
+
+        @property
+        def is_open(self):
+            return self._open
+
+        @property
+        def description(self):
+            return self.path
+
+    info = DeviceInfo(
+        serial_number="REAL01",
+        vid=0x1915,
+        pid=0xC00A,
+        ports=(
+            PortInfo(path="/dev/held", role=PortRole.UNKNOWN),
+            PortInfo(path="/dev/silent", role=PortRole.UNKNOWN),
+        ),
+    )
+    monkeypatch.setattr(
+        device_module,
+        "_transport_factory",
+        lambda path: Held(path) if path == "/dev/held" else Silent(path),
+    )
+    monkeypatch.setattr(device_module, "discover", lambda **_kw: [info])
+
+    with pytest.raises(PortBusyError) as excinfo:
+        PPK2.open(serial_number="REAL01")
+
+    # Both ports are still named, because which one was which is what a person
+    # needs; only the classification changed.
+    message = str(excinfo.value)
+    assert "/dev/held" in message
+    assert "/dev/silent" in message
+    assert "is present" in message
+    assert excinfo.value.code == "PORT_BUSY"
+
+
+def test_a_device_whose_ports_all_stay_silent_is_still_not_found(monkeypatch):
+    """The other half of the same decision: nothing refused us, nothing
+    answered, and DEVICE_NOT_FOUND is the honest report."""
+    from ppk2lab.device import PPK2
+    from ppk2lab.types import DeviceInfo, PortInfo, PortRole
+
+    class Silent:
+        def __init__(self, path):
+            self.path = path
+            self._open = False
+
+        def open(self):
+            self._open = True
+
+        def close(self):
+            self._open = False
+
+        def write(self, data):
+            pass
+
+        def read(self, max_bytes, timeout_s=0.1):
+            return b""
+
+        def flush(self):
+            pass
+
+        @property
+        def is_open(self):
+            return self._open
+
+        @property
+        def description(self):
+            return self.path
+
+    info = DeviceInfo(
+        serial_number="REAL02",
+        vid=0x1915,
+        pid=0xC00A,
+        ports=(
+            PortInfo(path="/dev/a", role=PortRole.UNKNOWN),
+            PortInfo(path="/dev/b", role=PortRole.UNKNOWN),
+        ),
+    )
+    monkeypatch.setattr(device_module, "_transport_factory", Silent)
+    monkeypatch.setattr(device_module, "discover", lambda **_kw: [info])
+
+    with pytest.raises(DeviceNotFoundError) as excinfo:
+        PPK2.open(serial_number="REAL02")
+    assert excinfo.value.code == "DEVICE_NOT_FOUND"
+
+
 def test_unplug_during_stream_reports_the_stream_interruption():
     """The hot-unplug error must reach the caller, not the drain failure it
     causes: a dead handle cannot be drained, and that symptom says nothing."""
@@ -448,7 +593,6 @@ def test_open_recovers_interrupted_session():
 def test_open_probes_ambiguous_measurement_port(monkeypatch):
     """When port roles are unknown (e.g. macOS), open() identifies the
     measurement port with the read-only metadata probe."""
-    import ppk2lab.device as device_mod
     from ppk2lab.device import PPK2
     from ppk2lab.transport.base import Transport
     from ppk2lab.transport.mock import MockTransport, SimulatedPPK2
@@ -497,8 +641,8 @@ def test_open_probes_ambiguous_measurement_port(monkeypatch):
             PortInfo(path="/dev/fake-measure", role=PortRole.UNKNOWN),
         ),
     )
-    monkeypatch.setattr(device_mod, "_transport_factory", factory)
-    monkeypatch.setattr(device_mod, "discover", lambda **_kw: [info])
+    monkeypatch.setattr(device_module, "_transport_factory", factory)
+    monkeypatch.setattr(device_module, "discover", lambda **_kw: [info])
 
     device = PPK2.open(serial_number="REAL01")
     try:

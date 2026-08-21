@@ -285,6 +285,10 @@ export const en = {
   ch_live: "Back to live",
   ch_paused: "Viewing history",
   ch_gesture: "Drag to pan · wheel to zoom time · ctrl+wheel to zoom current · double-click returns to live",
+  w_unknown: "{0} — {1}",
+  er_unknown: "{0}: the device refused this change. {1}",
+  m_unknown: "Unknown",
+  m_unknown_hint: "The console has not been told which mode the device is in. It is not assumed: in Ampere mode the PPK2 does not supply the DUT and energy is unavailable, so guessing here would put a number behind an assumption nothing supports.",
 } as const;
 
 /** Every string the console can show. Adding one here obliges the other three. */

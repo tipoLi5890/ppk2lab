@@ -1,4 +1,5 @@
 import { fmtPercent } from "../core/format";
+import { modeLabels } from "../core/mode";
 import type { DataSource, DeviceSnapshot } from "../data/source";
 import { useFlash, useTicker } from "../hooks";
 import { useI18n } from "../i18n";
@@ -27,6 +28,7 @@ export function StatusBar({ source, snapshot, onOpen }: StatusBarProps) {
   useTicker(4); // stored/coverage move constantly; four reads a second is plenty
   const { state } = snapshot;
 
+  const mode = modeLabels(state.mode);
   const isSource = state.mode === Mode.SOURCE;
   const shownVoltage = snapshot.assumedVoltageMv ?? state.source_voltage_mv;
   const dut = state.dut_power;
@@ -37,10 +39,10 @@ export function StatusBar({ source, snapshot, onOpen }: StatusBarProps) {
     <div className="statusbar">
       <Cell
         label={t("t_mode")}
-        value={t(isSource ? "m_source" : "m_ampere")}
-        badge={isSource ? "SOURCE" : "AMPERE"}
-        tone="acc"
-        hint={t(isSource ? "m_source_hint" : "m_ampere_hint")}
+        value={t(mode.name)}
+        badge={mode.badge}
+        tone={mode.tone}
+        hint={t(mode.hint)}
         onClick={() => onOpen("mode")}
       />
       <Cell

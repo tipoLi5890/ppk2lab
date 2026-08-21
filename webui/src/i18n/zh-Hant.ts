@@ -287,4 +287,8 @@ export const zhHant: Record<MessageKey, string> = {
   ch_live: "回到現在",
   ch_paused: "檢視歷史",
   ch_gesture: "拖曳平移 · 滾輪縮放時間 · Ctrl+滾輪縮放電流 · 雙擊回到現在",
+  w_unknown: "{0} — {1}",
+  er_unknown: "{0}：裝置拒絕了這項變更。{1}",
+  m_unknown: "未知",
+  m_unknown_hint: "主控台尚未得知裝置處於哪個模式。這裡不做推測：Ampere 模式下 PPK2 不供電給 DUT、能量無法取得，猜測等於用一個毫無依據的假設去支撐一個數字。",
 };

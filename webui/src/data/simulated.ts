@@ -12,6 +12,7 @@ import { fmtInt } from "../core/format";
 import { histAdd, newHistogram } from "../core/histogram";
 import { buildDemoCycle, buildIdleCycle, mulberry32, type CycleData } from "../core/profiles";
 import type { MessageKey } from "../i18n";
+import { warningMessage } from "./codes";
 import { Mode, type Calibration, type DeviceState, type StateChange, type VoltageBasis } from "../types";
 import {
   ControlRejected,
@@ -461,7 +462,8 @@ export class SimulatedSource implements DataSource {
     }
     this.log("state", change.operation, "ev_applied", [], delta, undefined, observed);
     for (const w of warnings) {
-      this.log("warn", w, `w_${w.slice(2).toLowerCase()}` as MessageKey, []);
+      const { key, args } = warningMessage(w);
+      this.log("warn", w, key, args);
     }
     return change;
   }

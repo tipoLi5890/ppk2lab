@@ -287,4 +287,8 @@ export const ja: Record<MessageKey, string> = {
   ch_live: "現在に戻る",
   ch_paused: "履歴を表示中",
   ch_gesture: "ドラッグでパン · ホイールで時間ズーム · Ctrl+ホイールで電流ズーム · ダブルクリックで現在に戻る",
+  w_unknown: "{0} — {1}",
+  er_unknown: "{0}: デバイスがこの変更を拒否しました。{1}",
+  m_unknown: "不明",
+  m_unknown_hint: "デバイスがどのモードにあるか、このコンソールはまだ知らされていません。ここでは推測しません。Ampere モードでは PPK2 は DUT に給電せず電力量も得られないため、推測は根拠のない仮定の上に数値を置くことになります。",
 };

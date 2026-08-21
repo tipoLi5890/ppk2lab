@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { FULL_SCALE_UA, SAMPLE_RATE_HZ, VOLTAGE_MAX_MV, VOLTAGE_MIN_MV } from "../core/constants";
 import { fmtCurrent, fmtInt, fmtPercent } from "../core/format";
+import { modeLabels } from "../core/mode";
 import type { DataSource, DeviceConfig, DeviceSnapshot } from "../data/source";
 import { useTicker } from "../hooks";
 import { useI18n, type MessageKey } from "../i18n";
@@ -129,15 +130,15 @@ function ModePane({
   onDraftChange: (patch: Partial<DeviceConfig>) => void;
 }) {
   const { t } = useI18n();
-  const isSource = snapshot.state.mode === Mode.SOURCE;
+  const mode = modeLabels(snapshot.state.mode);
   const pending = draft.mode !== snapshot.state.mode;
 
   return (
     <section>
       <div className="readout">
-        <span className="big">{t(isSource ? "m_source" : "m_ampere")}</span>
+        <span className="big">{t(mode.name)}</span>
       </div>
-      <p className="sub">{t(isSource ? "m_source_desc" : "m_ampere_desc")}</p>
+      <p className="sub">{t(mode.desc)}</p>
 
       <div className="tablewrap" style={{ marginTop: 12 }}>
         <table>
@@ -204,6 +205,8 @@ function VoltagePane({
   onDraftChange: (patch: Partial<DeviceConfig>) => void;
 }) {
   const { t } = useI18n();
+  // Unknown mode takes the Ampere wording: it is the one that does not claim
+  // the PPK2 is supplying the DUT.
   const isSource = snapshot.state.mode === Mode.SOURCE;
   const pending = draft.voltageMv !== snapshot.state.source_voltage_mv;
   const [ceiling, setCeiling] = useState(String(snapshot.maxVoltageMv ?? ""));

@@ -238,4 +238,37 @@ export interface DataSource {
   setMaxVoltageMv(mv: number | null): void;
 
   readonly demo?: DemoControls;
+  /**
+   * Present only when something can actually write an artifact -- which means
+   * a server. The panel shows what it can do rather than a button that cannot
+   * work, the same way the demo controls vanish on a real device.
+   */
+  readonly recorder?: Recorder;
+}
+
+export interface RecordOptions {
+  durationS?: number;
+  sampleLimit?: number;
+  output?: string;
+  tags?: Record<string, string>;
+  assumeVoltageMv?: number;
+}
+
+export interface RecordResult {
+  path: string | null;
+  complete: boolean;
+  stored_samples: number;
+  gap_count: number;
+  capture_sha256: string | null;
+  warnings: Array<{ code: string; message: string }>;
+}
+
+export interface Recorder {
+  /**
+   * Write a capture artifact and resolve when it is finished.
+   *
+   * It cannot be cancelled -- `run_capture` has no cooperative stop -- so the
+   * options must bound it, and the console says so before it starts.
+   */
+  start(options: RecordOptions): Promise<RecordResult>;
 }

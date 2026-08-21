@@ -249,6 +249,37 @@ def test_a_recording_must_be_bounded(harness):
         assert "duration" in reply["error"]["args"][1]
 
 
+def test_a_recording_writes_a_real_artifact_and_keeps_the_console_drawing(
+    harness, tmp_path, monkeypatch
+):
+    """The console records through the library, not around it.
+
+    `run_capture` opens its own stream, so the live one comes down first -- and
+    the live view is then fed from the capture's own blocks through `on_block`,
+    which is what makes the trace and the artifact incapable of disagreeing.
+    """
+    monkeypatch.chdir(tmp_path)
+    with TestClient(harness.app) as client, _open(harness, client) as ws:
+        hello = ws.receive_json()
+        reply = _reply(
+            ws,
+            "record",
+            options={"durationS": 0.05, "output": "run.ppk2a"},
+            token=hello["session"]["control_token"],
+        )
+        assert reply["ok"] is True, reply
+        result = reply["result"]
+        assert result["complete"] is True
+        assert result["stored_samples"] == 5000
+        assert result["capture_sha256"]
+        written = tmp_path / "run.ppk2a"
+        assert written.is_file()
+        assert written.stat().st_size > 0
+
+    # The device is measuring again afterwards, because it was before.
+    assert harness.supervisor.device is not None
+
+
 def test_a_recording_cannot_choose_where_to_write(harness):
     """A browser must not be able to name a path outside the server's own
     directory."""

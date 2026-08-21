@@ -1,4 +1,5 @@
 import type { MessageKey } from "../i18n";
+import { en } from "../i18n/en";
 
 /**
  * Warning and error codes, mapped to message keys by an explicit table.
@@ -55,7 +56,30 @@ export function warningMessage(code: string, message = ""): Translatable {
   return { key: "w_unknown", args: [code, message] };
 }
 
-/** The same, for a rejection. `detail` distinguishes codes that share a class. */
+/**
+ * What to show for a `ControlRejected`.
+ *
+ * Its `code` is a message key by contract -- both sources raise one, and the
+ * server picks it from `ppk2lab_web/codes.py`. This verifies rather than
+ * trusts: a key the catalogue does not define would otherwise render as its own
+ * name, which is the bare-identifier-where-a-sentence-belongs failure the
+ * explicit tables above exist to prevent.
+ *
+ * Deliberately NOT `errorMessage`, which maps *raw* library codes like
+ * `VOLTAGE_OUT_OF_RANGE`. Passing an already-resolved key through that table
+ * finds nothing and falls through to `er_unknown`, printing the key.
+ */
+export function rejectionMessage(code: string, args: (string | number)[] = []): Translatable {
+  if (code in en) return { key: code as MessageKey, args };
+  return { key: "er_unknown", args: [code, ...args] };
+}
+
+/**
+ * What to show for a *raw* code the library produced -- `PORT_BUSY`,
+ * `VOLTAGE_OUT_OF_RANGE`. `detail` separates two refusals that share a class.
+ *
+ * For a code that is already a message key, use `rejectionMessage`.
+ */
 export function errorMessage(
   code: string,
   args: (string | number)[] = [],

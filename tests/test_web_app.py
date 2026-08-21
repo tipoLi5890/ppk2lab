@@ -15,6 +15,7 @@ from starlette.testclient import TestClient
 from ppk2lab.device import PPK2
 from ppk2lab.testing.profiles import ConstantProfile, DemoActivityProfile
 from ppk2lab.transport.mock import MockTransport, SimulatedPPK2
+from ppk2lab.types import SAMPLE_RATE_HZ
 from ppk2lab_web import protocol, static_dir
 from ppk2lab_web.app import create_app
 from ppk2lab_web.buckets import Tier0Accumulator
@@ -36,7 +37,8 @@ def harness(request):
     allow_control = getattr(request, "param", {}).get("allow_control", True)
     profile = getattr(request, "param", {}).get("profile") or ConstantProfile(100.0)
     autostart = getattr(request, "param", {}).get("autostart", True)
-    sim = SimulatedPPK2(profile=profile)
+    rate = getattr(request, "param", {}).get("rate_limit_hz")
+    sim = SimulatedPPK2(profile=profile, rate_limit_hz=rate)
     supervisor = Supervisor(
         open_device=lambda: PPK2.open(transport=MockTransport(sim), simulate=True),
         publish=lambda message, target: None,
@@ -292,6 +294,60 @@ def test_a_recording_writes_a_real_artifact_and_keeps_the_console_drawing(
 
     # The device is measuring again afterwards, because it was before.
     assert harness.supervisor.device is not None
+
+
+@pytest.mark.parametrize("harness", [{"rate_limit_hz": float(SAMPLE_RATE_HZ)}], indirect=True)
+def test_a_power_off_is_serviced_while_a_recording_holds_the_device(harness, tmp_path, monkeypatch):
+    """The fail-safe direction cannot wait for a recording to finish.
+
+    A recording is bounded only by the duration its operator chose and cannot
+    be cancelled, so an operator who reaches for the power-off button because
+    something is going wrong must not be told to wait it out. Two things had to
+    be true and neither was: the socket has to keep reading while a command is
+    in flight, and a power-off has to travel the queue lane the supervisor
+    services from inside the capture.
+
+    The assertion is the *order* of the replies, which is the only evidence
+    that the power-off was serviced during the recording rather than after it.
+    """
+    monkeypatch.chdir(tmp_path)
+    with TestClient(harness.app) as client, _open(harness, client) as ws:
+        hello = ws.receive_json()
+        token = hello["session"]["control_token"]
+
+        ws.send_json(
+            {
+                "id": "rec",
+                "op": "record",
+                "token": token,
+                "options": {"durationS": 0.6, "output": "held.ppk2a"},
+            }
+        )
+        ws.send_json(
+            {
+                "id": "off",
+                "op": "apply",
+                "token": token,
+                "request": {"kind": "dut-power", "on": False},
+            }
+        )
+
+        order: list[str] = []
+        import json as _json
+
+        while len(order) < 2:
+            message = ws.receive()
+            text = message.get("text")
+            if not text:
+                continue
+            payload = _json.loads(text)
+            if payload.get("type") == "result":
+                order.append(payload["id"])
+                assert payload["ok"] is True, payload
+
+        assert order == ["off", "rec"], (
+            "the power-off was not serviced until the recording finished: " + str(order)
+        )
 
 
 def test_a_recording_cannot_choose_where_to_write(harness):

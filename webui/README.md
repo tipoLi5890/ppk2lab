@@ -29,8 +29,8 @@ driver keeps `pyserial` as its only dependency. The server's dependencies
 arrive through the `web` extra — Starlette, uvicorn and `websockets`,
 deliberately not `uvicorn[standard]`, whose C extensions have no pure-Python
 fallback and no Windows wheel for uvloop. Nothing under `ppk2lab/` imports any
-of them, and a test proves it from a subprocess. Read the rest of this atl. Nothing in the core imports from
-`ppk2lab_web` either way.
+of them, and a test proves it from a subprocess. Nothing in the core imports
+from `ppk2lab_web` either way.
 
 ## Working on the frontend
 

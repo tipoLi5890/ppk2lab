@@ -201,11 +201,14 @@ npm run dev              # the simulated console, no server needed
 ```
 
 `npm run dev` alone runs against a browser-side reproduction of the shipped
-`--simulate` profile. To drive a live server instead, start one and open
+`--simulate` profile. To drive a live server instead, start it with
+`ppk2lab web --allow-origin http://localhost:5273` and open
 `http://localhost:5273/?source=ws` — Vite proxies `/ws` to `127.0.0.1:8765`, so
-the URL rule is identical in development and in production. A server on another
-machine is `?ws=wss://bench.local:8765/ws`, which is a runtime question rather
-than a build-time one; the shipped bundle contains no host and no port at all.
+the URL rule is identical in development and in production. The extra origin
+is needed because the handshake accepts only the server's own by default. A
+server on another machine is `?ws=wss://bench.local:8765/ws`, which is a
+runtime question rather than a build-time one; the shipped bundle contains no
+host and no port at all.
 
 The console's `index.html` loads IBM Plex from Google Fonts, so opening it makes
 an outbound request. The *server* talks to a serial port and its own listener

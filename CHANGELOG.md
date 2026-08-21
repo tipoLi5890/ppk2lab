@@ -132,6 +132,61 @@ over SSH.
   the arm was unreachable and `ppk2lab_web.static_dir` went unverified while
   the test reported green. It now reads both sections.
 
+- **A request to de-energise VOUT could queue behind a recording.** The server
+  read one command off a socket, ran it to completion, and only then read the
+  next. A recording holds the device for its whole duration and cannot be
+  stopped, so a power-off sent during one waited for it -- the console's one
+  fail-safe action, made to wait by the longest-running thing it offers. The
+  reader now dispatches each command as its own task, so a slow command cannot
+  stop the socket being read, and the queue has an urgent lane that
+  `set_dut_power(False)` and `stop_stream` are put in ahead of everything
+  waiting. "Arming asks, disarming does not" is now a property of the
+  scheduling as well as of the dialog.
+
+- **A device that was present but busy was reported missing.** `PPK2.open()`
+  finds a unit, tries each of its ports, and raised `DEVICE_NOT_FOUND` when
+  none opened -- including when the reason was that another process held the
+  port, which is `PORT_BUSY` (exit 4) and has a remediation that says what to
+  close. The one case where the operator can act was the one case reported as
+  unactionable. It now re-raises the port's own error, with its remediation,
+  and only says the device is missing when it is. Found on hardware, where the
+  Nordic application was holding the unit. This is not new in `0.5.0`.
+
+- **A control rejection rendered as its own key.** `ControlRejected.code` is
+  already a message key -- the server picks it -- but the console fed it to the
+  table that maps *raw* library codes, which found nothing and fell through to
+  the unknown-code fallback, printing `er_range` where a sentence belonged.
+  Every rejection on the control path was affected, which is the same
+  bare-identifier failure the explicit tables were introduced to end,
+  reintroduced at the call site. Rejections now resolve through their own path,
+  which still verifies the key exists rather than trusting it.
+
+- **A request with no `Origin` header was refused.** The handshake guard
+  treated an absent origin like a foreign one, but a cross-origin page always
+  sends one and a plain `curl` or a script never does, so the rule turned away
+  exactly the callers it was not written for. Foreign origins are still refused
+  everywhere; an absent one is now admitted on the read-only session snapshot
+  and nowhere else.
+
+- **Losing the device threw away the last measurements.** On a transport
+  failure the supervisor dropped its stream state, including samples that had
+  been converted but not yet batched to the browser -- the moment before the
+  cable came out, which is the part of an unplug worth looking at. Those
+  buckets are now flushed before the state goes.
+
+- **A gap during a recording was placed on the wrong timeline.** A recording
+  drives its own stream whose sample indices restart at zero, and the gap event
+  was published with the index the stream reported, which put the gap somewhere
+  the console had never been. It is now placed where the console's own
+  accumulator stands.
+
+- **A failure just after the device opened left it open.** The supervisor's
+  startup covered the open and the work after it with one handler, so a failure
+  in that work reported the error and returned -- with a live handle, its power
+  untouched, and no thread left for `shutdown()` to join. Only the open is
+  handled that way now; anything after it runs the full shutdown, which
+  restores the power state the session started with.
+
 ## [0.4.0] — 2026-08-21
 
 A minor release that adds a second shipped package and no new behaviour to the

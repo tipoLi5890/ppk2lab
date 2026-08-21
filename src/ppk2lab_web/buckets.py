@@ -281,6 +281,17 @@ class Tier0Accumulator:
         """Sample index the next closed bucket will start at."""
         return self._start_index
 
+    @property
+    def position(self) -> int:
+        """Sample index the next sample will occupy.
+
+        This accumulator is the console's timeline, so this is where an event
+        lands on it -- which is not always what the event itself says. A
+        recording opens its own stream whose indices restart at zero, and
+        reporting those would put a gap somewhere the console never was.
+        """
+        return self._start_index + self._filled
+
     def break_continuity(self) -> None:
         """Start no edge across the next sample, without closing a bucket."""
         self._last_logic = -1

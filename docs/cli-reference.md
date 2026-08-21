@@ -594,6 +594,12 @@ the same three things `configure` can, through the same methods, with the same
 validation and the same `--max-voltage-mv` ceiling. It can never reset the
 device, set a user gain, choose which device to open, or read or write a file.
 
+Two more flags exist for narrower cases. `--allow-origin ORIGIN` (repeatable)
+adds a browser origin the handshake will accept, which is what makes
+`npm run dev` on `:5273` able to drive a live server; the console's own origin
+is always allowed and never needs it. `--no-autostart` opens the device without
+starting the stream, for a session that should sit idle until someone asks.
+
 Two flags are refused rather than warned about:
 
 - `--allow-control` on a non-loopback `--host`. There is no authentication

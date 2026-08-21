@@ -152,8 +152,14 @@ jobs:
         # Asserted from the artifact that would be uploaded, not from
         # pyproject.toml: this is the promise a `pip install ppk2lab` makes,
         # and it cannot be fixed after an upload.
+        #
+        # Every Python block in these workflows is a quoted heredoc rather than
+        # `python -c "..."`. A double-quoted shell string still expands
+        # backticks and $, so a Python comment mentioning a command runs it --
+        # which is exactly how the 0.5.0 release build failed, on the last job
+        # before PyPI, with an IndentationError quoting a pip download line.
         run: |
-          /tmp/fresh/bin/python -c "
+          /tmp/fresh/bin/python - <<'CHECK'
           from importlib.metadata import metadata
           m = metadata('ppk2lab')
           base = [r for r in (m.get_all('Requires-Dist') or []) if 'extra ==' not in r]
@@ -161,7 +167,7 @@ jobs:
           assert sorted(m.get_all('Provides-Extra') or []) == ['dev', 'web'], m.get_all('Provides-Extra')
           import sys, ppk2lab
           assert 'starlette' not in sys.modules, 'importing ppk2lab pulled in the web extra'
-          "
+          CHECK
       - name: '`ppk2lab web` exists without its extra and says what is missing'
         # The highest-value check here: from the wheel that actually ships, the
         # subcommand is present in a base install, exits 7, and names the
@@ -178,7 +184,7 @@ jobs:
           grep -q "ppk2lab\[web\]" web-missing.json
       - name: Installed wheel carries the web console
         run: |
-          python -c "
+          python - <<'CHECK'
           import glob, zipfile
           wheel = glob.glob('dist/*.whl')[0]
           names = zipfile.ZipFile(wheel).namelist()
@@ -186,7 +192,7 @@ jobs:
               path = 'ppk2lab_web/static/' + asset
               assert path in names, 'wheel omits ' + path
           assert 'ppk2lab_web/py.typed' in names, 'PEP 561 marker missing for ppk2lab_web'
-          "
+          CHECK
       - name: Installed wheel is typed and correctly licensed
         # These have to be checked against the installed package, not the
         # source tree: py.typed exists in src/ whether or not packaging puts
@@ -194,7 +200,7 @@ jobs:
         # Without the marker, PEP 561 makes every downstream type checker
         # treat the whole ppk2lab surface as Any.
         run: |
-          /tmp/fresh/bin/python -c "
+          /tmp/fresh/bin/python - <<'CHECK'
           import pathlib
           from importlib.metadata import metadata
           import ppk2lab
@@ -204,7 +210,7 @@ jobs:
           assert m['License-Expression'] == 'MIT', 'License-Expression is ' + repr(m['License-Expression'])
           files = sorted(m.get_all('License-File') or [])
           assert files == ['LICENSE', 'NOTICE.md'], 'License-File lines: ' + repr(files)
-          "
+          CHECK
       - name: Sdist carries the legal and reference files
         # NOTICE.md ships as a License-File and points at docs/sources.md, so
         # the docs have to travel with it; THIRD_PARTY_NOTICES.md is the

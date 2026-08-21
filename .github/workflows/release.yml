@@ -75,8 +75,13 @@ jobs:
         # cover it. A wheel published without py.typed silently disables type
         # checking for every downstream consumer, and PyPI records the license
         # from this metadata — neither is fixable after an upload.
+        # A quoted heredoc, not `python -c "..."`. Inside a double-quoted shell
+        # string the shell still expands backticks and $, so a Python *comment*
+        # that mentioned `pip install ppk2lab` ran it and pasted its output into
+        # the source -- which surfaced as an IndentationError naming a pip
+        # download line, on the one job standing between a build and PyPI.
         run: |
-          python -c "
+          python - <<'CHECK'
           import glob, zipfile
           wheel = glob.glob('dist/*.whl')[0]
           names = zipfile.ZipFile(wheel).namelist()
@@ -98,7 +103,7 @@ jobs:
           assert base == ['Requires-Dist: pyserial>=3.5'], base
           assert 'Provides-Extra: web' in meta, 'wheel does not declare the web extra'
           assert 'ppk2lab_web/server.py' in names, 'wheel omits the server'
-          "
+          CHECK
       - uses: actions/upload-artifact@v4
         with:
           name: release-dist

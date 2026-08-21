@@ -268,6 +268,18 @@ over SSH.
   takes a simulator with its rate limit removed to sustain the overflow. That
   is what CI was running when it found this.
 
+- **A comment in the release workflow ran a command.** The wheel checks that
+  stand between a build and PyPI were a `python -c "..."` block, and a
+  double-quoted shell string still expands backticks -- so the Python comment
+  `# The promise a plain \`pip install ppk2lab\` makes` ran `pip install
+  ppk2lab`, downloading the previous release from PyPI onto the runner and
+  pasting its output into the middle of the source. It surfaced as an
+  `IndentationError` quoting a pip download line, on the last job before an
+  upload. Nothing was published: the job failed and `publish-pypi` was skipped,
+  which is the gate working. Every Python block in both workflows is now a
+  quoted heredoc, so the whole class is gone rather than the one instance.
+  New in `0.5.0`; `0.4.0` released before the comment existed.
+
 ## [0.4.0] — 2026-08-21
 
 A minor release that adds a second shipped package and no new behaviour to the

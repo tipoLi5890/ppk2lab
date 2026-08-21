@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 
-import { useDismiss } from "../hooks";
+import type { ConnectionStatus } from "../data/source";
+import { useDismiss, useTicker } from "../hooks";
 import { LANGUAGES, useI18n } from "../i18n";
 import type { DeviceInfo } from "../types";
 import { Icon } from "./Icons";
@@ -8,6 +9,9 @@ import { Icon } from "./Icons";
 interface RailProps {
   info: DeviceInfo;
   simulated: boolean;
+  /** How this console's link to the server stands. Not the device's state. */
+  connection: ConnectionStatus;
+  connected: boolean;
   streaming: boolean;
   onToggleStream: () => void;
   controlUnlocked: boolean;
@@ -20,6 +24,8 @@ interface RailProps {
   outputCaveat: string | null;
   /** Fields edited but not yet applied. */
   dirtyCount: number;
+  /** A dry run is in flight; the device has not been asked to do anything. */
+  staging: boolean;
   onApplyDraft: () => void;
   onRevertDraft: () => void;
 }
@@ -30,9 +36,51 @@ interface RailProps {
  * Sticky, because stopping the stream and locking control are the two things a
  * reader may want without scrolling back up.
  */
+/**
+ * Where this console stands with the server.
+ *
+ * A badge rather than a modal, and deliberately so: reading the history you
+ * already have while the link is down is a legitimate thing to do, and the
+ * console is a viewer first. The wording never says "stopped" -- the device is
+ * very likely still measuring; what stopped is this console's view of it.
+ */
+function ConnectionPill({ connection }: { connection: ConnectionStatus }) {
+  const { t, lang } = useI18n();
+  // A countdown at 1 Hz, driven here so nothing else re-renders for it.
+  useTicker(connection.phase === "reconnecting" ? 1 : 0);
+  if (connection.phase === "simulated") return null;
+
+  const seconds =
+    connection.nextAttemptAtMs === null
+      ? 0
+      : Math.max(0, Math.ceil((connection.nextAttemptAtMs - performance.now()) / 1000));
+
+  const [label, tone, hint] =
+    connection.phase === "open"
+      ? [t("conn_live"), "good", t("conn_hint_open")]
+      : connection.phase === "connecting"
+        ? [t("conn_connecting"), "unk", t("conn_hint_closed")]
+        : connection.phase === "reconnecting"
+          ? [
+              t("conn_reconnecting", seconds ? `${seconds}s` : ""),
+              "warn",
+              t("conn_hint_lost", connection.attempt),
+            ]
+          : [t("conn_offline"), "bad", t(connection.reasonKey ?? "conn_hint_closed")];
+
+  void lang;
+  return (
+    <span className={`pill ${tone}`} title={hint.replace(/<[^>]+>/g, "")}>
+      {label}
+    </span>
+  );
+}
+
 export function Rail({
   info,
   simulated,
+  connection,
+  connected,
   streaming,
   onToggleStream,
   controlUnlocked,
@@ -42,6 +90,7 @@ export function Rail({
   onToggleOutput,
   outputCaveat,
   dirtyCount,
+  staging,
   onApplyDraft,
   onRevertDraft,
 }: RailProps) {
@@ -58,6 +107,7 @@ export function Rail({
             SIMULATED
           </span>
         )}
+        <ConnectionPill connection={connection} />
       </div>
 
       <div className="idset">
@@ -79,8 +129,14 @@ export function Rail({
             <button type="button" className="btn sm" onClick={onRevertDraft}>
               {t("cfg_revert")}
             </button>
-            <button type="button" className="btn sm primary" onClick={onApplyDraft}>
-              {t("cfg_apply")}
+            <button
+              type="button"
+              className="btn sm primary"
+              disabled={!connected || staging}
+              title={connected ? undefined : t("conn_locked")}
+              onClick={onApplyDraft}
+            >
+              {staging ? t("cfg_checking") : t("cfg_apply")}
             </button>
           </span>
         )}
@@ -92,11 +148,14 @@ export function Rail({
             type="button"
             className={`btn outbtn${outputOn ? " on" : ""}`}
             aria-pressed={outputOn}
+            disabled={!connected}
             onClick={onToggleOutput}
             title={
-              outputOn
-                ? `${t("out_stop")} — ${t("out_requested")}`
-                : [t("out_start"), outputCaveat].filter(Boolean).join(" — ")
+              !connected
+                ? t("conn_locked")
+                : outputOn
+                  ? `${t("out_stop")} — ${t("out_requested")}`
+                  : [t("out_start"), outputCaveat].filter(Boolean).join(" — ")
             }
           >
             <Icon name="record" />
@@ -108,8 +167,10 @@ export function Rail({
 
         <button
           type="button"
-          className={`btn livebtn${streaming ? " on" : ""}`}
+          className={`btn livebtn${streaming && connected ? " on" : ""}`}
           aria-pressed={streaming}
+          disabled={!connected}
+          title={connected ? undefined : t("conn_locked")}
           onClick={onToggleStream}
         >
           <Icon key={streaming ? "activity" : "pause"} name={streaming ? "activity" : "pause"} />

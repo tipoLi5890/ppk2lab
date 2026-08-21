@@ -26,5 +26,18 @@ export default defineConfig({
       },
     },
   },
-  server: { port: 5273 },
+  server: {
+    port: 5273,
+    // The URL rule is identical in development and in production: the page
+    // always talks to its own origin, and the bundle -- which ships inside the
+    // Python wheel -- never carries a host. `npm run dev` on its own still runs
+    // the simulated console; `?source=ws` opts into this proxy.
+    // A different address is a runtime question, not a build-time one, so it
+    // is `?ws=wss://bench:8765/ws` in the page rather than an env var here --
+    // which also keeps the test suite free of @types/node.
+    proxy: {
+      "/ws": { target: "ws://127.0.0.1:8765", ws: true },
+      "/api": { target: "http://127.0.0.1:8765" },
+    },
+  },
 });

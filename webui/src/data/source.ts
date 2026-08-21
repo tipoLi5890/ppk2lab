@@ -40,6 +40,49 @@ export interface ConsoleEvent {
   observed?: boolean;
 }
 
+/**
+ * How this console's link to the server stands.
+ *
+ * Deliberately on the snapshot rather than on `DeviceState`: that type mirrors
+ * `ppk2lab.DeviceState` field for field and has to keep doing so. This is a
+ * fact about the console, not about the instrument -- and the two are not the
+ * same fact. `measuring: true` with `phase: "reconnecting"` reads as "the
+ * device is still running and this console can no longer see it", which is
+ * exactly what an operator needs to be told rather than a frozen trace that
+ * looks like a stopped measurement.
+ */
+export type ConnectionPhase = "simulated" | "connecting" | "open" | "reconnecting" | "closed";
+
+export interface ConnectionStatus {
+  phase: ConnectionPhase;
+  /** Attempt number in the current backoff run; 0 while open. */
+  attempt: number;
+  /** Timestamp of the next attempt, or null. Not a countdown -- see useTicker. */
+  nextAttemptAtMs: number | null;
+  /** Session seconds of the newest data received. Where the trace froze. */
+  frozenAt: number | null;
+  /** Why it is not open, as a message key. Never a raw sentence. */
+  reasonKey: MessageKey | null;
+}
+
+export const CONNECTED: ConnectionStatus = {
+  phase: "simulated",
+  attempt: 0,
+  nextAttemptAtMs: null,
+  frozenAt: null,
+  reasonKey: null,
+};
+
+/** What the device says a plan would do, before any of it is done. */
+export interface PlanPreview {
+  /** One per step, in order. Every one has `applied: false`. */
+  steps: StateChange[];
+  /** The server's answer, not the client's guess. */
+  interruptsStream: boolean;
+  /** Echoed back with applyPlan, so a stale preview cannot be applied. */
+  stateSeq: number | null;
+}
+
 export interface DeviceSnapshot {
   info: DeviceInfo;
   state: DeviceState;
@@ -48,6 +91,7 @@ export interface DeviceSnapshot {
   assumedVoltageMv: number | null;
   /** Session ceiling protecting the DUT (`--max-voltage-mv`). */
   maxVoltageMv: number | null;
+  connection: ConnectionStatus;
 }
 
 /** One requested state change, before it is known whether it can be applied. */
@@ -94,6 +138,8 @@ export interface ApplyPlan {
   restartOutput: boolean;
   /** The device refuses these changes while measuring. */
   interruptsStream: boolean;
+  /** What the device projected for this plan, when it was asked. */
+  preview?: PlanPreview;
 }
 
 /** One line of the sequence the dialog shows before the operator commits. */
@@ -151,19 +197,31 @@ export interface DataSource {
   /** Fires when the snapshot or the event list changes — not per sample. */
   subscribe(listener: () => void): () => void;
 
-  isStreaming(): boolean;
-  startStream(): void;
-  stopStream(): void;
+  /**
+   * Start or stop measuring. Async because a refusal has to have somewhere to
+   * go: returning void meant a device that said no said it to nobody.
+   */
+  startStream(): Promise<void>;
+  stopStream(): Promise<void>;
 
   /** Advance a simulated clock. A push-driven source ignores it. */
   tick(nowMs: number): void;
 
   /**
-   * Dry run: report the change without sending a byte. Mirrors
-   * `set_*(dry_run=True)`, which returns `applied: false` and `W_DRY_RUN`.
+   * Dry run of a whole plan: report what it would do without sending a byte.
+   * Mirrors `set_*(dry_run=True)`, which returns `applied: false` and
+   * `W_DRY_RUN`.
+   *
+   * A plan rather than a single request, because the *order* is the safety
+   * property -- dropping the output before the voltage moves is the difference
+   * between a controlled change and a live one -- and two independent
+   * previews would each project an `after` that ignored the other.
    */
-  preview(request: ControlRequest): Promise<StateChange>;
-  /** Apply a change that was previewed. Never called without a preview first. */
+  previewPlan(plan: ApplyPlan): Promise<PlanPreview>;
+  /**
+   * Apply one change directly. Used only for the fail-safe direction, turning
+   * the output off, which must never sit behind a confirmation.
+   */
   apply(request: ControlRequest): Promise<StateChange>;
   /**
    * Run a staged plan in order: drop the output, stop measuring, apply, restore.

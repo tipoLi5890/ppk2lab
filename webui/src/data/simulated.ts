@@ -15,6 +15,7 @@ import type { MessageKey } from "../i18n";
 import { warningMessage } from "./codes";
 import { Mode, type Calibration, type DeviceState, type StateChange, type VoltageBasis } from "../types";
 import {
+  CONNECTED,
   ControlRejected,
   type ApplyPlan,
   type ConsoleEvent,
@@ -24,6 +25,7 @@ import {
   type DeviceConfig,
   type DeviceSnapshot,
   type EventKind,
+  type PlanPreview,
 } from "./source";
 
 /** Seconds of history synthesised before the page opened. */
@@ -193,16 +195,13 @@ export class SimulatedSource implements DataSource {
     return -PREFILL_S;
   }
 
-  isStreaming(): boolean {
-    return this.streaming;
-  }
-  startStream(): void {
+  async startStream(): Promise<void> {
     if (this.streaming) return;
     this.streaming = true;
     this.log("info", "start_measuring", "ev_restart", []);
     this.notify();
   }
-  stopStream(): void {
+  async stopStream(): Promise<void> {
     if (!this.streaming) return;
     this.streaming = false;
     this.decimator.breakContinuity();
@@ -288,6 +287,7 @@ export class SimulatedSource implements DataSource {
         state: this.deviceState(),
         calibration: this.calibration(),
         assumedVoltageMv: this.assumedVoltageMv,
+        connection: CONNECTED,
         maxVoltageMv: this.maxVoltageMv,
       };
     }
@@ -386,8 +386,30 @@ export class SimulatedSource implements DataSource {
         : "set_dut_power";
   }
 
-  async preview(request: ControlRequest): Promise<StateChange> {
-    this.validate(request);
+  /**
+   * Project a whole plan, in order, without touching anything.
+   *
+   * A plan rather than a single request, because the order is the safety
+   * property: dropping the output before the voltage moves is the difference
+   * between a controlled change and a live one, and two independent previews
+   * would each project an `after` that ignored the other.
+   */
+  async previewPlan(plan: ApplyPlan): Promise<PlanPreview> {
+    for (const change of plan.changes) this.validate(change);
+    const steps: StateChange[] = [];
+    if (plan.stopOutputFirst && this.dutPower) {
+      steps.push(this.projectStep({ kind: "dut-power", on: false }));
+    }
+    for (const change of plan.changes) steps.push(this.projectStep(change));
+    if (plan.restartOutput) steps.push(this.projectStep({ kind: "dut-power", on: true }));
+    return {
+      steps,
+      interruptsStream: plan.changes.some((c) => SimulatedSource.interrupts(c)),
+      stateSeq: null,
+    };
+  }
+
+  private projectStep(request: ControlRequest): StateChange {
     const warnings = ["W_DRY_RUN"];
     if (request.kind === "dut-power") {
       warnings.push("W_STATE_UNVERIFIED");

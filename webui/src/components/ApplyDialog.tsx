@@ -64,6 +64,17 @@ export function ApplyDialog({ plan, onCancel, onApply }: ApplyDialogProps) {
             </div>
           </div>
 
+          {/* Not a projection this console computed: the device was asked, and
+              every step came back `applied: false`. */}
+          {plan.preview && (
+            <p
+              className="note"
+              dangerouslySetInnerHTML={{
+                __html: t("ap_dryrun_confirmed", plan.preview.steps.length),
+              }}
+            />
+          )}
+
           <span className="lbl block">{t("ap_seq")}</span>
           <ol className="planseq">
             {steps.map((s, i) => (
@@ -73,13 +84,20 @@ export function ApplyDialog({ plan, onCancel, onApply }: ApplyDialogProps) {
             ))}
           </ol>
 
+          {/* The warnings the device itself raised, not a guess at which ones
+              it might. `md_dryrun` above promises no byte reached the wire,
+              and this is where that promise is kept: these came back from a
+              `dry_run=True` round trip that returned `applied: false`. */}
           <div className="badges">
-            <span className="pill warn">W_DRY_RUN</span>
+            {(plan.preview
+              ? [...new Set(plan.preview.steps.flatMap((step) => step.warnings))]
+              : ["W_DRY_RUN"]
+            ).map((code) => (
+              <span key={code} className={code === "W_STATE_UNVERIFIED" ? "pill bad" : "pill warn"}>
+                {code}
+              </span>
+            ))}
             {plan.interruptsStream && <span className="pill warn">stream break</span>}
-            {plan.restartOutput && <span className="pill warn">W_DUT_POWER_TRANSIENT</span>}
-            {(plan.stopOutputFirst || plan.restartOutput) && (
-              <span className="pill bad">W_STATE_UNVERIFIED</span>
-            )}
           </div>
 
           {live && <p className="note badish">{t("ap_live_note")}</p>}

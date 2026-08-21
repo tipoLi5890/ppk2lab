@@ -6,7 +6,43 @@ project uses semantic versioning once released.
 
 ## [Unreleased]
 
-Nothing yet.
+Groundwork for the web console's server. Each item below stands on its own and
+none of them needs the server to be useful.
+
+### Added
+
+- **`PPK2.stream(idle_timeout_s=)`.** The idle budget — the silence tolerated
+  between two byte deliveries while streaming — has always applied, because a
+  device that goes quiet with the port still open raises nothing on its own.
+  But `stream()` never passed it on, so every caller was pinned to the
+  library's 5 s default and an unbounded live stream necessarily ended after
+  5 s of silence. `None` disables the check, which only a caller with its own
+  liveness signal should choose.
+
+- **`run_capture(on_block=)`**, forwarded by `PPK2.capture()` and
+  `AsyncPPK2.capture()`. It is handed every `SampleBlock` and `GapEvent` the
+  artifact receives, unthrottled. One device owns one stream, so anything that
+  wants to watch a capture as it happens cannot open a second one, and
+  `on_progress` carries counters rather than samples. Being a data path rather
+  than a report, it inherits the back-pressure warning that `at=` already
+  carries; a callback that raises is disabled once with `W_PROGRESS_CALLBACK`,
+  because the artifact is the deliverable and a watcher is not.
+
+### Fixed
+
+- **A DUT power command was reported applied before it had left the host.**
+  `set_dut_power` wrote the byte and returned `applied: true` without draining
+  the port. Every other state change proves delivery with a readback; this one
+  has none, which is the case `Transport.flush` was written for — and the only
+  caller of it was `SerialTransport.close()`. A short-lived CLI run was covered
+  by that; a session that stays open would report VOUT live while the byte sat
+  in the OS write buffer. `set_dut_power` now drains before it reports.
+
+- **`tests/test_api_baseline.py` never checked the second package.** The
+  `0.4.0` fix widened the name filter to accept a `ppk2lab_web.` prefix, but
+  the test reads section 4b and every `ppk2lab_web.` row is in section 4a, so
+  the arm was unreachable and `ppk2lab_web.static_dir` went unverified while
+  the test reported green. It now reads both sections.
 
 ## [0.4.0] — 2026-08-21
 

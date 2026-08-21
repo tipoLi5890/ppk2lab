@@ -37,7 +37,7 @@ from .protocol.commands import (
 )
 from .protocol.metadata import Metadata, parse_metadata
 from .protocol.samples import GapEvent, SampleBlock
-from .session import StreamSession
+from .session import DEFAULT_IDLE_TIMEOUT_S, StreamSession
 from .transport.base import Transport
 from .transport.mock import MockTransport, SimulatedPPK2
 from .transport.serial import SerialTransport
@@ -627,6 +627,14 @@ class PPK2:
             if not self._power_changed:
                 self._initial_dut_power = self.state.dut_power
             self.transport.write(request)
+            # Drain before reporting this applied. Every other state-changing
+            # command proves delivery with a readback; this one has none, so a
+            # byte left in the OS write buffer would be reported as applied
+            # while the hardware never saw it. A short-lived CLI run is covered
+            # by the drain in close(), but a long-lived session -- the web
+            # console holds one open for hours -- has nothing else that would
+            # ever flush it.
+            self.transport.flush()
             self._update_state(dut_power=on)
             self._power_changed = True
             change = StateChange(
@@ -724,6 +732,7 @@ class PPK2:
         sample_limit: int | None = None,
         duration_s: float | None = None,
         wall_timeout_s: float | None = None,
+        idle_timeout_s: float | None = DEFAULT_IDLE_TIMEOUT_S,
     ) -> StreamIterator:
         """Start measuring and yield loss-aware stream events.
 
@@ -739,6 +748,14 @@ class PPK2:
             with device.stream(duration_s=1.0) as events:
                 for event in events:
                     ...
+
+        ``idle_timeout_s`` caps the silence tolerated between two byte
+        deliveries. The device sends continuously while measuring, so seconds
+        of silence means it stopped -- a state that raises nothing on its own.
+        The default matches :data:`~ppk2lab.session.DEFAULT_IDLE_TIMEOUT_S`.
+        ``None`` disables the check, which only a caller with its own liveness
+        signal should choose: without it, a device that goes quiet with the
+        port still open blocks the consumer forever.
         """
         from .types import SAMPLE_RATE_HZ
 
@@ -759,7 +776,9 @@ class PPK2:
             self._stream_active = True
         session = StreamSession(self.transport)
         self.last_session = session
-        iterator = StreamIterator(self, self._stream_events(session, sample_limit, wall_timeout_s))
+        iterator = StreamIterator(
+            self, self._stream_events(session, sample_limit, wall_timeout_s, idle_timeout_s)
+        )
         self._active_stream = weakref.ref(iterator)
         return iterator
 
@@ -768,6 +787,7 @@ class PPK2:
         session: StreamSession,
         sample_limit: int | None,
         wall_timeout_s: float | None,
+        idle_timeout_s: float | None,
     ) -> Generator[SampleBlock | GapEvent, None, None]:
         try:
             # start_measuring and session.start are inside the try: if either
@@ -775,7 +795,11 @@ class PPK2:
             # rejecting every later command for a stream that never began.
             self.start_measuring()
             session.start()
-            yield from session.events(sample_limit=sample_limit, wall_timeout_s=wall_timeout_s)
+            yield from session.events(
+                sample_limit=sample_limit,
+                wall_timeout_s=wall_timeout_s,
+                idle_timeout_s=idle_timeout_s,
+            )
         finally:
             # Whatever ended the stream — a hot unplug, a stall, the
             # caller's own error — is what the caller has to see. Read it

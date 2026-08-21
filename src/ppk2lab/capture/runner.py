@@ -243,6 +243,7 @@ def run_capture(
     tags: dict[str, str] | None = None,
     at: Sequence[tuple[Any, ...]] | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
+    on_block: Callable[[SampleBlock | GapEvent], None] | None = None,
 ) -> CaptureResult:
     """Capture from an open device. Never enables DUT power or changes any
     hardware state other than starting/stopping the measurement stream."""
@@ -356,6 +357,7 @@ def run_capture(
 
     fired_actions: list[dict[str, Any]] = []
     progress_state = {"last": 0.0, "live": on_progress is not None}
+    observer_state = {"live": on_block is not None}
 
     def _run_due_actions() -> None:
         """Fire scheduled actions inline, on this thread.
@@ -416,6 +418,32 @@ def run_capture(
                 warn(W_PROGRESS_CALLBACK, f"progress callback raised and was disabled: {exc}")
             )
 
+    def _observe(event: SampleBlock | GapEvent) -> None:
+        """Hand the caller the same events the artifact receives.
+
+        Unlike ``on_progress`` this is per block and not throttled: it exists
+        so a live view can be fed from the capture itself rather than from a
+        second stream, and a second stream is not available -- one device owns
+        one stream. That makes it a data path, so the backpressure warning on
+        ``on_progress`` and ``at=`` applies here with more force: whatever this
+        callback does happens between two reads of a 100 kS/s device, and time
+        spent inside it is time the reader thread's queue is filling.
+
+        The events are the same objects the writer stores. Treat them as
+        read-only; mutating one would change what the artifact records.
+        """
+        if not observer_state["live"] or on_block is None:
+            return
+        try:
+            on_block(event)
+        except Exception as exc:
+            # A watcher is not worth a capture. Say so once and keep going --
+            # the artifact is the deliverable, the live view is not.
+            observer_state["live"] = False
+            warnings.append(
+                warn(W_PROGRESS_CALLBACK, f"block callback raised and was disabled: {exc}")
+            )
+
     def sink(event: SampleBlock | GapEvent) -> None:
         nonlocal first_index, last_index, first_sample_at, last_sample_at
         nonlocal first_sample_utc, first_block_samples, last_block_samples
@@ -449,6 +477,7 @@ def run_capture(
                 writer.add_block(event)
             else:
                 writer.add_gap(event)
+        _observe(event)
         _run_due_actions()
 
     started_utc = datetime.now(UTC).isoformat(timespec="milliseconds")

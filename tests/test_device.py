@@ -72,6 +72,58 @@ def test_dut_power_reports_unobservable_readback(sim_device):
     assert sim_device.transport.simulator.dut_power is True
 
 
+def test_dut_power_is_drained_before_it_is_reported_applied(sim_device):
+    """`set_dut_power` is the one state change with no readback to prove it
+    landed, so the write has to be drained before the change says `applied`.
+
+    Every other command is covered by its own readback, and a short-lived CLI
+    run is covered by the drain in `close()`. A session that stays open for
+    hours has neither: the console would show VOUT live while the byte sat in
+    the OS write buffer. `Transport.flush` exists for exactly this command.
+    """
+    order: list[str] = []
+    transport = sim_device.transport
+    real_write, real_flush = transport.write, transport.flush
+
+    def watched_write(data: bytes) -> None:
+        order.append("write")
+        real_write(data)
+
+    def watched_flush() -> None:
+        order.append("flush")
+        real_flush()
+
+    transport.write = watched_write  # type: ignore[method-assign]
+    transport.flush = watched_flush  # type: ignore[method-assign]
+
+    change = sim_device.set_dut_power(True)
+
+    assert change.applied
+    assert order == ["write", "flush"], order
+
+
+def test_a_dry_run_power_change_writes_nothing_to_drain(sim_device):
+    """The dry run must not reach the transport at all -- not the write, and
+    so not the drain either."""
+    transport = sim_device.transport
+    flushes = 0
+    real_flush = transport.flush
+
+    def watched_flush() -> None:
+        nonlocal flushes
+        flushes += 1
+        real_flush()
+
+    transport.flush = watched_flush  # type: ignore[method-assign]
+    log_len = len(transport.simulator.command_log)
+
+    change = sim_device.set_dut_power(True, dry_run=True)
+
+    assert not change.applied
+    assert flushes == 0
+    assert len(transport.simulator.command_log) == log_len
+
+
 def test_close_restores_power_with_failsafe_warning():
     device = open_simulated()
     simulator = device.transport.simulator

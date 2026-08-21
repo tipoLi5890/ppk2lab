@@ -73,6 +73,16 @@ than warned about:
   authorization boundary: any local process can connect, and it arrives with no
   `Origin` header at all.
 
+**The origin rule is split by what the endpoint hands out.** A *foreign*
+origin is refused everywhere: the threat is a page on another site opening a
+socket to this one, and a page always sends one. An *absent* origin is a
+different caller — a local script, no browser involved. The WebSocket refuses
+it, because that is where the per-connection token is issued and where every
+state change goes. The read-only snapshot at `GET /api/session` admits it,
+because a script gains nothing there it could not get from `ppk2lab info` when
+the server is not holding the port, and refusing it would leave no way at all
+to read device state while it is.
+
 **Every state change rides the WebSocket, and all HTTP is GET.** A WebSocket is
 not subject to the same-origin policy — any page can open one and the browser
 sends `Origin` without enforcing it — so the handshake validates the origin and

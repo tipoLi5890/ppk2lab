@@ -90,7 +90,7 @@ class Console:
     async def _session(self, request: Any) -> JSONResponse:
         """A read-only snapshot, for a page that has not opened a socket yet
         and for anything scripting the server."""
-        if not self._origin_ok(request.headers.get("origin")):
+        if not self._origin_ok(request.headers.get("origin"), allow_absent=True):
             return JSONResponse({"error": "origin not allowed"}, status_code=403)
         snapshot = dict(self.supervisor.snapshot)
         snapshot["protocol"] = protocol.PROTOCOL_VERSION
@@ -98,15 +98,22 @@ class Console:
         snapshot["device_present"] = self.supervisor.device_present
         return JSONResponse(snapshot)
 
-    def _origin_ok(self, origin: str | None) -> bool:
-        """An absent Origin is refused when a token is required.
+    def _origin_ok(self, origin: str | None, *, allow_absent: bool = False) -> bool:
+        """Is this request from a page this server handed out?
 
-        A browser always sends one. A local process that opens a raw socket
-        does not -- and telling the two apart is exactly what the origin check
-        is for.
+        A *foreign* origin is always refused: the threat is a page on another
+        site opening a socket to this one, and a page always sends an origin.
+
+        An *absent* origin is a different caller -- a local process with no
+        browser involved -- and the two are separated deliberately. The
+        WebSocket refuses it, because that is where the control token is handed
+        out and where every state change goes. The read-only snapshot admits
+        it, because a script gains nothing there it could not get by running
+        `ppk2lab info` when the server is not holding the port, and refusing it
+        would leave no way at all to read device state while it is.
         """
         if origin is None:
-            return not self.require_token
+            return allow_absent or not self.require_token
         return origin.rstrip("/") in self.allowed_origins
 
     # -- WebSocket --------------------------------------------------------

@@ -7,6 +7,7 @@ import { IconSprite } from "./components/Icons";
 import { Inspector } from "./components/Inspector";
 import { Rail } from "./components/Rail";
 import { StatusBar, type DrawerPane } from "./components/StatusBar";
+import { errorMessage } from "./data/codes";
 import { SimulatedSource } from "./data/simulated";
 import { ApplyDialog } from "./components/ApplyDialog";
 import {
@@ -63,6 +64,24 @@ export default function App() {
     setDraft((d) => ({ ...d, ...patch }));
   }, []);
 
+  // Follow the device when nothing is staged.
+  //
+  // `useState(applied)` reads the config once, at mount. The simulated source
+  // knows its config in its constructor, so draft and applied agree forever
+  // and this never mattered. A source that learns the config from a device --
+  // milliseconds after mount, and again whenever the device moves under us --
+  // would otherwise leave the rail showing edits the operator never made, next
+  // to a live Apply button that commands hardware.
+  //
+  // When something *is* staged the diff is truthful: the device moved while
+  // the operator was mid-edit, and that is exactly what they need to see.
+  const [baseline, setBaseline] = useState<DeviceConfig>(applied);
+  if (baseline.mode !== applied.mode || baseline.voltageMv !== applied.voltageMv) {
+    const untouched = draft.mode === baseline.mode && draft.voltageMv === baseline.voltageMv;
+    setBaseline(applied);
+    if (untouched) setDraft(applied);
+  }
+
   const diff: ConfigDiff[] = [];
   if (draft.mode !== applied.mode) {
     diff.push({
@@ -88,8 +107,18 @@ export default function App() {
 
   const reject = useCallback(
     (err: unknown) => {
-      if (err instanceof ControlRejected) setRejection(translate(lang, err.code as MessageKey, ...err.args));
-      else throw err;
+      // Everything reaches the operator. This runs as a `.catch` handler, so
+      // re-throwing here produced an unhandled rejection and nothing else:
+      // no error boundary, no console entry the operator would see, and a
+      // state change that silently did not happen. Silence is worse than a
+      // crash for a control surface.
+      if (err instanceof ControlRejected) {
+        const { key, args } = errorMessage(err.code, err.args);
+        setRejection(translate(lang, key, ...args));
+        return;
+      }
+      const detail = err instanceof Error ? err.message : String(err);
+      setRejection(translate(lang, "er_unknown", "UNEXPECTED", detail));
     },
     [lang],
   );

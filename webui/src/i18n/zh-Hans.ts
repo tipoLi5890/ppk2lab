@@ -287,4 +287,8 @@ export const zhHans: Record<MessageKey, string> = {
   ch_live: "回到现在",
   ch_paused: "查看历史",
   ch_gesture: "拖曳平移 · 滚轮缩放时间 · Ctrl+滚轮缩放电流 · 双击回到现在",
+  w_unknown: "{0} — {1}",
+  er_unknown: "{0}：设备拒绝了这项变更。{1}",
+  m_unknown: "未知",
+  m_unknown_hint: "主控台尚未得知设备处于哪个模式。这里不做推测：Ampere 模式下 PPK2 不供电给 DUT、能量无法取得，猜测等于用一个毫无依据的假设去支撑一个数字。",
 };

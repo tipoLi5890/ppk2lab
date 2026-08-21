@@ -38,6 +38,34 @@ none of them needs the server to be useful.
   by that; a session that stays open would report VOUT live while the byte sat
   in the OS write buffer. `set_dut_power` now drains before it reports.
 
+- **The console derived i18n keys from warning codes by string surgery.**
+  `` `w_${code.slice(2).toLowerCase()}` `` with an `as MessageKey` cast defeats
+  the one guarantee the four `Record<MessageKey, string>` catalogues exist to
+  give, which is why `W_DUT_POWER_TRANSIENT` shipped rendering as the literal
+  string `w_dut_power_transient` — the catalogue spells it `w_dut_transient`.
+  An explicit table replaces it, so a wrong key is now a build error, and a
+  code with no translation renders as the code beside the sentence its source
+  supplied rather than as a bare identifier. `diagnostics.py` publishes its
+  catalogue as open; the console now treats it that way.
+
+- **An unknown measurement mode rendered as a confident "Ampere Meter".**
+  `DeviceState.mode` is `Mode | null` where the null means unknown, never a
+  default, but three panes collapsed it with `mode === Mode.SOURCE`. The mode
+  decides whether energy is computable at all, so the guess propagated into an
+  energy story with nothing behind it. Unknown is now shown as UNKNOWN, the
+  way the DUT-power cell beside it already did.
+
+- **A rejected state change could reach the operator as silence.** The console
+  re-threw anything that was not a `ControlRejected` from inside a `.catch`
+  handler, which produces an unhandled promise rejection and no visible
+  feedback at all. Every failure now renders.
+
+- **A staged edit could not tell the device apart from the operator.** The
+  draft config was seeded once, at mount, and never followed the device again.
+  Against a source that learns the config after mounting, the rail would show
+  edits nobody made next to a live Apply button. The draft now follows the
+  device while nothing is staged, and holds when something is.
+
 - **`tests/test_api_baseline.py` never checked the second package.** The
   `0.4.0` fix widened the name filter to accept a `ppk2lab_web.` prefix, but
   the test reads section 4b and every `ppk2lab_web.` row is in section 4a, so

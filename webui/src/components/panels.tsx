@@ -82,6 +82,10 @@ export function StatsPanel({
   const hist = source.decimator.histogram;
   const p50 = histQuantile(hist, 0.5);
 
+  // An unknown mode is not Source. That is the conservative reading and the
+  // only honest one: without knowing the mode there is no basis for saying the
+  // PPK2 supplies the DUT, so the voltage stays null and energy stays null
+  // rather than being computed from a setpoint that may power nothing.
   const isSource = snapshot.state.mode === Mode.SOURCE;
   const voltageMv = snapshot.assumedVoltageMv ?? (isSource ? snapshot.state.source_voltage_mv : null);
 

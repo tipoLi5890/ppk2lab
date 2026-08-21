@@ -23,6 +23,8 @@ import {
   zoomSpan,
 } from "../src/chart/geometry";
 import { Decimator, type Bucket } from "../src/core/decimator";
+import { modeLabels } from "../src/core/mode";
+import { Mode } from "../src/types";
 import { fmtCurrent, fmtRelTime } from "../src/core/format";
 import { histAdd, histQuantile, newHistogram } from "../src/core/histogram";
 import { buildDemoCycle, buildIdleCycle, uartWave } from "../src/core/profiles";
@@ -318,5 +320,31 @@ describe("chart layout", () => {
     // A linear axis reaching the device floor starts at zero, not at 100 nA.
     expect(yFor(0, "lin", l.plot)).toBe(l.plot - 2);
     expect(yFor(AXIS_MAX_UA, "lin", l.plot)).toBe(6);
+  });
+});
+
+describe("measurement mode labels", () => {
+  it("never renders an unknown mode as a known one", () => {
+    // `DeviceState.mode` is `Mode | null` and the null means unknown, never a
+    // default. Collapsing it with `mode === Mode.SOURCE` made unknown render
+    // as a confident "Ampere Meter" -- and the mode decides whether energy is
+    // computable at all, so the guess propagates into an energy story with
+    // nothing behind it.
+    const unknown = modeLabels(null);
+    expect(unknown.known).toBe(false);
+    expect(unknown.badge).toBe("UNKNOWN");
+    expect(unknown.name).not.toBe(modeLabels(Mode.AMPERE).name);
+    expect(unknown.name).not.toBe(modeLabels(Mode.SOURCE).name);
+  });
+
+  it("tones an unknown mode like the DUT-power cell beside it", () => {
+    expect(modeLabels(null).tone).toBe("unk");
+    expect(modeLabels(Mode.SOURCE).tone).toBe("acc");
+    expect(modeLabels(Mode.AMPERE).tone).toBe("acc");
+  });
+
+  it("labels the two known modes distinctly", () => {
+    expect(modeLabels(Mode.SOURCE).badge).toBe("SOURCE");
+    expect(modeLabels(Mode.AMPERE).badge).toBe("AMPERE");
   });
 });

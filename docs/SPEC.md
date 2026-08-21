@@ -1,6 +1,6 @@
 # Public data model, states, API, and schema contracts
 
-Status: frozen since `0.2.0`; `0.4.0` is the current release and adds to that
+Status: frozen since `0.2.0`; `0.5.0` is the current release and adds to that
 surface without changing it. Changes follow the stability policy at the end of
 this file. `SCHEMA_VERSION` is `"1"` and is independent of the package
 version.
@@ -465,9 +465,13 @@ Two more properties of the reported difference:
 | 9 | internal error |
 
 Exit 4 also covers a transport failure and a stalled stream
-(`TRANSPORT_ERROR`, `STREAM_STALLED`): all four are "the host cannot talk to
-this device right now". `capabilities --json` (`error_codes`) maps every
-error code to its exit code.
+(`TRANSPORT_ERROR`, `STREAM_STALLED`): with `PERMISSION_DENIED` and
+`PORT_BUSY`, those four are "the host cannot talk to this device right now".
+`LISTEN_ADDRESS_IN_USE` shares the code without sharing that reading -- it is
+`ppk2lab web` finding its TCP port taken, which says nothing about the
+instrument. Read the code as "retry will not help until something outside this
+process changes", and the specific code for what. `capabilities --json`
+(`error_codes`) maps every error code to its exit code.
 
 ## Schemas
 

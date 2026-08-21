@@ -24,7 +24,26 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 #: Documentation trees whose command lines must be real. `docs/` is not shipped
 #: in the sdist, so an install-tree run finds nothing and skips.
-DOC_GLOBS = ("docs/**/*.md", "README.md", ".github/README*.md", "skills/**/*.md", "examples/*.md")
+#:
+#: `INSTALL.md` is here because `ROADMAP.md` gate 2 names it -- "README/INSTALL/
+#: CLI examples reproducible from a clean environment" -- and it carries the
+#: first commands anyone runs. The three working-agreement files carry the
+#: verification loop an agent or a contributor executes verbatim, which is the
+#: same exposure as a bench example. `CHANGELOG.md` is deliberately absent: it
+#: records what past releases did, so a flag that has since been renamed is
+#: correct there and would fail here.
+DOC_GLOBS = (
+    "docs/**/*.md",
+    "README.md",
+    ".github/README*.md",
+    "skills/**/*.md",
+    "examples/*.md",
+    "INSTALL.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+)
 
 #: A command line ends where the shell takes over.
 _TERMINATORS = re.compile(r"\s(?:\||>|>>|&&|;|#)")

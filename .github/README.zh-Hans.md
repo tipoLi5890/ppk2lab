@@ -41,6 +41,10 @@ pip install ppk2lab
 
 ppk2lab --version
 ppk2lab doctor --json
+
+# 可选：浏览器 console
+pip install 'ppk2lab[web]'
+ppk2lab --simulate web      # http://127.0.0.1:8765/，不需要硬件
 ```
 
 `0.5.0` 是目前的版本、`0.2.0` 是第一个稳定版本，因此直接 `pip install ppk2lab` 即可安装。它刻意标示为 experimental：工具链在无硬件的情况下经过大量测试，让测量保持诚实的那些性质是被强制执行而非假设的——但它背后的**硬件验证仍然是部分的**。一台设备、只有 macOS，而且还没有任何解码器读过真实信号。[路线图](#路线图)说明它涵盖了什么、又没有涵盖什么；在你信任任何一个数字之前，请先读它。

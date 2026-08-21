@@ -160,6 +160,13 @@ multi-device sessions, a load at a range boundary, or any run longer than
 60 s. When a conclusion rests on one of those, say that the project has not
 measured it.
 
+The browser console (`ppk2lab web`, shipped in `0.5.0`) is on that list too: it
+has never driven a physical device. Every test behind it uses the simulator,
+which exercises the protocol, the supervisor and the state machine but not the
+instrument — so nothing about how it behaves on a bench has been observed,
+including the claim that a second `ppk2lab` command gets `PORT_BUSY` while the
+server holds the port.
+
 ## Task → reference map
 
 | The task involves | Read |

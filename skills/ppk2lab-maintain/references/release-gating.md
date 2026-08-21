@@ -97,6 +97,12 @@ and DUT-power lifetime. Treat it as one cell of gate 3 and nothing more:
   ±5% resistor: it rules out a gross error and cannot resolve the
   instrument's gain error. Never let it be recorded as a calibration
   cross-check.
+- **The browser console has never driven a physical device.** `0.5.0` ships
+  the server; the session predates it, and every test behind it uses the
+  simulator. It is a gate-3 cell of its own — streaming to a browser,
+  toggling DUT power mid-stream, applying a mode change, recording a real
+  `.ppk2a`, and pulling the cable — with none of it run. Report it PENDING;
+  `--simulate web` closes none of it.
 
 The compatibility matrix is keyed on the firmware fingerprint, because the
 measurement port reports no version string — one row per fingerprint

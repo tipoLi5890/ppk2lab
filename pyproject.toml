@@ -30,11 +30,40 @@ dynamic = ["version"]
 dependencies = ["pyserial>=3.5"]
 
 [project.optional-dependencies]
+# The server half. Nothing in `ppk2lab` imports any of these, and a plain
+# `pip install ppk2lab` still resolves to pyserial and nothing else; `ppk2lab
+# web` exists without them and exits 7 saying which one is missing.
+#
+# Deliberately NOT `uvicorn[standard]`. That pulls in httptools, uvloop and
+# watchfiles, none of which publishes a pure-Python or abi3 wheel: uvloop has
+# no Windows wheel at all, and this project's matrix is three operating systems
+# by four Python versions. watchfiles exists for --reload, which a shipped
+# console never uses, and httptools buys throughput on a listener whose
+# bottleneck is a 100 kS/s serial port.
+web = [
+  # 1.0 is where Starlette's API settled; `<2` is exactly the promise semver
+  # already makes, so pinning below the next major costs nothing.
+  "starlette>=1.0,<2",
+  # 0.50 is the first release whose ws="auto" selects the sans-io websockets
+  # implementation rather than the deprecated legacy one.
+  "uvicorn>=0.50",
+  # Explicit: base uvicorn ships no WebSocket implementation at all, and
+  # without one the /ws route answers 404 with only a log line to say why.
+  "websockets>=16",
+]
 dev = [
   "pytest>=8",
   "ruff>=0.6",
   "mypy>=1.10",
   "jsonschema>=4.21",
+  # The dev environment installs the web extra too. Without it mypy types every
+  # Starlette symbol in ppk2lab_web as Any and the server tests would have to
+  # skip -- a suite that reports green while proving nothing about half the
+  # release.
+  "ppk2lab[web]",
+  # starlette.testclient needs it; with neither httpx2 nor httpx it raises at
+  # import time.
+  "httpx2>=2",
 ]
 
 [project.scripts]

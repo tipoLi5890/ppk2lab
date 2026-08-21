@@ -235,6 +235,42 @@ class StreamStalledError(TransportError):
     )
 
 
+class WebExtraMissingError(CapabilityMissingError):
+    """`ppk2lab web` without the packages that serve it.
+
+    A distinct code rather than a bare CAPABILITY_MISSING because
+    `error_catalog()` publishes one remediation per class and
+    `docs/agent-interface.md` tells a caller to branch on `code`: a second
+    optional capability would otherwise be indistinguishable from this one
+    without reading prose.
+    """
+
+    code = "WEB_EXTRA_MISSING"
+    default_remediation = (
+        "Install the web extra with `pip install 'ppk2lab[web]'`, or "
+        "`pipx inject ppk2lab 'ppk2lab[web]'` if ppk2lab was installed with pipx. "
+        "Every other command works without it."
+    )
+
+
+class ListenAddressInUseError(Ppk2labError):
+    """The address `ppk2lab web` was asked to listen on is not available.
+
+    Exit 4 with the rest of "the host cannot give you this right now" -- the
+    same bucket as a serial port another process holds. `PortBusyError` would
+    be the wrong code: its remediation is about the Nordic Power Profiler
+    application holding a measurement port, which has nothing to do with a TCP
+    address.
+    """
+
+    code = "LISTEN_ADDRESS_IN_USE"
+    exit_code = EXIT_PERMISSION
+    default_remediation = (
+        "Another process is listening on that address. Stop it, or choose another port "
+        "with --http-port (use 0 to let the OS pick one and read it from the startup line)."
+    )
+
+
 #: Registry of all stable error codes, used by `ppk2lab capabilities` so the
 #: surface is generated from live definitions instead of a hand-written table.
 ERROR_CLASSES: tuple[type[Ppk2labError], ...] = (
@@ -258,6 +294,8 @@ ERROR_CLASSES: tuple[type[Ppk2labError], ...] = (
     DecoderRateError,
     TransportError,
     StreamStalledError,
+    WebExtraMissingError,
+    ListenAddressInUseError,
 )
 
 

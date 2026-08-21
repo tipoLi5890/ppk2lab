@@ -58,19 +58,59 @@ def test_missing_assets_raise_with_the_way_out(
 
 def test_only_the_validated_accessor_is_exported() -> None:
     """`STATIC_DIR` is the unchecked path; the export list must not advertise it."""
-    assert ppk2lab_web.__all__ == ["static_dir"]
+    assert ppk2lab_web.__all__ == ["create_app", "serve", "static_dir"]
+    assert "STATIC_DIR" not in ppk2lab_web.__all__
 
 
-def test_importing_the_core_does_not_pull_in_the_console() -> None:
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import ppk2lab",
+        # The real hole: `ppk2lab/__init__.py` does not import `.cli`, so the
+        # bare import above would not notice a module-level `import
+        # ppk2lab_web` added to the command module every subcommand loads.
+        "import ppk2lab.cli.main",
+        "import ppk2lab.cli.commands",
+        # `capabilities` walks every subparser, so it touches the `web` block.
+        "from ppk2lab.cli.main import main; main(['capabilities'])",
+        "from ppk2lab.cli.main import main; main(['--simulate', 'doctor'])",
+    ],
+)
+def test_the_core_never_pulls_in_the_console(statement: str) -> None:
     """The core keeps `pyserial` as its only dependency, and this is what holds it.
 
     Run in a subprocess: by the time this test file is collected, `ppk2lab_web`
     is already imported, so an in-process check would prove nothing.
     """
     result = subprocess.run(
-        [sys.executable, "-c", "import ppk2lab, sys; print('ppk2lab_web' in sys.modules)"],
+        [
+            sys.executable,
+            "-c",
+            f"import sys, io, contextlib\n"
+            f"with contextlib.redirect_stdout(io.StringIO()):\n"
+            f"    {statement}\n"
+            f"print('ppk2lab_web' in sys.modules)",
+        ],
         capture_output=True,
         text=True,
         check=True,
     )
-    assert result.stdout.strip() == "False", "importing ppk2lab dragged in ppk2lab_web"
+    assert result.stdout.strip() == "False", f"{statement!r} dragged in ppk2lab_web"
+
+
+def test_the_assets_package_does_not_need_the_web_extra() -> None:
+    """The other direction. A base install has to be able to find the built
+    console; only `serve` and `create_app` need Starlette, and they are
+    imported lazily so that finding the assets does not."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, ppk2lab_web; ppk2lab_web.static_dir(); "
+            "print(any(m in sys.modules for m in ('starlette', 'uvicorn', 'websockets')))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "False", "importing ppk2lab_web dragged in the web extra"

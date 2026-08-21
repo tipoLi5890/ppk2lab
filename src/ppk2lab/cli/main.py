@@ -40,6 +40,7 @@ COMMAND_CATEGORIES: dict[str, str] = {
     "assert": "offline",
     "compare": "offline",
     "export": "offline",
+    "web": "state-changing (viewer by default; requires --allow-control)",
 }
 
 #: One sentence per command, used as both argparse ``help`` (the subcommand
@@ -63,9 +64,18 @@ COMMAND_SUMMARIES: dict[str, str] = {
     "assert": "evaluate power/protocol assertions against a capture (offline)",
     "compare": "difference two captures on one metric, with an error bar (offline)",
     "export": "derived views: CSV, VCD, JSONL (offline)",
+    "web": (
+        "serve the browser console on a local HTTP/WebSocket listener "
+        "(viewer only unless --allow-control)"
+    ),
 }
 
-STATE_CHANGING_COMMANDS = frozenset({"configure"})
+#: What a command is *capable* of, not what one invocation does. `configure`
+#: is here even though a bare `ppk2lab configure` changes nothing, and `web` is
+#: here for the same reason: without --allow-control it cannot change anything,
+#: but publishing `state_changing: false` for a command that can energise a
+#: board would be the most damaging false statement in the manifest.
+STATE_CHANGING_COMMANDS = frozenset({"configure", "web"})
 
 
 class CliParser(argparse.ArgumentParser):
@@ -423,6 +433,64 @@ def build_parser() -> CliParser:
         "cannot know it; recorded as an explicit assumption",
     )
 
+    p = add_command("web")
+    _add_device_options(p)
+    p.add_argument(
+        "--host",
+        default="127.0.0.1",
+        metavar="ADDR",
+        help="address to listen on (default: 127.0.0.1). Loopback is the only address "
+        "control is allowed on; use SSH port forwarding to reach a bench remotely",
+    )
+    # Not --port: that is the measurement port path in five other commands, and
+    # one flag name meaning a file path in five places and a TCP port in a sixth
+    # is exactly the drift no test would catch.
+    p.add_argument(
+        "--http-port",
+        type=int,
+        default=8765,
+        metavar="PORT",
+        help="TCP port to listen on (default: 8765; 0 lets the OS choose and the "
+        "chosen port is printed on stderr)",
+    )
+    p.add_argument(
+        "--allow-control",
+        action="store_true",
+        help="allow the console to change mode, source voltage and DUT power. Without "
+        "it the server is a viewer and no request can reach the device",
+    )
+    p.add_argument(
+        "--max-voltage-mv",
+        type=int,
+        metavar="MV",
+        help="refuse any source voltage above this ceiling for the whole session "
+        "(also read from PPK2LAB_MAX_VOLTAGE_MV)",
+    )
+    p.add_argument(
+        "--allow-origin",
+        action="append",
+        default=[],
+        metavar="ORIGIN",
+        help="additional browser origin allowed to connect, for frontend development "
+        "against a live server; repeatable",
+    )
+    p.add_argument(
+        "--no-token",
+        action="store_true",
+        help="serve without a per-connection token. Refused together with "
+        "--allow-control: loopback is not an authorization boundary",
+    )
+    p.add_argument(
+        "--no-autostart",
+        action="store_true",
+        help="open the device but do not start measuring until asked",
+    )
+    p.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="open the console in a browser once the server is listening",
+    )
+
     return parser
 
 
@@ -479,6 +547,7 @@ def main(argv: list[str] | None = None) -> int:
             "assert": impl.cmd_assert,
             "compare": impl.cmd_compare,
             "export": impl.cmd_export,
+            "web": impl.cmd_web,
         }
         outcome = handlers[command](args)
         if outcome.raw_output is not None:

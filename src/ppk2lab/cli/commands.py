@@ -70,11 +70,13 @@ from ..errors import (
     EXIT_DEVICE_NOT_FOUND,
     EXIT_INTERNAL,
     EXIT_OK,
+    EXIT_PERMISSION,
     EXIT_PROTOCOL,
     EXIT_USAGE,
     CaptureIncompleteError,
     OutputExistsError,
     UsageError,
+    WebExtraMissingError,
     error_catalog,
 )
 from ..exports import (
@@ -671,6 +673,120 @@ def cmd_doctor(args: Any) -> Outcome:
 
 # ---------------------------------------------------------------------------
 # state-changing / measurement commands
+
+
+#: The third-party names `ppk2lab[web]` installs.
+#:
+#: Checked by name rather than by catching ImportError around the server
+#: import: an ImportError raised from inside the server for an unrelated reason
+#: would otherwise be reported as "install the extra", sending a maintainer to
+#: pip to fix a typo. Naming `websockets` individually matters most -- base
+#: uvicorn ships no WebSocket implementation, so someone who installed the
+#: other two by hand would otherwise get a console that renders and never
+#: connects.
+_WEB_REQUIREMENTS = ("starlette", "uvicorn", "websockets")
+
+
+def _require_web_extra() -> None:
+    import importlib.util
+
+    missing = [name for name in _WEB_REQUIREMENTS if importlib.util.find_spec(name) is None]
+    if missing:
+        raise WebExtraMissingError(
+            "`ppk2lab web` needs the web extra, which is not installed "
+            f"(missing: {', '.join(missing)})"
+        )
+
+
+def cmd_web(args: Any) -> Outcome:
+    """Serve the browser console against one open device.
+
+    The server owns that device for its whole lifetime, because a serial port
+    is exclusive and DUT power does not survive it closing. While it runs, any
+    other `ppk2lab` command against the same unit gets PORT_BUSY -- and closing
+    the browser tab does not de-energise VOUT. Only stopping the server does.
+    """
+    if args.no_token and args.allow_control:
+        raise UsageError(
+            "--no-token cannot be combined with --allow-control",
+            remediation="Loopback is not an authorization boundary: any local process can "
+            "connect, and the token is what separates the console this server handed out "
+            "from anything else on the machine. Drop one of the two flags.",
+        )
+    host = args.host
+    if args.allow_control and not _is_loopback(host):
+        raise UsageError(
+            f"--allow-control is only available on a loopback address, not on {host!r}",
+            remediation="Serve the viewer on that address if you need to, and reach the "
+            "controls over an authenticated tunnel instead: "
+            "`ssh -L 8765:127.0.0.1:8765 <bench-host>`.",
+        )
+
+    _require_web_extra()
+    # Imported here, never at module scope: this module is loaded for all
+    # fourteen commands, and `ppk2lab discover` must not pay for a web server.
+    from ppk2lab_web.server import serve
+
+    def open_device() -> PPK2:
+        if args.simulate:
+            # Explicitly rate-limited. `PPK2.open(simulate=True)` builds a
+            # simulator with no limit, which streams as fast as the consumer
+            # asks -- it would pin a core and run the "live" trace ahead of
+            # wall-clock time.
+            from ..testing.profiles import DemoActivityProfile
+            from ..transport.mock import MockTransport, SimulatedPPK2
+            from ..types import SAMPLE_RATE_HZ
+
+            simulator = SimulatedPPK2(
+                profile=DemoActivityProfile(), rate_limit_hz=float(SAMPLE_RATE_HZ)
+            )
+            return PPK2.open(
+                transport=MockTransport(simulator),
+                simulate=True,
+                max_voltage_mv=getattr(args, "max_voltage_mv", None),
+            )
+        return _open_device(args)
+
+    result = serve(
+        open_device=open_device,
+        host=host,
+        port=args.http_port,
+        allow_control=args.allow_control,
+        require_token=not args.no_token,
+        allow_origin=tuple(args.allow_origin),
+        open_browser=args.open_browser,
+        autostart=not args.no_autostart,
+    )
+    payload = result.to_json()
+    warnings: list[Diagnostic | str] = []
+    if result.simulated:
+        warnings.append(
+            warn(
+                W_GENERIC,
+                "the console served a simulated device; nothing on screen was measured",
+            )
+        )
+    if result.shutdown_reason == "device_lost":
+        return Outcome(
+            result=payload,
+            warnings=warnings,
+            human=f"served {result.url} for {result.listened_s:.0f} s; the device was lost",
+            exit_code=EXIT_PERMISSION,
+        )
+    return Outcome(
+        result=payload,
+        warnings=warnings,
+        human=f"served {result.url} for {result.listened_s:.0f} s",
+    )
+
+
+def _is_loopback(host: str) -> bool:
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host in ("localhost",)
 
 
 def cmd_configure(args: Any) -> Outcome:

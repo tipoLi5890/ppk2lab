@@ -5,7 +5,7 @@ import json
 import jsonschema
 import pytest
 
-from ppk2lab.cli.main import main
+from ppk2lab.cli.main import STATE_CHANGING_COMMANDS, main
 from ppk2lab.schemas import get_schema
 
 
@@ -56,9 +56,14 @@ def test_capabilities_lists_every_command(capsys):
         "assert",
         "compare",
         "export",
+        "web",
     }
-    configure = next(c for c in payload["result"]["commands"] if c["name"] == "configure")
-    assert configure["state_changing"] is True
+    # `state_changing` classifies what a command is *capable* of, not what one
+    # invocation does: a bare `ppk2lab configure` changes nothing either.
+    # Publishing `false` for a command that can energise a board would be the
+    # most damaging false statement in this manifest.
+    flagged = {c["name"] for c in payload["result"]["commands"] if c["state_changing"]}
+    assert flagged == set(STATE_CHANGING_COMMANDS) == {"configure", "web"}
     capture = next(c for c in payload["result"]["commands"] if c["name"] == "capture")
     assert capture["state_changing"] is False
     assert {d["name"] for d in payload["result"]["decoders"]} == {"uart", "spi"}

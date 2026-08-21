@@ -276,6 +276,11 @@ class Tier0Accumulator:
         self._last_logic = -1
         return [bucket]
 
+    @property
+    def next_index(self) -> int:
+        """Sample index the next closed bucket will start at."""
+        return self._start_index
+
     def break_continuity(self) -> None:
         """Start no edge across the next sample, without closing a bucket."""
         self._last_logic = -1

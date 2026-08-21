@@ -446,6 +446,37 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ["dry_run", "changes", "state"],
         **{"$schema": _DRAFT, "$id": "ppk2lab:configure-result"},
     ),
+    "web-result": _obj(
+        {
+            "url": {"type": "string"},
+            "host": {"type": "string"},
+            "port": {"type": "integer"},
+            "control_enabled": {"type": "boolean"},
+            "token_required": {"type": "boolean"},
+            "simulated": {"type": "boolean"},
+            "device": {"type": "object"},
+            "listened_s": {"type": "number"},
+            # Open, like every other reason catalog in this file: a new way for
+            # a server to stop is an addition, not a breaking change.
+            "shutdown_reason": {"type": "string"},
+            "state_changes": {"type": "array", "items": {"type": "object"}},
+            "counters": {"type": "object"},
+        },
+        [
+            "url",
+            "host",
+            "port",
+            "control_enabled",
+            "token_required",
+            "simulated",
+            "device",
+            "listened_s",
+            "shutdown_reason",
+            "state_changes",
+            "counters",
+        ],
+        **{"$schema": _DRAFT, "$id": "ppk2lab:web-result"},
+    ),
     "timeline-check": dict(_TIMELINE_CHECK, **{"$schema": _DRAFT, "$id": "ppk2lab:timeline-check"}),
     "capture-result": _obj(
         {

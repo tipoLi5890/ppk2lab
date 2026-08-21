@@ -6,13 +6,36 @@ project uses semantic versioning once released.
 
 ## [Unreleased]
 
-Groundwork for the web console's server. Each item below stands on its own and
-none of them needs the server to be useful.
+The console can be served against a real device.
 
 ### Added
 
-- **`PPK2.stream(idle_timeout_s=)`.** The idle budget — the silence tolerated
-  between two byte deliveries while streaming — has always applied, because a
+- **`ppk2lab web`**, the fourteenth subcommand, and the `web` extra that makes
+  it run: `pip install 'ppk2lab[web]'` brings Starlette, uvicorn and
+  websockets. The core still resolves to `pyserial` and nothing else, and the
+  subcommand exists without the extra -- it exits 7 with `WEB_EXTRA_MISSING`,
+  naming which package is missing, so `--help` and `capabilities` stay honest
+  about the surface whatever is installed.
+
+  The server owns one open `PPK2` for its whole lifetime, because a serial port
+  is exclusive and DUT power does not survive it closing. While it runs, any
+  other command against the same unit gets `PORT_BUSY`. **Closing the browser
+  tab does not de-energise VOUT; only stopping the server does**, and stopping
+  it restores the power state the session started with.
+
+  Read-only by default. Without `--allow-control` the operations that would
+  reach the device are not registered, so there is no path to refuse rather
+  than a refusal. A dry run is still available, because it writes nothing.
+
+- **Two error codes.** `WEB_EXTRA_MISSING` (exit 7 -- which had been reserved
+  for an optional capability since `0.2.0` and until now had no producer) and
+  `LISTEN_ADDRESS_IN_USE` (exit 4).
+
+- **`web-result`**, the schema for the session audit record `ppk2lab --json
+  web` prints when the server stops. `SCHEMA_VERSION` stays `"1"`.
+
+- **`PPK2.stream(idle_timeout_s=)`.** The idle budget -- the silence tolerated
+  between two byte deliveries while streaming -- has always applied, because a
   device that goes quiet with the port still open raises nothing on its own.
   But `stream()` never passed it on, so every caller was pinned to the
   library's 5 s default and an unbounded live stream necessarily ended after
@@ -27,6 +50,33 @@ none of them needs the server to be useful.
   than a report, it inherits the back-pressure warning that `at=` already
   carries; a callback that raises is disabled once with `W_PROGRESS_CALLBACK`,
   because the artifact is the deliverable and a watcher is not.
+
+### Changed
+
+- **`capabilities --json` now lists fourteen commands**, and `web` is marked
+  `state_changing: true`. That flag classifies what a command is *capable* of
+  rather than what one invocation does -- the same reason `configure` is
+  `true` while a bare `ppk2lab configure` changes nothing. Reporting `false`
+  for a command that can energise a board would be the most damaging false
+  statement in that manifest.
+
+- `pip install -e ".[dev]"` now also installs the web extra and `httpx2`, so
+  the server is type-checked and tested rather than skipped. Nothing reaches a
+  user: a plain `pip install ppk2lab` is unchanged.
+
+### Security
+
+This release adds the project's first listening socket.
+
+It binds `127.0.0.1` by default. `--allow-control` is **refused** on any
+non-loopback address and **refused** together with `--no-token`: loopback is
+not an authorization boundary, since any local process can connect and arrives
+with no `Origin` header at all. Every state change rides the WebSocket behind
+an origin check and a per-connection token, which leaves no state-changing
+HTTP endpoint for a cross-origin page to target -- all HTTP is GET. The
+browser can never reset the device, set a user gain, choose which device to
+open, or read or write a file. To reach a bench remotely, forward the port
+over SSH.
 
 ### Fixed
 

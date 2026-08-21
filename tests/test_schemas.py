@@ -54,9 +54,28 @@ def test_schema_count_stability():
         "info-result",
         "measure-result",
         "state-change",
+        "web-result",
         "window-stats",
     }
     assert expected.issubset(set(SCHEMAS))
+
+
+def test_web_result_publishes_every_field_it_emits():
+    """`ppk2lab web` returns an ordinary envelope like every other command, so
+    its result is validated like every other result."""
+    from ppk2lab_web.server import ServeResult
+
+    emitted = ServeResult(
+        url="http://127.0.0.1:8765/",
+        host="127.0.0.1",
+        port=8765,
+        control_enabled=False,
+        token_required=True,
+        simulated=True,
+    ).to_json()
+    declared = get_schema("web-result")["properties"]
+    assert set(emitted) == set(declared)
+    jsonschema.validate(emitted, get_schema("web-result"))
 
 
 def test_window_stats_publishes_every_field_it_emits():

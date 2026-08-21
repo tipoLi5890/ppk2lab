@@ -71,15 +71,25 @@ level): `ppk2lab.schemas` (`SCHEMAS`, `list_schemas`, `get_schema`) and the
 
 ## 3. Stable CLI surface
 
-Executable: `ppk2lab`. Thirteen subcommands, frozen for `0.3.0`: `discover`,
+Executable: `ppk2lab`. Fourteen subcommands, frozen for `0.5.0`: `discover`,
 `info`, `capabilities`, `schema`, `doctor`, `configure`, `capture`, `inspect`,
-`decode`, `measure`, `assert`, `compare`, `export`. Twelve of them were frozen
-at `0.2.0`; `compare` joined them in `0.3.0`, and a new command is an addition
-under the policy in `docs/SPEC.md`, not a change to those twelve. All are
-read-only except `configure` (dry-run unless `--apply`) and `capture`
-(starts/stops measuring only; never enables DUT power). `inspect` reads a
-capture's manifest without touching a sample chunk, so it is bounded regardless
-of how long the recording is.
+`decode`, `measure`, `assert`, `compare`, `export`, `web`. Twelve of them were
+frozen at `0.2.0`; `compare` joined them in `0.3.0` and `web` in `0.5.0`, and a
+new command is an addition under the policy in `docs/SPEC.md`, not a change to
+those twelve. All are read-only except `configure` (dry-run unless `--apply`),
+`capture` (starts/stops measuring only; never enables DUT power), and `web`
+(a viewer that reaches the device only with `--allow-control`). `inspect` reads
+a capture's manifest without touching a sample chunk, so it is bounded
+regardless of how long the recording is.
+
+`web` is the one long-running command, so `--json` means something slightly
+different for it: the envelope is printed when the server stops and its
+`result` is the session's audit record. Ctrl-C exits `0` with that record
+rather than `130` -- a command whose job is to run until it is stopped has
+finished when it is stopped, and that is the moment the record exists. The URL
+a person needs goes to stderr as soon as the socket is bound, along with a
+machine-readable `ppk2lab-web-ready {...}` line, which is what makes
+`--http-port 0` usable.
 
 Global flags, accepted before or after the subcommand: `--json` (emit the JSON
 envelope instead of human text), `--simulate` (simulated PPK2 — toolchain
@@ -121,12 +131,13 @@ published by `ppk2lab capabilities --json`.
   emit one record per timeline bucket instead of one per sample. Opt-in only,
   never a default, and the header shares no column name with the raw export so
   the two can never be confused ([decimation.md](decimation.md)).
-- **Schemas** (22, from `ppk2lab.schemas.SCHEMAS`, served by `ppk2lab schema`):
+- **Schemas** (23, from `ppk2lab.schemas.SCHEMAS`, served by `ppk2lab schema`):
   `annotation`, `assert-result`, `capabilities-result`, `capture-manifest`,
   `capture-result`, `compare-result`, `configure-result`, `decode-result`,
   `device`, `diagnostic`, `discover-result`, `doctor-result`, `envelope`,
   `error`, `export-result`, `gap`, `info-result`, `inspect-result`,
-  `measure-result`, `state-change`, `timeline-check`, `window-stats`.
+  `measure-result`, `state-change`, `timeline-check`, `web-result`,
+  `window-stats`.
 
 ## 4a. `ppk2lab_web` (new in `0.4.0`)
 

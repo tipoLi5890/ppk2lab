@@ -561,6 +561,63 @@ compiled-in constant, because row width depends on the currents and indexes
 in the file. It is an estimate; check it before committing to a
 multi-gigabyte write.
 
+## web — state-changing (viewer unless --allow-control)
+
+```bash
+ppk2lab web
+ppk2lab web --simulate --open-browser
+ppk2lab web --allow-control --max-voltage-mv 3600
+ppk2lab --json web --http-port 0
+```
+
+Serves the browser console on a local HTTP + WebSocket listener. The server
+owns one open device for its whole lifetime, because a serial port is
+exclusive and DUT power does not survive it closing — so while it runs, any
+other `ppk2lab` command against the same unit gets `PORT_BUSY` (exit 4). The
+same fact has a consequence worth stating twice: **closing the browser tab
+does not de-energise VOUT. Only stopping the server does**, and stopping it
+restores the power state the session started with, fail-safe OFF when that was
+unknown.
+
+`--port` is still the measurement port path, as in `info` and `capture`. The
+TCP port is `--http-port`, and `--http-port 0` lets the OS choose one — the
+chosen port is printed on stderr, so a supervising process can read it.
+
+**Read-only by default.** Without `--allow-control` no request from the page
+can reach the device: the operations that would are not registered, so there
+is no code path to refuse. A dry run is still available, because it writes
+nothing and refusing it would only stop an operator seeing what a change would
+do before deciding.
+
+With `--allow-control`, the page can set mode, source voltage and DUT power —
+the same three things `configure` can, through the same methods, with the same
+validation and the same `--max-voltage-mv` ceiling. It can never reset the
+device, set a user gain, choose which device to open, or read or write a file.
+
+Two flags are refused rather than warned about:
+
+- `--allow-control` on a non-loopback `--host`. There is no authentication
+  beyond a per-connection token; serve the viewer there if you like and reach
+  the controls through `ssh -L 8765:127.0.0.1:8765 <bench-host>`.
+- `--allow-control` together with `--no-token`. Loopback is not an
+  authorization boundary: any local process can connect, and it arrives with
+  no `Origin` header at all.
+
+`--json` means something slightly different here, because this is the one
+long-running command. The envelope is printed when the server **stops**, and
+its `result` is the session's audit record: the URL, whether control was
+enabled, the device, how long it listened, the closing state changes and the
+final counters. Ctrl-C is how you stop a server, so it exits `0` with that
+record rather than `130` — a command whose job is to run until it is stopped
+has finished when it is stopped. The URL a person needs goes to stderr as soon
+as the socket is bound.
+
+Everything the console shows about the instrument is what the library says:
+voltage is never measured, a lost sample is drawn as a gap and never
+interpolated over, a decimated bucket carries min, max and mean rather than a
+bare mean, and DUT power is reported as requested and never as confirmed. See
+[webui.md](webui.md).
+
 ## `--max-samples` — the load ceiling on offline commands
 
 `decode`, `measure`, `assert`, and `export` materialize the samples they

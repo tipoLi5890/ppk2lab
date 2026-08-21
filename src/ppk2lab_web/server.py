@@ -12,8 +12,10 @@ from __future__ import annotations
 import atexit
 import contextlib
 import json
+import signal
 import socket
 import sys
+import threading
 import time
 import webbrowser
 from dataclasses import dataclass, field
@@ -25,7 +27,7 @@ from . import static_dir
 from .supervisor import Supervisor
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from ppk2lab.device import PPK2
 
@@ -179,7 +181,8 @@ def serve(
     )
     server = uvicorn.Server(config)
     try:
-        server.run(sockets=[sock])
+        with _ctrl_break_raises_keyboard_interrupt():
+            server.run(sockets=[sock])
     except KeyboardInterrupt:
         # Expected, and not a failure. uvicorn catches SIGINT, shuts down
         # gracefully, and then re-raises the signal so that a caller sees the
@@ -206,6 +209,43 @@ def serve(
 
 def _display_host(host: str) -> str:
     return f"[{host}]" if ":" in host else host
+
+
+@contextlib.contextmanager
+def _ctrl_break_raises_keyboard_interrupt() -> Iterator[None]:
+    """Make Ctrl-Break end this server the way Ctrl-C does. Windows only.
+
+    uvicorn handles every signal in its ``HANDLED_SIGNALS`` -- on Windows that
+    includes ``SIGBREAK`` -- shuts down gracefully, restores the handler that
+    was installed before it, and then re-raises the signal so a caller sees the
+    conventional interrupted behaviour. That last step is why ``serve`` catches
+    ``KeyboardInterrupt``: on SIGINT the restored handler is Python's
+    ``default_int_handler``, which raises one.
+
+    ``SIGBREAK`` has no such handler. Python installs ``default_int_handler``
+    for ``SIGINT`` and leaves ``SIGBREAK`` at the C runtime's default, which
+    terminates the process rather than raising anything. Observed: exit 3, on
+    all four Windows jobs. So a console stopped with Ctrl-Break died at
+    ``raise_signal``, and the session's audit record -- the deliverable of a
+    command whose job is to run until it is stopped -- was thrown away.
+
+    Installing ``default_int_handler`` here means the handler uvicorn restores
+    is one that raises, so both keys reach the same ``except`` clause. It
+    changes nothing on any other platform, and nothing about the shutdown
+    itself: the device is closed by the lifespan hook well before this, which
+    is why the bug cost an exit code and a record rather than a de-energised
+    DUT.
+    """
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is None or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(sigbreak, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(sigbreak, previous)
 
 
 def _announce(result: ServeResult) -> None:

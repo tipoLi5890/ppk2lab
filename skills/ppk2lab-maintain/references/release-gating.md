@@ -4,7 +4,7 @@ Never tag, push, or publish — report readiness; the maintainer acts. The
 authoritative gate list is `ROADMAP.md` ("Release gates"); the
 procedure the maintainer follows afterwards is `docs/releasing.md`.
 
-Version policy: `0.2.0` was the first stable version; `0.4.0` is the current
+Version policy: `0.2.0` was the first stable version; `0.5.0` is the current
 release. Stable numbering covers the machine-readable contracts, not the hardware validation
 — that is partial, and the gates below record what is outstanding. Report a
 gate honestly whether or not a release has already shipped past it; the

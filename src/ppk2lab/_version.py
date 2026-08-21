@@ -15,7 +15,7 @@ passed — several need hardware this project has not had. What has and has not
 been validated is stated there and in the README.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 #: Version of the machine-readable JSON contracts (CLI envelopes, capture
 #: manifest, annotations, assertion results). Independent of the package

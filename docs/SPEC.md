@@ -117,6 +117,13 @@ state and may be used from two threads or two processes, one handle each. This
 has not been exercised on hardware: every session so far has had one unit
 attached.
 
+`ppk2lab web` holds one `PPK2` open for the life of the process, so while it
+runs, any other `ppk2lab` command against the same unit is refused with
+`PORT_BUSY` (exit 4). That is not a limitation of the server but the reason it
+exists: DUT power does not survive the port closing, so a powered measurement
+has to happen inside one session — and therefore closing the browser tab does
+not de-energise VOUT. Only stopping the server does.
+
 ### Multiple devices
 
 `discover()` returns every attached unit and `--device SERIAL` selects one.

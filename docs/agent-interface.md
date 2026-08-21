@@ -84,7 +84,9 @@ passing, or `p99 > 1mA` failing — and becomes `incomplete` when it would flip.
 
 | Read-only (safe to run any time) | State-changing / measurement |
 |---|---|
-| `discover`, `info`, `capabilities`, `schema`, `doctor` (default), offline `inspect`/`decode`/`measure`/`assert`/`export` | `configure` (requires `--apply`), `capture` (starts/stops measurement; never touches DUT power), `doctor --stream-check` (measurement only) |
+| `discover`, `info`, `capabilities`, `schema`, `doctor` (default), offline `inspect`/`decode`/`measure`/`assert`/`compare`/`export` | `configure` (requires `--apply`), `capture` (starts/stops measurement; never touches DUT power), `doctor --stream-check` (measurement only), `web` (a viewer that reaches the device only with `--allow-control`) |
+
+`web` is classified by what it is capable of rather than by what one invocation does, the same way `configure` is: without `--allow-control` it cannot change anything, but a command that *can* energise a board must not report `state_changing: false`. It is also the one long-running command — it holds the device until it is stopped, so any other command against the same unit gets `PORT_BUSY` while it runs.
 
 `doctor` exits nonzero when a check fails, so `ppk2lab doctor --json || stop`
 is a working pre-flight gate; `warn` and `skip` never block. Use it before a

@@ -1,14 +1,15 @@
 # Third-Party Notices
 
-This document is the dependency license audit for the `ppk2lab` `0.4.0`
+This document is the dependency license audit for the `ppk2lab` `0.5.0`
 release gate.
 
 ## Scope and policy
 
-- **Scope**: two things, because the distribution now contains two kinds of
+- **Scope**: two things, because the distribution contains two kinds of
   third-party code. First, the declared dependencies of the `ppk2lab` package,
   as recorded in `pyproject.toml` (`[project].dependencies`,
-  `[project.optional-dependencies]`). Second — new in `0.4.0` — the npm
+  `[project.optional-dependencies]` — which since `0.5.0` includes the `web`
+  extra). Second — since `0.4.0` — the npm
   packages **bundled into the shipped bits** of `ppk2lab_web/static/app.js`,
   which are not declared anywhere in `pyproject.toml` and would be missed by a
   scan that only reads it.
@@ -36,6 +37,35 @@ with the package.
 | Package | Declared constraint | License (as verified) | Project URL | Allowlist verdict |
 |---|---|---|---|---|
 | pyserial | `>=3.5` | BSD (metadata `License: BSD`; classifier `License :: OSI Approved :: BSD License`; no specific clause count stated in metadata) — verified from `pyserial-3.5.dist-info/METADATA` | https://github.com/pyserial/pyserial | Allowed (BSD) |
+
+## Optional runtime dependencies: the `web` extra
+
+Installed only by `pip install "ppk2lab[web]"`, which is what `ppk2lab web`
+needs. A plain `pip install ppk2lab` resolves to `pyserial` and nothing else,
+and nothing in the `ppk2lab` package imports any of these. They are **not**
+compiled into anything the wheel ships; they are ordinary dependencies resolved
+at install time.
+
+Deliberately *not* `uvicorn[standard]`: that adds `httptools`, `uvloop` and
+`watchfiles`, none of which publishes a pure-Python or abi3 wheel, and `uvloop`
+has no Windows wheel at all.
+
+| Package | Declared constraint | License (as verified) | Project URL | Allowlist verdict |
+|---|---|---|---|---|
+| starlette | `>=1.0,<2` | BSD-3-Clause (metadata `License-Expression: BSD-3-Clause`, verified from `starlette-1.6.0.dist-info/METADATA`) | https://github.com/encode/starlette | Allowed (BSD) |
+| uvicorn | `>=0.50` | BSD-3-Clause (metadata `License-Expression: BSD-3-Clause`, verified from `uvicorn-0.52.4.dist-info/METADATA`) | https://github.com/encode/uvicorn | Allowed (BSD) |
+| websockets | `>=16` | BSD-3-Clause (metadata `License-Expression: BSD-3-Clause`, verified from `websockets-17.0.1.dist-info/METADATA`) | https://github.com/python-websockets/websockets | Allowed (BSD) |
+
+Their transitive set, resolved and verified the same way:
+
+| Package | Pulled in by | License (as verified) | Allowlist verdict |
+|---|---|---|---|
+| anyio | starlette | MIT | Allowed (MIT) |
+| idna | anyio | BSD-3-Clause | Allowed (BSD) |
+| sniffio | anyio | MIT / Apache-2.0 (dual) | Allowed |
+| click | uvicorn | BSD-3-Clause | Allowed (BSD) |
+| h11 | uvicorn | MIT | Allowed (MIT) |
+| typing-extensions | starlette, anyio | PSF-2.0 | Allowed (PSF, permissive) |
 
 ## Development dependencies (not shipped)
 
@@ -96,7 +126,7 @@ installed dependencies.
 
 No blocked or unreviewed licenses were found, in either scope. Every license
 above was read from installed metadata rather than assumed, and no open items
-remain for the `0.4.0` license gate. The re-scan at release-tag time
+remain for the `0.5.0` license gate. The re-scan at release-tag time
 (`docs/releasing.md`) confirms the exact installed versions and re-runs the
 `@license` grep above.
 

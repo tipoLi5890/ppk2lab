@@ -1,18 +1,18 @@
-# Public API baseline (`0.4.0`)
+# Public API baseline (`0.5.0`)
 
 ## 1. Purpose
 
-This document is the **frozen surface** as of `0.4.0`: the Python names, CLI
+This document is the **frozen surface** as of `0.5.0`: the Python names, CLI
 commands, exit codes, and file formats that downstream code and agents may
 depend on, and the checklist the release gate diffs against. The surface was
 frozen at `0.2.0`; every change since is recorded below, and every one of them
 is an addition — nothing a `0.2.0` reader was told to expect was removed,
 renamed, or re-typed.
 
-`0.4.0` adds one thing to this document: a **second importable top-level
-package**, `ppk2lab_web`. It contains the built web console and one accessor
-for it. The HTTP/WebSocket server that will serve those assets does not exist
-yet, so nothing about a server is frozen here.
+`0.4.0` added a **second importable top-level package**, `ppk2lab_web`, holding
+the built web console and one accessor for it. `0.5.0` adds the server that
+serves it: a fourteenth subcommand, `ppk2lab web`, and a `web` extra. What that
+freezes and what it deliberately does not are in sections 4a and 5.
 
 - **Additions** (exported names, result fields, schemas, optional CLI flags)
   are backward compatible and may land in a patch or minor release.
@@ -21,7 +21,7 @@ yet, so nothing about a server is frozen here.
   [SPEC.md - Stability policy](SPEC.md#stability-policy).
 - Anything not listed here is internal (section 5).
 
-Current: `ppk2lab.__version__ = "0.4.0"`, `ppk2lab.SCHEMA_VERSION = "1"` — the
+Current: `ppk2lab.__version__ = "0.5.0"`, `ppk2lab.SCHEMA_VERSION = "1"` — the
 schema version has not moved since `0.2.0`, and under the policy below it does
 not have to, because nothing was removed, renamed, or given a new meaning.
 
@@ -139,15 +139,32 @@ published by `ppk2lab capabilities --json`.
   `measure-result`, `state-change`, `timeline-check`, `web-result`,
   `window-stats`.
 
-## 4a. `ppk2lab_web` (new in `0.4.0`)
+## 4a. `ppk2lab_web` (new in `0.4.0`, served since `0.5.0`)
 
 | Name | Kind | Description |
 |---|---|---|
 | `ppk2lab_web.static_dir` | function | `static_dir() -> Path`; the directory holding the built console. Raises `FileNotFoundError`, naming the directory and how to rebuild it, rather than returning a path that would serve nothing. |
 
-That is the whole frozen surface of this package. Two things about it are
-deliberately **not** frozen, and are repeated in section 5 because they are the
-two a reader is most likely to assume:
+Frozen alongside it, from `0.5.0`:
+
+- **The `web` extra.** `pip install 'ppk2lab[web]'` is how the server arrives.
+  Its members may change; that it exists and that the core resolves without it
+  may not.
+- **`ppk2lab web` and its flags**, per section 3 and `docs/cli-reference.md`.
+- **`GET /`** — the console, with its assets relative to it.
+- **`GET /ws`** — the WebSocket. Its messages are versioned by an integer
+  `protocol` in the handshake rather than by a JSON Schema, because half the
+  wire is binary and a JSON-Schema-only contract would describe one half while
+  implying it covered both. A console refuses a version it does not speak
+  before decoding a single frame.
+
+`ppk2lab_web.serve` and `ppk2lab_web.create_app` are importable and are
+**not** frozen. Freezing them would invite a second process to embed the same
+handle, and one open session per device is the property the whole design rests
+on.
+
+Three things are deliberately **not** frozen, and are repeated in section 5
+because they are the ones a reader is most likely to assume:
 
 - `ppk2lab_web.STATIC_DIR` — the unvalidated path behind `static_dir()`. It is
   a module attribute, not an export, and may become private.
@@ -270,10 +287,18 @@ a fraction of the distribution instead and does not.
 
 ## 5. Explicitly NOT frozen (may change without notice)
 
-- `ppk2lab_web` beyond `static_dir()`: the contents and file names under
-  `static/`, `STATIC_DIR`, and anything to do with the not-yet-written
-  HTTP/WebSocket server, including whether it arrives as a `web` extra, a
-  console script, or a subcommand. There is no `web` extra in `0.4.0`.
+- `ppk2lab_web` beyond `static_dir()` and the two entry points in section 4a:
+  the contents and file names under `static/`, `STATIC_DIR`, and the Python
+  signatures of `serve()` and `create_app()` — importable, but not a contract,
+  because a second embedder of one device handle would be a data-corruption
+  bug rather than a feature.
+- Everything about the console's wire except `GET /ws` itself and the integer
+  `protocol` that gates it: the message shapes, the binary frame layout, the
+  bucket cadence, the batching, and the choice of ASGI server. A later release
+  may replace uvicorn without a `SCHEMA_VERSION` bump.
+- Every HTTP path other than `GET /` and `GET /ws`, including `/api/session`.
+- The per-connection control token's format, and how the control lease is
+  arbitrated between two attached consoles.
 - The frontend sources under `webui/` are not part of the distribution at all;
   they are not shipped in the wheel or the sdist.
 

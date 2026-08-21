@@ -26,12 +26,13 @@
 - 处理小时级的采集文件：只读 manifest 而不加载样本、只读单个窗口，或导出降采样摘要；
 - 以电流、数字状态、UART 内容或 SPI 事务触发采集；
 - 在本地自动化与 CI 中运行可复现的功耗断言；
+- 在浏览器里看实时设备：`ppk2lab web` 提供电流轨迹、同一条时间轴上的 D0-D7，以及——仅在 `--allow-control` 下——改变设备状态的控制项；
 - 当样本不足以支撑结论时如实说明——样本丢失、ADC 饱和、窗口内没有数据——而不是给出一个看似确定的数字；
 - 通过 `--simulate` 在没有硬件的情况下体验全部功能。
 
 ## 安装
 
-核心包需要 Python 3.11 及以上，运行时依赖只有 `pyserial`。
+核心包需要 Python 3.11 及以上，核心的运行时依赖只有 `pyserial`。浏览器 console 需要一个服务器，而它是可选的：`pip install 'ppk2lab[web]'`。
 
 ```bash
 pipx install ppk2lab        # 推荐以此安装 CLI
@@ -42,7 +43,7 @@ ppk2lab --version
 ppk2lab doctor --json
 ```
 
-`0.4.0` 是目前的版本、`0.2.0` 是第一个稳定版本，因此直接 `pip install ppk2lab` 即可安装。它刻意标示为 experimental：工具链在无硬件的情况下经过大量测试，让测量保持诚实的那些性质是被强制执行而非假设的——但它背后的**硬件验证仍然是部分的**。一台设备、只有 macOS，而且还没有任何解码器读过真实信号。[路线图](#路线图)说明它涵盖了什么、又没有涵盖什么；在你信任任何一个数字之前，请先读它。
+`0.5.0` 是目前的版本、`0.2.0` 是第一个稳定版本，因此直接 `pip install ppk2lab` 即可安装。它刻意标示为 experimental：工具链在无硬件的情况下经过大量测试，让测量保持诚实的那些性质是被强制执行而非假设的——但它背后的**硬件验证仍然是部分的**。一台设备、只有 macOS，而且还没有任何解码器读过真实信号。[路线图](#路线图)说明它涵盖了什么、又没有涵盖什么；在你信任任何一个数字之前，请先读它。
 
 从开发源码运行：
 
@@ -138,6 +139,7 @@ ppk2lab assert capture.ppk2a \
 | `assert` | 应用可复现的功耗与协议回归规则 | 离线 |
 | `compare` | 对两份采集取单一指标的差值，并附上「仪器的 gain 误差有没有抵消」的误差条 | 离线 |
 | `export` | 生成 CSV、VCD、JSONL、窗口与降采样等派生视图，不替换原始证据 | 离线 |
+| `web` | 在本机 HTTP + WebSocket 监听端口上提供浏览器 console | 查看器；仅在 `--allow-control` 下会改变状态 |
 
 ## 范围与物理限制
 
@@ -173,6 +175,7 @@ PPK2 的数字输入以 100 kS/s 采样，协议解码因此仅适用于低速�
 - 模式切换、DUT 电源、输出电压与 reset 操作都会报告前后状态。
 - 结束或失败时，库会尝试恢复 session 开始时的电源状态，并记录恢复是否成功。
 - 任何插件 hook 或 skill 都不得自动打开 DUT 电源、改变电压或复位设备。
+- `ppk2lab web` 未给 `--allow-control` 时是查看器，只绑 `127.0.0.1`，且在其他地址上会拒绝 `--allow-control`。它永远不能复位设备、设定 user gain、选择要开哪台设备，或调高 session 的电压天花板。由于服务器整个生命周期都持有端口，**关闭浏览器分页不会让 VOUT 断电——只有停止服务器才会。**
 
 ## 配合 AI Agent 使用
 
@@ -241,7 +244,7 @@ Nordic Semiconductor、Power Profiler Kit 与 PPK2 可能是 Nordic Semiconducto
 
 ## 路线图
 
-`0.4.0` 已发布。仍待完成的是验证而非实现，而分清楚哪个是哪个很重要。2026-08-20 的一次硬件测试在单台设备上把工具从头跑到尾——固件指纹 `HW=49625 IA=59.0 keys=40 ports=2`，Apple silicon 上的 macOS——涵盖设备发现、metadata、100 kS/s 校正后采集、中断恢复，以及所有离线命令。以下这些**尚未**验证，而且各自都需要那次测试没有的硬件：
+`0.5.0` 已发布。仍待完成的是验证而非实现，而分清楚哪个是哪个很重要。2026-08-20 的一次硬件测试在单台设备上把工具从头跑到尾——固件指纹 `HW=49625 IA=59.0 keys=40 ports=2`，Apple silicon 上的 macOS——涵盖设备发现、metadata、100 kS/s 校正后采集、中断恢复，以及所有离线命令。以下这些**尚未**验证，而且各自都需要那次测试没有的硬件：
 
 - 在 Windows 与 Linux 上各跑一次实机测试，那里的操作系统会提供 macOS 不提供的 USB interface 编号；
 - 第二台设备与第二个固件指纹，目前两者都各只见过一个；
@@ -250,7 +253,7 @@ Nordic Semiconductor、Power Profiler Kit 与 PPK2 可能是 Nordic Semiconducto
 - 拔除后恢复、8-24 小时的长时间稳定性测试（soak test）与多设备 session——另有带宽扫描与一个会跨越电流量程边界的负载，两者仍未测量，但不作为 `0.2.0` 的发布条件；
 - 对照当前版本验证 Claude Code 与 Codex 的 skill 安装流程，以及从干净环境复现文档与示例。
 
-`0.4.0` 新增的东西里有一项已经完成、但还不能用：wheel 现在带着一个构建好的浏览器 console（位于 `ppk2lab_web`），以及**没有任何东西可以服务它**。没有可安装的 extra，也没有可执行的命令——拥有 PPK2 session 的服务器是下一阶段的工作。[docs/webui.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/webui.md) 说明里面有什么、以及它现在还做不到什么。
+`0.4.0` 出货了一个没有服务器的浏览器 console，`0.5.0` 把服务器补上了：`pip install 'ppk2lab[web]'` 然后 `ppk2lab web`。它同样**还没有对真实 PPK2 跑过**——它背后的每一个测试都用模拟器，那能验证协定与状态机，但验证不了仪器本身。[docs/webui.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/webui.md) 说明它做什么、它拒绝做什么、以及什么还没被证明。
 
 解码器的支持层级是以「设计时针对的速率」命名的，不是实测错误率——目前还没有任何实测。需要硬件的验证没有、也不打算有 CI workflow，因此由维护者在实机上执行，并随着覆盖的设备与平台增加逐步填上兼容性矩阵。该矩阵以及刻意不做的事项见 [ROADMAP.md](https://github.com/tipoLi5890/ppk2lab/blob/main/ROADMAP.md)。
 
@@ -275,7 +278,7 @@ Nordic Semiconductor、Power Profiler Kit 与 PPK2 可能是 Nordic Semiconducto
 | [docs/energy-analysis.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/energy-analysis.md) | 电荷、能量、峰值电流与延迟的定义 |
 | [docs/agent-interface.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/agent-interface.md) | JSON、工具、状态变更操作与 context 预算 |
 | [docs/sources.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/sources.md) | Nordic 官方文档与仓库参考 |
-| [docs/webui.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/webui.md) | 浏览器 console：0.4.0 出货了什么，以及什么还没有服务器 |
+| [docs/webui.md](https://github.com/tipoLi5890/ppk2lab/blob/main/docs/webui.md) | 浏览器 console：怎么执行、`--allow-control` 允许与不允许什么、以及它说的线路协定 |
 | [SECURITY.md](https://github.com/tipoLi5890/ppk2lab/blob/main/SECURITY.md) | 硬件、USB、文件与不可信输入的安全模型 |
 
 ## 联系方式

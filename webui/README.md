@@ -7,15 +7,15 @@ It is a **viewer first**. Opening it changes nothing about the instrument, and
 every state change goes through a dry-run preview before a byte reaches the
 wire — the same shape as `configure`, which is a dry run until `--apply`.
 
-> Nothing here has been run against hardware yet. The frontend is complete and
-> runs against the shipped `--simulate` profile; the Python supervisor that owns
-> a real session is the next piece.
+> Nothing here has been run against a physical PPK2. The server exists as of
+> `0.5.0` and everything behind it is tested against the simulator, which
+> exercises the protocol and the state machine but not the instrument.
 
 ## Where things live
 
 ```
 webui/                       this directory — the React + TypeScript sources
-src/ppk2lab_web/             the Python package that will serve them
+src/ppk2lab_web/             the Python package that serves them
 src/ppk2lab_web/static/        └─ the build output, committed
 ```
 
@@ -25,9 +25,11 @@ bundle is what crosses between them, which is why it is committed rather than
 built at install time. Only someone changing the frontend runs `npm`.
 
 `src/ppk2lab_web` sits beside `src/ppk2lab` rather than inside it so the core
-driver keeps `pyserial` as its only dependency. When the server lands its
-dependencies will arrive through a `web` extra; there is no such extra yet,
-because there is nothing yet to install. Nothing in the core imports from
+driver keeps `pyserial` as its only dependency. The server's dependencies
+arrive through the `web` extra — Starlette, uvicorn and `websockets`,
+deliberately not `uvicorn[standard]`, whose C extensions have no pure-Python
+fallback and no Windows wheel for uvloop. Nothing under `ppk2lab/` imports any
+of them, and a test proves it from a subprocess. Read the rest of this atl. Nothing in the core imports from
 `ppk2lab_web` either way.
 
 ## Working on the frontend
@@ -35,7 +37,8 @@ because there is nothing yet to install. Nothing in the core imports from
 ```bash
 cd webui
 npm install
-npm run dev        # http://localhost:5273, live reload
+npm run dev        # http://localhost:5273, live reload, simulated device
+                   # ?source=ws proxies to a live `ppk2lab web` on :8765
 npm test           # decimator, histogram and profile regressions
 npm run typecheck
 npm run build      # type-checks, then writes ../src/ppk2lab_web/static/
@@ -81,8 +84,38 @@ measurement that was never taken.
 
 `src/data/source.ts` defines what the console reads from and writes to.
 `SimulatedSource` runs the shipped `--simulate` profile in the browser;
-`WebSocketSource` will talk to the Python supervisor that owns the one open
-`PPK2` session. No component knows which it has.
+`WebSocketSource` talks to the `ppk2lab web` server that owns the one open
+`PPK2` session. No component knows which it has, and `src/data/select.ts`
+decides once per tab.
+
+Four files carry the socket, and four of them are pure so the whole thing is
+testable in vitest's node environment without a DOM or a server:
+
+| File | Holds |
+|---|---|
+| `data/protocol.ts` | the binary frame layout and its decoder. Throws on anything this build did not write |
+| `data/codes.ts` | `W_*` and error codes → message keys, as an explicit table |
+| `data/link.ts` | the reconnecting socket: backoff, correlation, timeouts. Takes a socket factory, never `new WebSocket()` inline |
+| `data/websocket.ts` | `WebSocketSource` — the only file that knows both halves |
+| `data/select.ts` | which source, and the module-scope memo that keeps it to one socket per tab |
+
+Three rules hold `WebSocketSource` together, and each has a silent failure:
+
+1. `snapshot()` and `events()` return cached objects. `useSyncExternalStore`
+   compares by identity every render, so a fresh object per call is an
+   infinite render loop.
+2. `config()`, `outputOn()` and `simulated` are read *during* render and are
+   not in the store. They ride the snapshot's identity change, so state is
+   mutated **before** listeners fire.
+3. Only `ingestBucket` and `breakContinuity` touch the decimator.
+   `pushSample`/`pushGap` drive a separate accumulator with its own clock, and
+   mixing the two emits buckets at fabricated times.
+
+`tests/decimation.test.ts` is the one test neither language can replace: it
+drives `tests/vectors/decimation-golden.json` through `Decimator` and compares
+against the buckets the Python `Tier0Accumulator` produced from the same
+input. Each side is internally consistent no matter what the other does, so
+nothing else can catch a drift between them.
 
 ## What the interface must not soften
 

@@ -7,13 +7,26 @@ live in `CONTRIBUTING.md`. Read all three first; nothing here overrides them.
 
 ## 1. Preconditions
 
-- Every release gate in `ROADMAP.md` ("Release gates") is green,
-  including the gates that need a bench: a physical pass on Windows, macOS,
-  and Linux (gate 3 — macOS on Apple silicon passed 2026-08-20, the other two
-  are open), the UART 9600 / SPI 10 kHz error-rate thresholds on the fixture
-  (gate 4), and the multi-device, hot-unplug and soak columns of the hardware
-  compatibility matrix. These cannot be faked or waived, and `--simulate`
-  cannot close any of them.
+- Every release gate in `ROADMAP.md` ("Release gates") that does not need a
+  bench is green: the stability labelling, the reproducible examples, the
+  licence allowlist scan across both dependency scopes, the skill and plugin
+  check, and CI green on the tag commit.
+- The gates that **do** need a bench — a physical pass on Windows, macOS and
+  Linux (gate 3; macOS on Apple silicon passed 2026-08-20), the UART 9600 /
+  SPI 10 kHz error-rate thresholds on the fixture (gate 4), and the
+  multi-device, hot-unplug and soak columns of the compatibility matrix — are
+  **recorded, not waived**. They have not blocked a release since `0.2.0` and
+  do not block this one; what they require instead is that `ROADMAP.md`, the
+  README and the CHANGELOG entry each state plainly what has and has not been
+  validated, so a stable version number never implies a gate that has not
+  passed. `--simulate` closes none of them and must never be recorded as
+  though it had.
+
+  This is the policy `CLAUDE.md` states and the one every release so far has
+  followed. It used to be written here as "these cannot be faked or waived",
+  which read as a hard block and was contradicted by every tag in the
+  project's history — the rule against faking is real, the implied rule
+  against shipping was not.
 - The `ppk2lab-maintain` release-gating audit
   (`skills/ppk2lab-maintain/references/release-gating.md`) ends with
   **"ready to tag: yes"**, no blockers. On "no", fix the blockers and
@@ -52,6 +65,26 @@ git diff --exit-code -- src/ppk2lab_web/static
 unzip -l dist/ppk2lab-*.whl | grep ppk2lab_web/static
 ```
 
+Confirm the base install is still what the README promises, and that the web
+command is honest without its extra — both from the wheel, because neither can
+be fixed after an upload:
+
+```bash
+python -c "
+from importlib.metadata import metadata
+m = metadata('ppk2lab')
+base = [r for r in (m.get_all('Requires-Dist') or []) if 'extra ==' not in r]
+assert base == ['pyserial>=3.5'], base
+"
+# Expect exit 7 and WEB_EXTRA_MISSING, naming the packages that are missing:
+ppk2lab --json web
+echo $?
+
+pip install 'ppk2lab[web]'
+# Open it in a browser, then Ctrl-C: exits 0 with the session's audit record.
+ppk2lab --simulate web --http-port 0
+```
+
 Reproduce the README quickstart commands with `--simulate` /
 `PPK2LAB_SIMULATE=1` against this wheel (`discover`, `info`, `capture`,
 `decode`), per `ROADMAP.md` gate 2. Then deactivate and remove the temp venv.
@@ -59,9 +92,10 @@ Reproduce the README quickstart commands with `--simulate` /
 Re-run the dependency license scan and confirm `THIRD_PARTY_NOTICES.md`
 matches the current dependency set against the MIT/BSD/Apache-2.0 allowlist,
 each row verified from installed metadata — `ROADMAP.md` gate 6 and
-gating-audit gate 6. Two scopes: the Python dependencies (`pyserial` at
-runtime, the `dev` extra for the rest) **and** the npm packages compiled into
-`ppk2lab_web/static/app.js`, which no Python metadata mentions. Confirm their
+gating-audit gate 6. Three scopes: the core's runtime dependency (`pyserial`), the `web` extra
+(Starlette, uvicorn, websockets and their transitive set), **and** the npm
+packages compiled into `ppk2lab_web/static/app.js`, which no Python metadata
+mentions at all. Confirm their
 notices survived minification:
 
 ```bash

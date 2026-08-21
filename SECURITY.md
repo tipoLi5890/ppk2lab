@@ -1,10 +1,9 @@
 # Security model
 
 This document describes the threat model and hardening rules for ppk2lab
-across four surfaces: hardware control, USB/serial input, capture files, and
-untrusted analysis input. A fifth — the browser console shipped in the wheel —
-has no server yet, and what that does and does not mean is recorded at the
-end.
+across five surfaces: hardware control, USB/serial input, capture files,
+untrusted analysis input, and — new in `0.5.0` — the local listener
+`ppk2lab web` opens, which is recorded at the end.
 
 ## Hardware safety (protecting the DUT and operator)
 
@@ -59,18 +58,61 @@ Data arriving from the serial port is treated as untrusted:
   overlap gaps return status `incomplete` (exit 6), and decoders emit
   zero-confidence error annotations rather than fabricated data.
 
-## Shipped web console assets
+## The web console's listener
 
-The wheel contains a built browser console under `ppk2lab_web/static/`. It has
-no server in `0.4.0`, so it adds no listener and no new runtime attack surface
-— nothing in the package serves it, and nothing runs it.
+`ppk2lab web` is the project's first listening socket. Everything else in the
+project talks to a USB serial port and to nothing else.
 
-One property is worth recording before that changes: its `index.html` loads
-IBM Plex from Google Fonts, so opening the console makes an outbound request to
-`fonts.googleapis.com` and `fonts.gstatic.com`. Every other part of this
-project talks to a USB serial port and to nothing else. On an isolated bench or
-an air-gapped workstation the fonts simply fail to load and the console falls
-back to system faces; it does not otherwise depend on the network.
+**It binds `127.0.0.1` by default**, and two combinations are refused rather
+than warned about:
+
+- `--allow-control` on a non-loopback `--host`. There is no authentication
+  beyond a per-connection token, and the answer that actually works is an
+  authenticated tunnel: `ssh -L 8765:127.0.0.1:8765 <bench-host>`.
+- `--allow-control` together with `--no-token`. Loopback is not an
+  authorization boundary: any local process can connect, and it arrives with no
+  `Origin` header at all.
+
+**Every state change rides the WebSocket, and all HTTP is GET.** A WebSocket is
+not subject to the same-origin policy — any page can open one and the browser
+sends `Origin` without enforcing it — so the handshake validates the origin and
+a per-connection token regardless. Once that gate exists, putting the commands
+behind it leaves no state-changing HTTP endpoint for a cross-origin page to
+target, and a page on `evil.example` that re-resolves to 127.0.0.1 arrives with
+its own origin and is refused.
+
+**What `--allow-control` permits** is exactly what `configure` can do: set
+mode, set source voltage, set DUT power. Through the same methods, with the
+same validation, under the same `--max-voltage-mv` ceiling, each recorded as a
+`StateChange` broadcast to every attached console. What it never permits, in
+any configuration:
+
+- `reset()` and `set_user_gain()` — no route to them exists.
+- Choosing the device. `--device` and `--port` are process arguments; a page
+  must not be able to say which instrument to open.
+- Filesystem access. A recording supplies a file name, never a path, and the
+  static handler serves the built console directory and nothing else.
+- Raising the session's voltage ceiling. A console may lower it for itself.
+- Stopping the server, or running any other command.
+
+**Back-pressure never buffers without limit.** A console that stops reading has
+its queued sample frames discarded rather than accumulated, and is told exactly
+which stretch of the timeline it will not receive — which it then draws as a
+gap and counts separately from instrument loss. A 400 kB/s producer against a
+slow consumer would otherwise be an OOM, and silently thinning a trace is the
+failure this project exists to prevent.
+
+**The exclusive session has a safety asymmetry worth stating twice.** The
+server holds the port for the life of the process, which is what makes a
+powered measurement possible from a UI at all — and it means **closing the
+browser tab does not de-energise VOUT. Only stopping the server does.** Session
+close then restores the starting power state, fail-safe OFF when it was
+unknown.
+
+**Google Fonts.** The console's `index.html` loads IBM Plex from
+`fonts.googleapis.com` / `fonts.gstatic.com`. The *server* makes no outbound
+request; the *browser*, on a page the server handed it, fetches the fonts. On
+an isolated bench they fail and the console falls back to system faces.
 
 ## Reporting a vulnerability
 

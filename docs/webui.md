@@ -115,8 +115,10 @@ Beyond that, three rules come from the hardware rather than from taste:
   `dry_run=True` first, so the before/after and the warnings in the dialog are
   what the device said rather than what the page guessed. The reply carries a
   sequence number that is echoed back on apply: a console that previewed, lost
-  its connection and came back cannot apply a plan against a device in a
-  different state than the one it showed.
+  its connection and came back cannot apply a plan against a device whose
+  *configuration* has since moved. The sequence counts configuration changes
+  only, so the stream stopping and starting in between — which a preview does
+  not touch and does not predict — never invalidates it.
 
 The console also surfaces what it cannot promise: mode and source-voltage
 changes require the device to stop measuring, so it says the stream will break
@@ -165,6 +167,20 @@ same-origin policy, so the handshake has to check the origin and a
 per-connection token regardless — and once that gate exists, putting the
 commands behind it leaves no state-changing HTTP endpoint for a cross-origin
 page to target. See [../SECURITY.md](../SECURITY.md).
+
+Every device-state transition is broadcast, not only the ones a single
+`configure`-style operation causes. A `state` message carries `change` — the
+requested value, before, after, and whether after was actually read back off
+the device — when there is one step to blame it on; a transition with no
+single cause, such as the stream stopping on its own or the device being
+lost, still moves the same fields and still goes out, carrying `change: null`
+instead of staying silent until the next reconnect. The `stream` message
+carries the pipeline's own state — `running`, `phase`, `reason` — which the
+console now renders rather than discarding, and which is a deliberately
+separate fact from `state.measuring`: the device's claim about itself and
+what the server is currently doing with the result are allowed to disagree,
+most visibly while a configuration plan is mid-flight and the device is still
+measuring behind a pipeline reporting `applying`.
 
 ### What a late-joining console sees
 

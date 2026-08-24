@@ -6,7 +6,110 @@ project uses semantic versioning once released.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **A frozen-connection banner in the status bar.** When the link is not
+  `open` and the console is not the simulated one, the status bar now says so
+  in place — the last time the connection was known good, or that it has never
+  connected — instead of leaving the reader to infer it from a frozen trace.
+  Its retry button calls `retryNow()`, which had existed on `WebSocketSource`
+  since the backoff was written but was never called from the interface, so a
+  dropped link could only be re-established by waiting out however many tens
+  of seconds the backoff had reached.
+- **The `bye` server message is logged.** The console already parsed it and
+  discarded it; it is now written to the session log under a new key,
+  `ev_server_bye`, added to all four i18n catalogues, so a server-initiated
+  disconnect reads differently from a socket that just dropped.
+
+### Changed
+
+- **`configure`'s human output is rewritten.** Each change now prints as its
+  own block — an `{operation} (applied|would apply):` header, the requested
+  arguments, one `field: before -> after` line per field that actually
+  changed (or `no state field changed` when none did) — closed by
+  `[verified on device]` or `[not read back — 'after' reflects the request]`
+  on an applied change; a dry run gets no readback marker, because nothing
+  was sent to read back. The trailing block, previously a raw dict, is now
+  `state after:` (`--apply`) or `state (unchanged):` (dry run) followed by the
+  same indented field list `info` uses, with the source voltage carrying its
+  `source_voltage_basis` as a parenthetical and `None` printed as `UNKNOWN`
+  rather than the word `None`. The JSON `changes`/`state` payload is
+  unchanged — it is frozen by `docs/api-baseline.md`.
+- **`info`'s human output now also prints `dut_power`, `measuring`, and
+  `source_voltage_basis`.** The JSON form has carried all three since before
+  `0.2.0`; the human form stopped at `mode` and `source_voltage_mv`, which
+  meant reading `dut_power` at a terminal required `--json` even though a
+  near-zero reading is often explained by it being unknown or off.
+
+### Fixed
+
+- **A configuration change made of several steps went dark until the console
+  reconnected.** `_republish_snapshot` broadcast a `state` message only when
+  handed a single `apply` operation's `change`; every other device-state
+  transition — a stream stopping or starting on its own, a plan settling
+  after a failed step, the device being lost — updated the supervisor and
+  told no connected console. A multi-step `apply_plan`, or the server's own
+  housekeeping, could move the device several times while every screen kept
+  showing where the last single `apply` had left it, and only caught up on
+  the next reconnect. `_republish_snapshot` now always broadcasts, carrying
+  `change: null` for a transition with no single step to name it by. No
+  `PROTOCOL_VERSION` bump: `change` was already nullable on the wire, so an
+  old bundle already handles a `state` message with or without one.
+- **A plan the operator never touched could be refused as moved.**
+  `preview_plan` returned, and `apply_plan` compared against, `state_seq` — a
+  counter that ticks on every broadcast, including the stream-start and
+  stream-stop broadcasts the fix above now sends on their own. A console that
+  previewed a plan and then watched the stream restart for an unrelated
+  reason had its Confirm rejected with `ER_STATE_MOVED` even though no
+  configuration had moved. A new `config_seq` counter, bumped only when a
+  change actually applies, is now what `preview_plan` returns and
+  `apply_plan` compares against; the wire field name (`stateSeq`) is
+  unchanged.
+- **A failed configuration plan could strand every console in the
+  `applying` phase.** `_apply_plan` publishes `stream(phase="applying")`
+  before it starts and a settled `stream` message after it finishes, but the
+  path that re-raises on a mid-plan failure returned before reaching the
+  second one — the phase saying a change was still in flight was left
+  standing after the change had already failed. It now publishes the settled
+  phase before re-raising.
+- **The chart clock could freeze on a stale flag.** It gated on
+  `state.measuring`, the device's own claim, carried on a `state` message and
+  only as fresh as the last one that happened to include it — not the same
+  fact as whether the server's own pipeline is currently running.
+  `DeviceSnapshot` gained a `stream: {running, phase, reason}` field, fed by
+  the `stream` message (previously received and discarded) and initialised
+  from `hello`'s `streaming` flag; the chart clock and the output caveat now
+  gate on `stream.running` instead, and `state.measuring` is left as the
+  device's own claim rather than being overwritten by it.
+- **Drawer ceiling and assumed-voltage inputs could stick at their initial
+  value forever.** Both were seeded once, from `useState`'s initial value at
+  mount, and never followed the snapshot afterwards — against a session
+  ceiling that arrives with `hello` after the pane can already be open, or an
+  assumed voltage another part of the console changes, the field kept
+  showing a number no longer in force. Both fields now follow the snapshot
+  for as long as the operator has not typed into them, and hold the draft
+  once something has.
+- **A change's own warning text decided whether `W_STATE_UNVERIFIED` applied,
+  by searching it for the words "read back" or "readback".** A change carries
+  `applied` and `observed_after` for exactly this question; a reworded
+  sentence would have silently stopped tripping the code an agent branches
+  on, or started tripping it on prose that never meant it. `configure` now
+  synthesizes `W_STATE_UNVERIFIED` structurally from `change.applied and not
+  change.observed_after`, and reports every other change-carried warning text
+  as `W_GENERIC`.
+- **`observed_after` could report a readback that never happened.** `_readback`
+  called `refresh_metadata()` and returned `True` on any reply, without
+  checking that the reply actually carried the field the change claims to
+  confirm. `set_mode` and `set_source_voltage` now require that the reply's
+  `mode` or `VDD` field is present before claiming a readback, and
+  `set_user_gain` now checks the reported gain against the requested value
+  within tolerance rather than treating an empty or unrelated reply as
+  confirmation. This can only turn a `True` into a `False`; the `StateChange`
+  shape and every JSON contract are unchanged. One consequence is visible
+  under `--simulate`: `set_user_gain` there now honestly reports
+  `observed_after: false`, because the simulator's `SET_USER_GAIN` is a
+  no-op and was never actually being confirmed — it only looked confirmed
+  before.
 
 ## [0.5.0] — 2026-08-21
 

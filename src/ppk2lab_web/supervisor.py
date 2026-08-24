@@ -200,6 +200,10 @@ class Supervisor:
         # snapshot or the new one and never a half-written mixture.
         self.snapshot: dict[str, Any] = {}
         self.state_seq = 0
+        # Counts configuration moves only. `state_seq` ticks on every republish,
+        # including the ones a stop/start of the stream causes, so using it for
+        # compare-and-swap would void a preview that nothing relevant had moved.
+        self.config_seq = 0
         self._shutdown_done = threading.Event()
         self.close_changes: list[dict[str, Any]] = []
         self.device_present = False
@@ -391,7 +395,10 @@ class Supervisor:
         return {
             "steps": steps,
             "interruptsStream": plan.interrupts_stream,
-            "stateSeq": self.state_seq,
+            # The wire name is unchanged; what it carries is the configuration
+            # counter, so that starting or stopping the stream between the
+            # preview and the confirmation does not invalidate the projection.
+            "stateSeq": self.config_seq,
         }
 
     def _do_apply(self, command: Command) -> dict[str, Any]:
@@ -409,11 +416,11 @@ class Supervisor:
         self._require_device()
         self._require_not_recording()
         plan, expected_seq = command.payload
-        if expected_seq is not None and expected_seq != self.state_seq:
+        if expected_seq is not None and expected_seq != self.config_seq:
             # Compare-and-swap. Without it, a console that previewed, lost its
             # connection, came back and pressed Confirm would apply a plan
             # against a device in a different state than the one it showed.
-            raise ControlRefused(ER_STATE_MOVED, [expected_seq, self.state_seq])
+            raise ControlRefused(ER_STATE_MOVED, [expected_seq, self.config_seq])
         return {"steps": self._apply_plan(plan)}
 
     def _do_record(self, command: Command) -> dict[str, Any]:
@@ -476,16 +483,24 @@ class Supervisor:
         was_streaming = self._streaming
         self._publish(protocol.stream(running=self._streaming, phase="applying"))
 
+        # Every step is broadcast as it lands rather than the plan reporting
+        # once at the end: a saga that stops the stream and writes three
+        # commands takes seconds, and a console showing the old state for the
+        # whole of it is showing hardware that has already moved. The `state`
+        # message carries the change, so no separate `event` is published --
+        # that would enter the same step in the console's log twice.
         if plan.stop_output_first and device.state.dut_power:
-            applied.append(
-                self._apply_one(ControlRequest("dut-power", on=False), dry_run=False).to_json()
-            )
+            step = self._apply_one(ControlRequest("dut-power", on=False), dry_run=False).to_json()
+            applied.append(step)
+            self._republish_snapshot(step)
         if plan.interrupts_stream and was_streaming:
             self._stop_stream(reason="control")
 
         try:
             for change in plan.changes:
-                applied.append(self._apply_one(change, dry_run=False).to_json())
+                step = self._apply_one(change, dry_run=False).to_json()
+                applied.append(step)
+                self._republish_snapshot(step)
         except BaseException:
             # Restoring the stream is owed to the operator. Restoring power is
             # not: a plan that failed must never leave VOUT energised because
@@ -494,15 +509,17 @@ class Supervisor:
                 with contextlib.suppress(Exception):
                     self._start_stream()
             self._republish_snapshot()
+            # The "applying" phase was published on the way in, so leaving
+            # without replacing it strands every console in it forever.
+            self._publish(protocol.stream(running=self._streaming, phase=self._phase()))
             raise
         if plan.interrupts_stream and was_streaming:
             self._start_stream()
         if plan.restart_output:
-            applied.append(
-                self._apply_one(ControlRequest("dut-power", on=True), dry_run=False).to_json()
-            )
+            step = self._apply_one(ControlRequest("dut-power", on=True), dry_run=False).to_json()
+            applied.append(step)
+            self._republish_snapshot(step)
 
-        self._republish_snapshot()
         self._publish(protocol.stream(running=self._streaming, phase=self._phase()))
         return applied
 
@@ -640,14 +657,9 @@ class Supervisor:
             with contextlib.suppress(Exception):
                 self.close_changes = [c.to_json() for c in device.close(restore_power=True)]
                 for change in self.close_changes:
-                    self._publish(
-                        protocol.state(
-                            device_state=device.state.to_json(),
-                            change=change,
-                            state_seq=self._bump_seq(),
-                            config=self._config(),
-                        )
-                    )
+                    # One publishing path. The handle is still here, so this
+                    # reads cached fields and sends no bytes to a dead port.
+                    self._republish_snapshot(change)
         self._republish_snapshot()
 
     # -- recording --------------------------------------------------------
@@ -836,11 +848,14 @@ class Supervisor:
         }
         seq = self._bump_seq()
         if change is not None:
-            self._publish(
-                protocol.state(
-                    device_state=state, change=change, state_seq=seq, config=self._config()
-                )
-            )
+            self.config_seq += 1
+        # Always broadcast, `change` or not. A transition with no single cause
+        # to name -- a stream stopping, a device closing itself -- still moves
+        # the state every console is showing, and the console that only learns
+        # of it by reconnecting is the bug this guards against.
+        self._publish(
+            protocol.state(device_state=state, change=change, state_seq=seq, config=self._config())
+        )
 
     @property
     def max_voltage_mv(self) -> int | None:

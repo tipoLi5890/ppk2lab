@@ -73,6 +73,26 @@ def _reply(ws, op: str, **fields) -> dict[str, Any]:
             return payload
 
 
+def _next_json_of(ws, kind: str, *, budget: int = 200) -> dict[str, Any]:
+    """The first message of one type, skipping the binary flood around it.
+
+    Separate from `_reply` rather than folded into it: `_reply` deliberately
+    discards what it passes, and a broadcast test is exactly the case where
+    those discarded messages are the evidence.
+    """
+    import json
+
+    for _ in range(budget):
+        message = ws.receive()
+        text = message.get("text")
+        if not text:
+            continue
+        payload = json.loads(text)
+        if payload.get("type") == kind:
+            return payload
+    raise AssertionError(f"no {kind!r} message in {budget} messages")
+
+
 # ---------------------------------------------------------------------------
 # What is served
 
@@ -262,6 +282,26 @@ def test_a_second_console_can_watch_but_not_command(harness):
             )
             assert reply["ok"] is False
             assert reply["error"]["messageKey"] == "er_held"
+
+
+def test_a_second_console_sees_the_change(harness):
+    """The other half of "every viewer sees everything": a console that did not
+    command the device still has to be told the device moved, without having to
+    reconnect to find out."""
+    with TestClient(harness.app) as client, _open(harness, client) as ws_a:
+        hello_a = ws_a.receive_json()
+        with _open(harness, client) as ws_b:
+            ws_b.receive_json()
+            reply = _reply(
+                ws_a,
+                "apply",
+                request={"kind": "dut-power", "on": True},
+                token=hello_a["session"]["control_token"],
+            )
+            assert reply["ok"] is True
+            state = _next_json_of(ws_b, "state")
+            assert state["state"]["dut_power"] is True
+            assert state["change"]["operation"] == "set_dut_power"
 
 
 def test_a_recording_must_be_bounded(harness):

@@ -326,6 +326,104 @@ def test_a_stale_preview_is_refused_rather_than_applied():
         sup.shutdown()
 
 
+def test_apply_plan_broadcasts_every_step():
+    """A saga takes seconds. A console that only learns the outcome at the end
+    -- or, before this, only by reconnecting -- spends that time showing
+    hardware state that has already moved."""
+    sink = Sink()
+    sup, sim = make_supervisor(sink, autostart=False)
+    sup.start()
+    try:
+        plan = ApplyPlan(
+            changes=[
+                ControlRequest("mode", mode=int(Mode.SOURCE)),
+                ControlRequest("voltage", voltage_mv=3300),
+            ]
+        )
+        out = sup.submit("apply_plan", (plan, None)).result(timeout=5)
+        broadcast = [m["change"]["operation"] for m in sink.json("state") if m["change"]]
+        assert broadcast == ["set_mode", "set_source_voltage_mv"]
+        assert broadcast == [step["operation"] for step in out["steps"]]
+        assert sim.vdd_mv == 3300
+        # And the pipeline phase is left where the device actually is, not on
+        # the "applying" the plan published on its way in.
+        assert sink.json("stream")[-1]["phase"] == "stopped"
+    finally:
+        sup.shutdown()
+
+
+def test_a_failed_plan_still_broadcasts_and_resets_phase():
+    sink = Sink()
+    sup, _sim = make_supervisor(sink, autostart=False)
+    sup.start()
+    try:
+        device = sup.device
+        assert device is not None
+        real_voltage = device.set_source_voltage_mv
+
+        def explode(mv, *, dry_run=False):
+            # A plan validates every step as a dry run before a byte reaches
+            # the wire, so a failure has to be injected into the real apply.
+            if dry_run:
+                return real_voltage(mv, dry_run=True)
+            raise TransportError("the write failed")
+
+        device.set_source_voltage_mv = explode  # type: ignore[method-assign]
+        plan = ApplyPlan(
+            changes=[
+                ControlRequest("mode", mode=int(Mode.SOURCE)),
+                ControlRequest("voltage", voltage_mv=3300),
+            ]
+        )
+        with pytest.raises(DeviceRefused):
+            sup.submit("apply_plan", (plan, None)).result(timeout=10)
+        device.set_source_voltage_mv = real_voltage  # type: ignore[method-assign]
+
+        # The step that did land is still reported: a plan that failed halfway
+        # left the device somewhere, and that somewhere is the truth.
+        assert [m["change"]["operation"] for m in sink.json("state") if m["change"]] == ["set_mode"]
+        assert sink.json("stream")[-1]["phase"] != "applying", "consoles left stuck in applying"
+    finally:
+        sup.shutdown()
+
+
+def test_stream_transitions_broadcast_state():
+    """`measuring` is device state, and it moves without anyone applying a
+    change. The chart clock is gated on it, so a stale one freezes the view."""
+    sink = Sink()
+    sup, _sim = make_supervisor(sink, autostart=False)
+    sup.start()
+    try:
+        sup.submit("start_stream").result(timeout=5)
+        sup.submit("stop_stream").result(timeout=5)
+        measuring = [m["state"]["measuring"] for m in sink.json("state")]
+        assert measuring == [False, True, False]
+        assert all(m["change"] is None for m in sink.json("state"))
+    finally:
+        sup.shutdown()
+
+
+def test_stream_transitions_do_not_invalidate_a_preview():
+    """Compare-and-swap is about the configuration, not about whether the
+    device happens to be measuring. Starting and stopping the stream between a
+    preview and its confirmation changes nothing the preview projected."""
+    sink = Sink()
+    sup, sim = make_supervisor(sink, autostart=False)
+    sup.start()
+    try:
+        preview = sup.submit(
+            "preview_plan", ApplyPlan(changes=[ControlRequest("voltage", voltage_mv=3300)])
+        ).result(timeout=5)
+        sup.submit("start_stream").result(timeout=5)
+        sup.submit("stop_stream").result(timeout=5)
+        plan = ApplyPlan(changes=[ControlRequest("voltage", voltage_mv=3300)])
+        out = sup.submit("apply_plan", (plan, preview["stateSeq"])).result(timeout=5)
+        assert out["steps"][0]["applied"] is True
+        assert sim.vdd_mv == 3300
+    finally:
+        sup.shutdown()
+
+
 def test_dut_power_does_not_break_the_trace():
     """The whole point of it being unguarded. An inrush is only observable if
     the samples either side of the switch belong to one continuous run."""

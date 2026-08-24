@@ -1,8 +1,8 @@
-# Public API baseline (`0.5.0`)
+# Public API baseline (`0.5.1`)
 
 ## 1. Purpose
 
-This document is the **frozen surface** as of `0.5.0`: the Python names, CLI
+This document is the **frozen surface** as of `0.5.1`: the Python names, CLI
 commands, exit codes, and file formats that downstream code and agents may
 depend on, and the checklist the release gate diffs against. The surface was
 frozen at `0.2.0`; every change since is recorded below, and every one of them
@@ -21,7 +21,7 @@ freezes and what it deliberately does not are in sections 4a and 5.
   [SPEC.md - Stability policy](SPEC.md#stability-policy).
 - Anything not listed here is internal (section 5).
 
-Current: `ppk2lab.__version__ = "0.5.0"`, `ppk2lab.SCHEMA_VERSION = "1"` — the
+Current: `ppk2lab.__version__ = "0.5.1"`, `ppk2lab.SCHEMA_VERSION = "1"` — the
 schema version has not moved since `0.2.0`, and under the policy below it does
 not have to, because nothing was removed, renamed, or given a new meaning.
 

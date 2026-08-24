@@ -10,7 +10,7 @@ contracts that must not drift.
   package, Python import, and CLI executable.
 - License: MIT (`LICENSE`), covering this repository's original material
   only; trademark and firmware boundaries are in `NOTICE.md`.
-- Versioning: `0.5.0` is the current release; `0.2.0` was the project's
+- Versioning: `0.5.1` is the current release; `0.2.0` was the project's
   first stable version. Stable numbering covers the machine-readable
   contracts, not the hardware validation, which is partial and tracked in
   `ROADMAP.md`. Semantic versioning applies from `0.2.0` onward, so a

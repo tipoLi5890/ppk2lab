@@ -45,7 +45,7 @@ pip install 'ppk2lab[web]'
 ppk2lab --simulate web      # http://127.0.0.1:8765/, no hardware needed
 ```
 
-`0.5.0` is the current release and `0.2.0` was the first stable one, so a plain `pip install ppk2lab` resolves it. It is labelled experimental on purpose: the toolchain is heavily tested without hardware, and the properties that keep a measurement honest are enforced rather than assumed — but the hardware validation behind it is partial. One unit, macOS only, and no decoder has yet read a real signal. [Roadmap](#roadmap) says exactly what that covers and what it does not; read it before you trust a number.
+`0.5.1` is the current release and `0.2.0` was the first stable one, so a plain `pip install ppk2lab` resolves it. It is labelled experimental on purpose: the toolchain is heavily tested without hardware, and the properties that keep a measurement honest are enforced rather than assumed — but the hardware validation behind it is partial. One unit, macOS only, and no decoder has yet read a real signal. [Roadmap](#roadmap) says exactly what that covers and what it does not; read it before you trust a number.
 
 Run from a development checkout:
 

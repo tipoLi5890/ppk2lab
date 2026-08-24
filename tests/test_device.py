@@ -51,6 +51,74 @@ def test_set_voltage_with_readback(sim_device):
     assert sim_device.state.source_voltage_basis is VoltageBasis.CONFIGURED_SOURCE
 
 
+def _drop_metadata_key(simulator, key):
+    """Make one simulator answer metadata without a given key.
+
+    A reply that arrives without the field just written is the case
+    ``observed_after`` used to misreport: the old readback asked only whether
+    the reply came at all, so the host's own request was published as a device
+    observation. The parser keeps a missing key as ``None`` rather than
+    inventing one, which is what makes the absence detectable here.
+    """
+    from ppk2lab.transport.mock import SimulatedPPK2
+
+    prefix = f"{key}:"
+    simulator.metadata_text = lambda: "".join(
+        f"{line}\n"
+        for line in SimulatedPPK2.metadata_text(simulator).splitlines()
+        if not line.startswith(prefix)
+    )
+
+
+def test_set_mode_without_a_mode_field_in_the_readback():
+    from ppk2lab.device import PPK2
+    from ppk2lab.transport.mock import MockTransport, SimulatedPPK2
+
+    simulator = SimulatedPPK2()
+    _drop_metadata_key(simulator, "mode")
+    device = PPK2.open(transport=MockTransport(simulator), simulate=True)
+    try:
+        change = device.set_mode(Mode.AMPERE)
+        assert change.applied
+        assert not change.observed_after
+        assert any("did not include the mode field" in w for w in change.warnings)
+        # The command still went out; only the claim about the result changes.
+        assert simulator.mode is Mode.AMPERE
+    finally:
+        device.close()
+
+
+def test_set_voltage_without_a_vdd_field_in_the_readback():
+    from ppk2lab.device import PPK2
+    from ppk2lab.transport.mock import MockTransport, SimulatedPPK2
+
+    simulator = SimulatedPPK2()
+    _drop_metadata_key(simulator, "VDD")
+    device = PPK2.open(transport=MockTransport(simulator), simulate=True)
+    try:
+        change = device.set_source_voltage_mv(3300)
+        assert change.applied
+        assert not change.observed_after
+        assert any("did not include the VDD field" in w for w in change.warnings)
+        assert simulator.vdd_mv == 3300
+    finally:
+        device.close()
+
+
+def test_user_gain_is_observed_only_when_the_device_reports_it(sim_device):
+    """The simulator keeps unity gains, so a request for anything else is a
+    device that did not take the value — and must not be reported as read
+    back. Asking for the gain it already holds is the confirmed case."""
+    change = sim_device.set_user_gain(2, 1.25)
+    assert change.applied
+    assert not change.observed_after
+    assert any("user gain" in w for w in change.warnings)
+
+    confirmed = sim_device.set_user_gain(2, 1.0)
+    assert confirmed.applied and confirmed.observed_after
+    assert confirmed.warnings == []
+
+
 def test_voltage_validated_before_any_write(sim_device):
     log_before = list(sim_device.transport.simulator.command_log)
     with pytest.raises(VoltageRangeError):

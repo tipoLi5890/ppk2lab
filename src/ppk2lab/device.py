@@ -8,6 +8,7 @@ read back from the device. Nothing here ever enables DUT power implicitly.
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import sys
 import threading
@@ -546,13 +547,36 @@ class PPK2:
         }
 
     # -- state-changing operations ----------------------------------------
-    def _readback(self, warnings: list[str]) -> bool:
+    def _readback(self, warnings: list[str], *, expect: str | None = None) -> bool:
+        """Re-read metadata and say whether it actually carried the field.
+
+        ``observed_after`` claims the "after" state was read back from the
+        device, so a reply that simply arrived is not enough: the metadata
+        parser preserves a missing key as ``None`` rather than inventing one,
+        and a firmware that omits ``mode`` or ``VDD`` would otherwise have the
+        host's own request reported as a device observation. ``expect`` names
+        the field that has to be present for the claim to hold; ``None`` asks
+        only that a reply arrived, which is all :meth:`reset` can claim —
+        after a reset every field is unknown by definition.
+        """
         try:
             self.refresh_metadata()
-            return True
         except Exception as exc:
             warnings.append(f"state readback failed: {exc}")
             return False
+        metadata = self.metadata
+        if expect == "mode" and (metadata is None or metadata.mode is None):
+            warnings.append(
+                "readback reply did not include the mode field; "
+                "'after' reflects the requested state"
+            )
+            return False
+        if expect == "vdd" and (metadata is None or metadata.vdd_mv is None):
+            warnings.append(
+                "readback reply did not include the VDD field; 'after' reflects the requested state"
+            )
+            return False
+        return True
 
     def set_mode(self, mode: Mode, *, dry_run: bool = False) -> StateChange:
         request = cmd_set_mode(mode)  # validates before touching hardware
@@ -579,7 +603,7 @@ class PPK2:
             self._require_not_measuring("change mode")
             self.transport.write(request)
             self._update_state(mode=mode)
-            observed = self._readback(warnings)
+            observed = self._readback(warnings, expect="mode")
             if observed and self.state.mode is not mode:
                 warnings.append(f"device reports mode {self.state.mode} after requesting {mode}")
             change = StateChange(
@@ -617,7 +641,7 @@ class PPK2:
                 source_voltage_basis=VoltageBasis.CONFIGURED_SOURCE,
             )
             self._voltage_configured = True
-            observed = self._readback(warnings)
+            observed = self._readback(warnings, expect="vdd")
             if observed and self.state.source_voltage_mv != voltage_mv:
                 warnings.append(
                     f"device reports VDD {self.state.source_voltage_mv} mV after "
@@ -724,7 +748,27 @@ class PPK2:
             self._require_not_measuring("set a user gain")
             self.transport.write(request)
             warnings: list[str] = []
+            # The refresh is worth doing whatever it reports -- the user gain
+            # is a calibration constant, so the Calibration object has to be
+            # rebuilt from the new metadata either way. What it cannot do is
+            # confirm the write on its own: `UG` is a per-range field, and a
+            # reply that omits it, or reports a different gain, is evidence
+            # against the requested value rather than for it.
             observed = self._readback(warnings)
+            if observed:
+                reported = self.metadata.cal_value("UG", range_index) if self.metadata else None
+                if reported is None or not math.isfinite(reported):
+                    warnings.append(
+                        f"readback reply reported no user gain for range {range_index}; "
+                        "'after' reflects the requested state"
+                    )
+                    observed = False
+                elif abs(reported - gain) > 1e-6 * max(1.0, abs(gain)):
+                    warnings.append(
+                        f"device reports user gain {reported} for range {range_index} "
+                        f"after requesting {gain}"
+                    )
+                    observed = False
             change = StateChange(
                 "set_user_gain",
                 {"range_index": range_index, "gain": gain},

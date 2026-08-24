@@ -96,6 +96,8 @@ from ..types import (
     VOLTAGE_MAX_MV,
     VOLTAGE_MIN_MV,
     Mode,
+    StateChange,
+    VoltageBasis,
 )
 from ..units import format_si, parse_channel_set, parse_current_ua, parse_duration_s
 from .main import COMMAND_CATEGORIES, STATE_CHANGING_COMMANDS, build_parser
@@ -196,6 +198,75 @@ def _fmt_fingerprint(fingerprint: dict[str, Any]) -> str:
         f"keys={fingerprint.get('metadata_key_count')} "
         f"ports={'unknown' if ports is None else ports}"
     )
+
+
+#: Where a source voltage came from, in words. Keyed on the JSON value rather
+#: than the enum member so a state dict carried in a change record renders the
+#: same as a live one, and so an unknown value can be printed as it arrived
+#: instead of being mapped onto a phrasing that would misstate it.
+_VOLTAGE_BASIS_TEXT = {
+    VoltageBasis.CALLER_OVERRIDE.value: "supplied by the caller",
+    VoltageBasis.CONFIGURED_SOURCE.value: "configured this session",
+    VoltageBasis.DEVICE_METADATA.value: "read from device metadata",
+    VoltageBasis.UNKNOWN.value: "basis unknown",
+}
+
+
+def _fmt_state_value(value: Any) -> str:
+    """One state field for a human; ``None`` prints as unknown, never as a
+    plausible-looking default."""
+    if value is None:
+        return "UNKNOWN"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _fmt_state_lines(state: dict[str, Any]) -> list[str]:
+    """Device state as indented lines, the voltage carrying its basis.
+
+    The basis is a parenthetical on the voltage rather than a field of its
+    own: it is the only thing that says whether that number describes the DUT
+    or is a leftover regulator setpoint, and a separate line invites reading
+    the voltage without it.
+    """
+    voltage = _fmt_state_value(state.get("source_voltage_mv"))
+    basis = state.get("source_voltage_basis")
+    if basis is not None:
+        voltage += f" ({_VOLTAGE_BASIS_TEXT.get(str(basis), str(basis))})"
+    return [
+        f"  mode: {_fmt_state_value(state.get('mode'))}",
+        f"  source_voltage_mv: {voltage}",
+        f"  dut_power: {_fmt_state_value(state.get('dut_power'))}",
+        f"  measuring: {_fmt_state_value(state.get('measuring'))}",
+    ]
+
+
+def _fmt_change_lines(change: StateChange) -> list[str]:
+    """One state change as requested, before -> after, and what was confirmed.
+
+    The readback marker is the part that cannot be inferred from the values:
+    ``after`` is the requested state whenever ``observed_after`` is false, and
+    it looks identical to a state the device reported back.
+    """
+    verb = "applied" if change.applied else "would apply"
+    requested = ", ".join(f"{k}={_fmt_state_value(v)}" for k, v in change.requested.items())
+    lines = [f"{change.operation} ({verb}):", f"  requested: {requested or '(no arguments)'}"]
+    lines.extend(
+        [
+            f"  {field}: {_fmt_state_value(change.before.get(field))} -> {_fmt_state_value(value)}"
+            for field, value in change.after.items()
+            if change.before.get(field) != value
+        ]
+        or ["  no state field changed"]
+    )
+    if change.applied:
+        lines[-1] += (
+            "   [verified on device]"
+            if change.observed_after
+            else "   [not read back — 'after' reflects the request]"
+        )
+    return lines
 
 
 def _fmt_stats(stats: dict[str, Any]) -> str:
@@ -322,12 +393,20 @@ def cmd_info(args: Any) -> Outcome:
                     "unconfirmed (the flag's meaning is not hardware-verified)",
                 )
             )
+        state = device.state.to_json()
         human = "\n".join(
             [
                 f"device: {device.info.serial_number}"
                 + (" (simulated)" if device.info.simulated else ""),
-                f"mode: {device.state.to_json()['mode']}",
+                f"mode: {state['mode']}",
                 f"source_voltage_mv: {device.state.source_voltage_mv}",
+                # Printed because the JSON has carried them all along and the
+                # human form did not: `dut_power` unknown is the state a
+                # near-zero reading is explained by, and the voltage's basis
+                # is what says whether that number describes the DUT at all.
+                f"dut_power: {_fmt_state_value(state['dut_power'])}",
+                f"measuring: {_fmt_state_value(state['measuring'])}",
+                f"source_voltage_basis: {state['source_voltage_basis']}",
                 f"calibrated: {metadata.calibrated}",
                 f"metadata terminated: {metadata.terminated}",
                 f"firmware fingerprint: {_fmt_fingerprint(fingerprint)}",
@@ -830,25 +909,31 @@ def cmd_configure(args: Any) -> Outcome:
                 )
             )
         for change in changes:
-            for text in change.warnings:
-                # Only a genuine readback failure earns the code an agent
-                # branches on; explanatory notes are not state uncertainty.
-                unverified = (
-                    change.applied
-                    and not change.observed_after
-                    and ("read back" in text or "readback" in text)
+            # A change's own warnings are prose about the operation; whether
+            # the device confirmed the result is a separate fact the record
+            # already states, so it is read from `observed_after` rather than
+            # pattern-matched out of a sentence anyone could reword.
+            warnings.extend(warn(W_GENERIC, text) for text in change.warnings)
+            if change.applied and not change.observed_after:
+                warnings.append(
+                    warn(
+                        W_STATE_UNVERIFIED,
+                        f"{change.operation}: applied but the resulting state was not "
+                        "read back from the device",
+                    )
                 )
-                warnings.append(warn(W_STATE_UNVERIFIED if unverified else W_GENERIC, text))
         result = {
             "dry_run": dry_run,
             "changes": [c.to_json() for c in changes],
             "state": device.state.to_json(),
         }
-        lines = []
+        lines: list[str] = []
         for change in changes:
-            verb = "would apply" if dry_run else "applied"
-            lines.append(f"{verb} {change.operation}: {change.requested}")
-        lines.append(f"state: {device.state.to_json()}")
+            lines.extend(_fmt_change_lines(change))
+        # A dry run's trailing state is the state the device is still in, not
+        # the projected one; calling it "after" would read as the projection.
+        lines.append("state (unchanged):" if dry_run else "state after:")
+        lines.extend(_fmt_state_lines(device.state.to_json()))
         return Outcome(result, warnings, "\n".join(lines))
     finally:
         # configure intentionally leaves the applied state in place

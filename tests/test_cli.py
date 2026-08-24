@@ -97,6 +97,54 @@ def test_configure_dry_run_default(capsys):
     assert any(w["code"] == "W_DRY_RUN" for w in payload["warnings"])
 
 
+def test_configure_human_output_shows_the_transition_and_the_readback(capsys):
+    """The human form has to answer both questions the JSON answers: what
+    moved, and whether the device confirmed it. A dict repr of the final state
+    answered neither."""
+    code = main(["--simulate", "configure", "--voltage-mv", "3300", "--apply"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "set_source_voltage_mv (applied):" in out
+    assert "requested: voltage_mv=3300" in out
+    assert "source_voltage_mv: 3000 -> 3300" in out
+    assert "[verified on device]" in out
+    assert "state after:" in out
+    # The basis is what says whether that voltage describes the DUT.
+    assert "3300 (configured this session)" in out
+
+
+def test_configure_dry_run_human_output_claims_nothing(capsys):
+    code = main(["--simulate", "configure", "--voltage-mv", "3300"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "set_source_voltage_mv (would apply):" in out
+    assert "source_voltage_mv: 3000 -> 3300" in out
+    # Nothing was applied, so neither readback marker may appear.
+    assert "verified on device" not in out
+    assert "not read back" not in out
+    assert "state (unchanged):" in out
+
+
+def test_configure_marks_an_unverifiable_change(capsys):
+    """DUT power has no readback at all: the human line has to say so, and
+    the warning code an agent branches on has to be there too."""
+    code = main(["--simulate", "configure", "--dut-power", "on", "--apply"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "dut_power: UNKNOWN -> true" in captured.out
+    assert "[not read back" in captured.out
+    assert "W_STATE_UNVERIFIED" in captured.err
+
+
+def test_info_human_output_reports_the_unknowable_fields(capsys):
+    code = main(["--simulate", "info"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "dut_power: UNKNOWN" in out
+    assert "measuring: false" in out
+    assert "source_voltage_basis: device_metadata" in out
+
+
 def test_configure_voltage_refused(capsys):
     code, payload = run_json(
         capsys, "--simulate", "--json", "configure", "--voltage-mv", "9000", "--apply"

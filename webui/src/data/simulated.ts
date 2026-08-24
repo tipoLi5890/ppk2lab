@@ -285,6 +285,14 @@ export class SimulatedSource implements DataSource {
           fingerprint: "HW=2 IA=0 keys=38",
         },
         state: this.deviceState(),
+        // Nothing sits between this source and the chart, so the pipeline is
+        // exactly what the simulated device is doing -- reported rather than
+        // hard-coded, because the rail's Live button reads it.
+        stream: {
+          running: this.streaming,
+          phase: this.streaming ? "running" : "stopped",
+          reason: null,
+        },
         calibration: this.calibration(),
         assumedVoltageMv: this.assumedVoltageMv,
         connection: CONNECTED,

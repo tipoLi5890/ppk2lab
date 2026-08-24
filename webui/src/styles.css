@@ -373,6 +373,16 @@ body[data-control="on"] .lockedhint{display:none}
   background:transparent;border:0;border-right:1px solid var(--rule);
   transition:background .12s;
 }
+/* A full-width row inside the strip rather than a fifth grid row in .app:
+   the shell sizes the chart from the rows it declares, and a banner that
+   appears and disappears must not resize the trace under the reader. */
+.connbanner{
+  flex:1 1 100%;display:flex;align-items:center;gap:10px;
+  padding:7px 14px;font-size:12.5px;
+  background:var(--warn-soft);border-bottom:1px solid var(--rule);
+}
+.connbanner .val{font-family:"IBM Plex Mono",monospace;color:var(--ink-2)}
+.connbanner .btn{margin-left:auto;flex:none}
 .statuscell:last-child{border-right:0}
 .statuscell:hover{background:var(--panel-2)}
 .statuscell .lbl{flex:none}

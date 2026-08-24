@@ -1,6 +1,6 @@
-import { fmtPercent } from "../core/format";
+import { fmtPercent, fmtRelTime } from "../core/format";
 import { modeLabels } from "../core/mode";
-import type { DataSource, DeviceSnapshot } from "../data/source";
+import type { ConnectionStatus, DataSource, DeviceSnapshot } from "../data/source";
 import { useFlash, useTicker } from "../hooks";
 import { useI18n } from "../i18n";
 import { Mode } from "../types";
@@ -11,6 +11,8 @@ interface StatusBarProps {
   source: DataSource;
   snapshot: DeviceSnapshot;
   onOpen: (pane: DrawerPane) => void;
+  /** Reconnect now rather than waiting out the backoff. */
+  onRetry: () => void;
 }
 
 type Tone = "good" | "warn" | "bad" | "acc" | "unk" | "none";
@@ -23,7 +25,7 @@ type Tone = "good" | "warn" | "bad" | "acc" | "unk" | "none";
  * click away in the drawer. Keeping the explanation off this line is what lets
  * the trace have the rest of the window.
  */
-export function StatusBar({ source, snapshot, onOpen }: StatusBarProps) {
+export function StatusBar({ source, snapshot, onOpen, onRetry }: StatusBarProps) {
   const { t } = useI18n();
   useTicker(4); // stored/coverage move constantly; four reads a second is plenty
   const { state } = snapshot;
@@ -37,6 +39,9 @@ export function StatusBar({ source, snapshot, onOpen }: StatusBarProps) {
 
   return (
     <div className="statusbar">
+      {!source.simulated && snapshot.connection.phase !== "open" && (
+        <FrozenBanner connection={snapshot.connection} onRetry={onRetry} />
+      )}
       <Cell
         label={t("t_mode")}
         value={t(mode.name)}
@@ -77,6 +82,42 @@ export function StatusBar({ source, snapshot, onOpen }: StatusBarProps) {
         hint={t("c_hint")}
         onClick={() => onOpen("cal")}
       />
+    </div>
+  );
+}
+
+/**
+ * Where the trace stopped being live, said in place.
+ *
+ * The rail already carries a badge; this says the one thing a badge cannot,
+ * which is *when* the values beside it were last true. They are still the last
+ * thing the server said and none of them is being refreshed -- reading them is
+ * legitimate, believing they are current is not.
+ *
+ * The button is here rather than in the rail because this is where the reader
+ * is looking when they notice: the backoff runs to tens of seconds, and
+ * somebody who has just plugged the cable back in should not wait it out.
+ */
+function FrozenBanner({
+  connection,
+  onRetry,
+}: {
+  connection: ConnectionStatus;
+  onRetry: () => void;
+}) {
+  const { t } = useI18n();
+  // `frozenAt` is null only when this console has never been open, so there is
+  // no moment to point at and nothing to say froze. Both sentences are plain
+  // text in all four catalogues, and neither takes a placeholder -- which is
+  // why the timestamp sits beside the message rather than inside it.
+  const frozen = connection.frozenAt !== null;
+  return (
+    <div className="connbanner" role="status">
+      <span className="txt">{t(frozen ? "conn_frozen" : "conn_hint_closed")}</span>
+      {frozen && <span className="val">{fmtRelTime(connection.frozenAt!)}</span>}
+      <button type="button" className="btn sm" onClick={onRetry}>
+        {t("conn_retry")}
+      </button>
     </div>
   );
 }

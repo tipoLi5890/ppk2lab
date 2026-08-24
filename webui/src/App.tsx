@@ -205,7 +205,10 @@ export default function App() {
   // device measuring, and the difference is exactly what an operator needs
   // when a link drops: the trace freezes, and the instrument does not.
   const connected = connection.phase === "simulated" || connection.phase === "open";
-  const streaming = snapshot.state.measuring;
+  // The pipeline, not the device's last claim about itself: the server reports
+  // every start and stop, and `state.measuring` is only as fresh as the last
+  // state broadcast that happened to carry it.
+  const streaming = snapshot.stream.running;
 
   // Why energising VOUT right now would be pointless, or impossible to verify.
   const outputCaveat = !streaming
@@ -242,7 +245,12 @@ export default function App() {
           onRevertDraft={() => setDraft(applied)}
         />
 
-        <StatusBar source={source} snapshot={snapshot} onOpen={setDrawer} />
+        <StatusBar
+          source={source}
+          snapshot={snapshot}
+          onOpen={setDrawer}
+          onRetry={() => source.retryNow?.()}
+        />
 
         <Chart source={source} onHandles={handleHandles} />
 

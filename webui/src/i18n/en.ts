@@ -313,6 +313,7 @@ export const en = {
   conn_demo: "Open the simulated console",
   ev_conn_open: "Connected to the server. It holds the one open session on this device.",
   ev_conn_lost: "Connection to the server lost. Whatever the device was doing, it is still doing — this console can no longer see it.",
+  ev_server_bye: "The server closed this session ({0}). This console keeps retrying, but nothing on this screen is live until a server answers.",
   ev_conn_resync: "Reconnected. {0} samples of the timeline were never received; they are counted as loss, not interpolated over.",
   ev_desync: "This browser fell behind and {0} samples were discarded rather than buffered. Not instrument loss — the device delivered them; this console did not receive them.",
   cfg_checking: "Checking…",

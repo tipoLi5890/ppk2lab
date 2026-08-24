@@ -13,6 +13,7 @@ import {
 } from "./protocol";
 import {
   ControlRejected,
+  STREAM_PHASES,
   type ApplyPlan,
   type ConnectionStatus,
   type ConsoleEvent,
@@ -24,6 +25,8 @@ import {
   type RecordOptions,
   type RecordResult,
   type Recorder,
+  type StreamPhase,
+  type StreamStatus,
 } from "./source";
 
 /**
@@ -103,6 +106,8 @@ export class WebSocketSource implements DataSource {
 
   private info = UNKNOWN_INFO;
   private state = UNKNOWN_STATE;
+  /** Nothing is running until a server says so; `hello` says so immediately. */
+  private stream: StreamStatus = { running: false, phase: "stopped", reason: null };
   private calibration = UNKNOWN_CALIBRATION;
   private applied: DeviceConfig = { mode: Mode.SOURCE, voltageMv: 3000 };
   private assumedVoltageMv: number | null = null;
@@ -189,7 +194,10 @@ export class WebSocketSource implements DataSource {
     }
     const dt = Math.min((nowMs - this.lastTickMs) / 1000, 0.25);
     this.lastTickMs = nowMs;
-    if (this.connection.phase !== "open" || !this.state.measuring) return;
+    // Gated on the pipeline, not on `state.measuring`: that field is the
+    // device's last claim, and a claim that has not been refreshed since the
+    // stream stopped froze this clock for the whole session.
+    if (this.connection.phase !== "open" || !this.stream.running) return;
 
     const target = this.edge - TARGET_LAG_S;
     const error = target - this.displayed;
@@ -210,6 +218,7 @@ export class WebSocketSource implements DataSource {
       this.snapshotCache = {
         info: this.info,
         state: this.state,
+        stream: this.stream,
         calibration: this.calibration,
         assumedVoltageMv: this.assumedVoltageMv,
         maxVoltageMv: this.maxVoltageMv,
@@ -300,6 +309,16 @@ export class WebSocketSource implements DataSource {
     )) as StateChange;
   }
 
+  /**
+   * The returned steps are the caller's receipt, not this console's state.
+   *
+   * The server broadcasts every applied step as a `state` message to every
+   * connection, this one included, so the snapshot and the session log are
+   * already correct by the time this resolves. Writing them from the reply as
+   * well would give one console a second, racing path into the store that the
+   * others do not have -- and the two would disagree the moment a step was
+   * applied by somebody else.
+   */
   async applyPlan(plan: ApplyPlan): Promise<StateChange[]> {
     const result = (await this.command(
       "apply_plan",
@@ -380,6 +399,13 @@ export class WebSocketSource implements DataSource {
         this.onGap(message);
         return;
       case "stream":
+        this.onStream(message);
+        return;
+      case "bye":
+        // A server that closed on purpose, which is not the same as a socket
+        // that dropped. Reconnection stays with the link's own backoff; what
+        // the log gains is the difference between the two.
+        this.log("warn", "bye", "ev_server_bye", [String(message.reason ?? "")]);
         this.notify();
         return;
       case "desync":
@@ -423,6 +449,12 @@ export class WebSocketSource implements DataSource {
     this.sessionCeiling = (limits.max_voltage_mv as number | null) ?? null;
     this.maxVoltageMv = this.sessionCeiling;
     this.stateSeq = (message.state_seq as number) ?? null;
+    // `hello` carries the boolean and not the phase (`protocol.hello`), so the
+    // console starts from exactly what it was told; the first `stream` message
+    // refines it. Without this the chart clock would sit still until one
+    // arrived, on a session that has been running for hours.
+    const streaming = message.streaming === true;
+    this.stream = { running: streaming, phase: streaming ? "running" : "stopped", reason: null };
 
     if (!this.helloSeen) {
       // Recorded once. A reconnection continues the same timeline, so t = 0
@@ -451,10 +483,34 @@ export class WebSocketSource implements DataSource {
     this.notify();
   }
 
+  /**
+   * The pipeline's own report. It never writes `state.measuring`.
+   *
+   * `measuring` is the device's claim and arrives on a `state` message; this is
+   * what the server is doing with the result. A plan mid-flight is a measuring
+   * device behind an `applying` pipeline, and collapsing the two would make one
+   * of those facts unavailable to the operator at the moment it mattered.
+   */
+  private onStream(message: Record<string, unknown>): void {
+    this.stream = {
+      running: message.running === true,
+      // `phase` is an open string on the wire (`protocol.stream`). One this
+      // build does not know is not rendered as one it does; `running` is the
+      // fact the clock and the rail act on, and that one is a boolean.
+      phase: isStreamPhase(message.phase) ? message.phase : this.stream.phase,
+      reason: (message.reason as string | null) ?? null,
+    };
+    this.notify();
+  }
+
   private onCounters(message: Record<string, unknown>): void {
     // Assigned, never accumulated. The server knows about samples this console
     // never received, so accumulating from what arrived would report a clean
     // session over a hole -- and assignment repairs itself after any drop.
+    //
+    // No `notify()`: these move ten times a second and every reader of them
+    // already rides the 4 Hz `useTicker`, so a render per message would be
+    // work nobody can see.
     this.decimator.totalStored = Number(message.total_stored ?? 0);
     this.decimator.totalMissing = Number(message.total_missing ?? 0);
     this.decimator.gapCount = Number(message.gap_count ?? 0);
@@ -619,6 +675,10 @@ function stateFrom(raw: unknown): DeviceState {
     source_voltage_basis: (state.source_voltage_basis as DeviceState["source_voltage_basis"]) ??
       "unknown",
   };
+}
+
+function isStreamPhase(raw: unknown): raw is StreamPhase {
+  return typeof raw === "string" && (STREAM_PHASES as readonly string[]).includes(raw);
 }
 
 function configFrom(state: DeviceState): DeviceConfig {

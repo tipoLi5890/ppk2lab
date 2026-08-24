@@ -65,6 +65,33 @@ export interface ConnectionStatus {
   reasonKey: MessageKey | null;
 }
 
+/**
+ * What the server's sample pipeline is doing, as the server reports it.
+ *
+ * Deliberately not folded into `state.measuring`. That field is the *device's*
+ * claim, carried by a `state` message; this is what the server is doing with
+ * the result, carried by a `stream` message. They disagree honestly -- a plan
+ * mid-flight leaves a measuring device behind a pipeline that is `applying` --
+ * and writing either one from the other would hide whichever the operator
+ * needed.
+ */
+export type StreamPhase = "running" | "stopped" | "applying" | "recording" | "stalled";
+
+export interface StreamStatus {
+  running: boolean;
+  phase: StreamPhase;
+  /** Why, when the server said so. A code, never a rendered sentence. */
+  reason: string | null;
+}
+
+export const STREAM_PHASES: readonly StreamPhase[] = [
+  "running",
+  "stopped",
+  "applying",
+  "recording",
+  "stalled",
+];
+
 export const CONNECTED: ConnectionStatus = {
   phase: "simulated",
   attempt: 0,
@@ -86,6 +113,8 @@ export interface PlanPreview {
 export interface DeviceSnapshot {
   info: DeviceInfo;
   state: DeviceState;
+  /** The server's pipeline, which is not the same fact as `state.measuring`. */
+  stream: StreamStatus;
   calibration: Calibration;
   /** Set only through an explicit assumption, never inferred. */
   assumedVoltageMv: number | null;
@@ -236,6 +265,13 @@ export interface DataSource {
 
   setAssumedVoltageMv(mv: number | null): void;
   setMaxVoltageMv(mv: number | null): void;
+
+  /**
+   * Reconnect now instead of waiting out the backoff. Present only on a source
+   * that has a link to lose -- the simulated console never does, which is why
+   * the button that calls it is drawn only when one is not open.
+   */
+  retryNow?(): void;
 
   readonly demo?: DemoControls;
   /**

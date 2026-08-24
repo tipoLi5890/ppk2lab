@@ -315,6 +315,7 @@ export const zhHant: Record<MessageKey, string> = {
   conn_demo: "開啟模擬主控台",
   ev_conn_open: "已連上伺服器。它持有這台裝置唯一的 open session。",
   ev_conn_lost: "與伺服器的連線中斷。裝置原本在做什麼就還在做什麼——只是這個主控台看不到了。",
+  ev_server_bye: "伺服器結束了這個工作階段（{0}）。主控台會持續重試，但在有伺服器回應之前，畫面上的一切都不是即時的。",
   ev_conn_resync: "已重新連線。時間軸上有 {0} 個樣本從未收到；它們被計為遺失，不會被內插填補。",
   ev_desync: "這個瀏覽器跟不上，{0} 個樣本被丟棄而非緩衝。這不是儀器遺失——裝置有送出，是這個主控台沒收到。",
   cfg_checking: "檢查中…",

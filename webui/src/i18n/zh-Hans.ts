@@ -315,6 +315,7 @@ export const zhHans: Record<MessageKey, string> = {
   conn_demo: "开启模拟主控台",
   ev_conn_open: "已连上服务器。它持有这台设备唯一的 open session。",
   ev_conn_lost: "与服务器的连线中断。设备原本在做什么就还在做什么——只是这个主控台看不到了。",
+  ev_server_bye: "服务器结束了这个工作阶段（{0}）。主控台会持续重试，但在有服务器回应之前，画面上的一切都不是即时的。",
   ev_conn_resync: "已重新连线。时间轴上有 {0} 个样本从未收到；它们被计为遗失，不会被内插填补。",
   ev_desync: "这个浏览器跟不上，{0} 个样本被丢弃而非缓冲。这不是仪器遗失——设备有送出，是这个主控台没收到。",
   cfg_checking: "检查中…",

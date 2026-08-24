@@ -273,41 +273,42 @@ describe("the link", () => {
   });
 });
 
+/** A source that has completed the handshake, and the socket feeding it. */
+function connect() {
+  const source = new WebSocketSource(linkOptions());
+  const socket = FakeSocket.instances[0]!;
+  socket.open();
+  socket.deliver(
+    JSON.stringify({
+      type: "hello",
+      protocol: PROTOCOL_VERSION,
+      session: { control_allowed: true, control_token: "t", attach_index: 0, bucket_us: 1000 },
+      device: { simulated: true, serial_number: "SIM0001" },
+      // Exactly what `DeviceState.to_json()` emits, so this fixture cannot
+      // drift into a shape the server never sends.
+      state: {
+        mode: "source",
+        source_voltage_mv: 3000,
+        dut_power: false,
+        measuring: true,
+        source_voltage_basis: "configured_source",
+      },
+      calibration: { calibrated: true, ranges: [], missing_ranges: [], terminated: true },
+      limits: { max_voltage_mv: 3600 },
+      counters: {},
+      streaming: true,
+      state_seq: 1,
+      warnings: [],
+    }),
+  );
+  return { source, socket };
+}
+
 describe("the websocket source", () => {
   beforeEach(() => {
     FakeSocket.instances = [];
     vi.useFakeTimers();
   });
-
-  function connect() {
-    const source = new WebSocketSource(linkOptions());
-    const socket = FakeSocket.instances[0]!;
-    socket.open();
-    socket.deliver(
-      JSON.stringify({
-        type: "hello",
-        protocol: PROTOCOL_VERSION,
-        session: { control_allowed: true, control_token: "t", attach_index: 0, bucket_us: 1000 },
-        device: { simulated: true, serial_number: "SIM0001" },
-        // Exactly what `DeviceState.to_json()` emits, so this fixture cannot
-        // drift into a shape the server never sends.
-        state: {
-          mode: "source",
-          source_voltage_mv: 3000,
-          dut_power: false,
-          measuring: true,
-          source_voltage_basis: "configured_source",
-        },
-        calibration: { calibrated: true, ranges: [], missing_ranges: [], terminated: true },
-        limits: { max_voltage_mv: 3600 },
-        counters: {},
-        streaming: true,
-        state_seq: 1,
-        warnings: [],
-      }),
-    );
-    return { source, socket };
-  }
 
   it("reads the mode the library actually serialises", () => {
     // `DeviceState.to_json()` emits "source" / "ampere" -- the frozen shape
@@ -442,5 +443,120 @@ describe("the websocket source", () => {
     // it stopped, and the two are reported separately.
     expect(source.snapshot().state.measuring).toBe(true);
     expect(connection.frozenAt).not.toBeNull();
+  });
+});
+
+/**
+ * What the server broadcasts, and what the console does with it.
+ *
+ * Every device-state transition arrives as a `state` message and every
+ * pipeline transition as a `stream` message, to every connection rather than
+ * only to the one that asked. These are the tests that this console reads them
+ * as broadcasts -- state that moved under it, not a reply to its own request.
+ */
+describe("staying in step with the server", () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+    vi.useFakeTimers();
+  });
+
+  /** Exactly the shape `DeviceState.to_json()` emits, one field moved. */
+  function stateMessage(fields: Record<string, unknown>, change: unknown): string {
+    return JSON.stringify({
+      type: "state",
+      state: {
+        mode: "source",
+        source_voltage_mv: 3000,
+        dut_power: false,
+        measuring: true,
+        source_voltage_basis: "configured_source",
+        ...fields,
+      },
+      change,
+      state_seq: 7,
+      config: {},
+    });
+  }
+
+  it("follows a change another console made, without waiting to reconnect", () => {
+    const { source, socket } = connect();
+    socket.deliver(
+      stateMessage(
+        { source_voltage_mv: 1800 },
+        {
+          operation: "set_source_voltage_mv",
+          requested: { voltage_mv: 1800 },
+          before: { source_voltage_mv: "3000" },
+          after: { source_voltage_mv: "1800" },
+          applied: true,
+          observed_after: true,
+          warnings: [],
+        },
+      ),
+    );
+    expect(source.snapshot().state.source_voltage_mv).toBe(1800);
+    // The staged-edit baseline is compared against this, not against the
+    // snapshot, so a config that did not follow leaves the rail showing an
+    // edit nobody made next to a live Apply button.
+    expect(source.config().voltageMv).toBe(1800);
+    const applied = source.events().filter((e) => e.messageKey === "ev_applied");
+    expect(applied).toHaveLength(1);
+    expect(applied[0]!.operation).toBe("set_source_voltage_mv");
+    expect(applied[0]!.observed).toBe(true);
+  });
+
+  it("logs nothing for a transition with no single cause", () => {
+    // The server republishes on transitions nobody asked for -- a stream that
+    // stopped, a device that went away. The state still lands; inventing a log
+    // line for it would put an operation in the log that never happened.
+    const { source, socket } = connect();
+    const before = source.events().length;
+    socket.deliver(stateMessage({ measuring: false }, null));
+    expect(source.snapshot().state.measuring).toBe(false);
+    expect(source.events()).toHaveLength(before);
+  });
+
+  it("takes the pipeline phase from the server and keeps it apart from the device's claim", () => {
+    const { source, socket } = connect();
+    expect(source.snapshot().stream).toEqual({ running: true, phase: "running", reason: null });
+
+    const before = source.snapshot();
+    socket.deliver(
+      JSON.stringify({ type: "stream", running: false, phase: "applying", reason: "apply_plan" }),
+    );
+    const after = source.snapshot();
+    expect(after.stream).toEqual({ running: false, phase: "applying", reason: "apply_plan" });
+    // A new identity, or `useSyncExternalStore` renders nothing.
+    expect(after).not.toBe(before);
+    // `measuring` is the device's own claim and only a `state` message moves
+    // it. A pipeline that is mid-apply is not a device that stopped.
+    expect(after.state.measuring).toBe(true);
+  });
+
+  it("runs the chart clock on the pipeline, not on a claim that has gone stale", () => {
+    // This is the frozen-chart bug: `hello` said the stream was running, a
+    // later `state` still carried `measuring: false` from before it started,
+    // and the clock a `measuring` gate produced never moved again.
+    const { source, socket } = connect();
+    socket.deliver(stateMessage({ measuring: false }, null));
+    socket.deliver(packBuckets([BUCKET, BUCKET], 0));
+    source.tick(0);
+    source.tick(100);
+    expect(source.now()).toBeGreaterThan(0);
+
+    // And it does stop when the pipeline stops, which is the other half.
+    socket.deliver(JSON.stringify({ type: "stream", running: false, phase: "stopped" }));
+    socket.deliver(packBuckets([BUCKET, BUCKET], 200));
+    const held = source.now();
+    source.tick(200);
+    expect(source.now()).toBe(held);
+  });
+
+  it("says the server closed the session rather than leaving it as a dropped socket", () => {
+    const { source, socket } = connect();
+    socket.deliver(JSON.stringify({ type: "bye", reason: "shutdown" }));
+    const last = source.events().at(-1)!;
+    expect(last.messageKey).toBe("ev_server_bye");
+    expect(last.args).toEqual(["shutdown"]);
   });
 });

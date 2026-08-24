@@ -209,8 +209,38 @@ function VoltagePane({
   // the PPK2 is supplying the DUT.
   const isSource = snapshot.state.mode === Mode.SOURCE;
   const pending = draft.voltageMv !== snapshot.state.source_voltage_mv;
-  const [ceiling, setCeiling] = useState(String(snapshot.maxVoltageMv ?? ""));
-  const [assumed, setAssumed] = useState(snapshot.assumedVoltageMv === null ? "" : String(snapshot.assumedVoltageMv));
+
+  // Follow the snapshot until the operator types, then stop.
+  //
+  // Both fields are text a person edits, so they cannot simply be derived: a
+  // half-typed "18" must not be rewritten to 1800 under the cursor. But
+  // `useState` read them once, at mount, and both move afterwards -- the
+  // ceiling arrives with `hello`, milliseconds after this pane can be opened,
+  // and the assumption is session state another render can change. The field
+  // then showed a number that was no longer in force.
+  //
+  // So: track what the snapshot said when the field was last in step with it.
+  // If it moved and nothing has been typed, follow; if something has, keep the
+  // draft and let the two disagree, which is the honest thing to show.
+  // The inequality guards matter -- an unconditional setState during render is
+  // an infinite loop, not a stale value.
+  const ceilingNow = String(snapshot.maxVoltageMv ?? "");
+  const [ceiling, setCeiling] = useState(ceilingNow);
+  const [ceilingBase, setCeilingBase] = useState(ceilingNow);
+  if (ceilingBase !== ceilingNow) {
+    const untouched = ceiling === ceilingBase;
+    setCeilingBase(ceilingNow);
+    if (untouched) setCeiling(ceilingNow);
+  }
+
+  const assumedNow = snapshot.assumedVoltageMv === null ? "" : String(snapshot.assumedVoltageMv);
+  const [assumed, setAssumed] = useState(assumedNow);
+  const [assumedBase, setAssumedBase] = useState(assumedNow);
+  if (assumedBase !== assumedNow) {
+    const untouched = assumed === assumedBase;
+    setAssumedBase(assumedNow);
+    if (untouched) setAssumed(assumedNow);
+  }
 
   return (
     <section>
